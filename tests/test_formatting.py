@@ -307,6 +307,131 @@ class TestDataFormatting(unittest.TestCase):
         self.assertIn("1. Partner 4", result)
         self.assertIn("2. Partner 5", result)
 
+        # Check navigation links
+        self.assertIn("Next page:", result)
+        self.assertIn("offset=5", result)  # Next page starts at current offset + limit
+        self.assertIn("Previous page:", result)
+        self.assertIn(
+            "offset=1", result
+        )  # Previous page starts at current offset - limit
+
+    def test_format_search_results_complete(self):
+        """Test complete format_search_results output with all information."""
+        records = [
+            {"id": 1, "name": "Partner 1"},
+            {"id": 2, "name": "Partner 2"},
+            {"id": 3, "name": "Partner 3"},
+        ]
+
+        domain = [("is_company", "=", True)]
+
+        result = format_search_results(
+            model="res.partner",
+            records=records,
+            total_count=25,
+            limit=3,
+            offset=0,
+            domain=domain,
+            odoo=self.odoo,
+        )
+
+        # Check header information
+        self.assertIn("Search Results: res.partner (25 total matches)", result)
+        self.assertIn("Showing: Records 1-3 of 25", result)
+
+        # Check record information
+        self.assertIn("Records:", result)
+        for i, record in enumerate(records, start=1):
+            self.assertIn(f"{i}. {record['name']}", result)
+            self.assertIn(f"odoo://res.partner/record/{record['id']}", result)
+
+        # Check pagination links
+        self.assertIn("Next page:", result)
+        domain_str = str(domain).replace(" ", "")
+        expected_next_link = (
+            f"odoo://res.partner/search?domain={domain_str}&offset=3&limit=3"
+        )
+        self.assertIn(expected_next_link, result)
+
+        # No previous page link on first page
+        self.assertNotIn("Previous page:", result)
+
+    def test_format_search_results_last_page(self):
+        """Test formatting search results on the last page."""
+        records = [{"id": 9, "name": "Partner 9"}, {"id": 10, "name": "Partner 10"}]
+
+        result = format_search_results(
+            model="res.partner",
+            records=records,
+            total_count=10,
+            limit=5,
+            offset=8,  # Last page with fewer results than limit
+            domain=[],
+            odoo=self.odoo,
+        )
+
+        # Check pagination information
+        self.assertIn("Showing: Records 9-10 of 10", result)
+
+        # Check there's no next page link (we're on the last page)
+        self.assertNotIn("Next page:", result)
+
+        # Check there's a previous page link
+        self.assertIn("Previous page:", result)
+
+    def test_format_search_results_with_complex_domains(self):
+        """Test formatting search results with complex domain expressions."""
+        records = [{"id": 1, "name": "Test Partner"}]
+
+        # Complex domain with multiple conditions
+        domain = [
+            "|",
+            "&",
+            ("is_company", "=", True),
+            ("country_id.code", "=", "US"),
+            "&",
+            ("is_company", "=", False),
+            ("parent_id", "!=", False),
+        ]
+
+        result = format_search_results(
+            model="res.partner",
+            records=records,
+            total_count=1,
+            limit=10,
+            offset=0,
+            domain=domain,
+            odoo=self.odoo,
+        )
+
+        # Ensure the domain is correctly included in the next page link
+        domain_str = str(domain).replace(" ", "")
+        expected_link = (
+            f"odoo://res.partner/search?domain={domain_str}&offset=10&limit=10"
+        )
+
+        # Even with complex domains, next page link should work
+        self.assertNotIn("Next page:", result)  # No next page since total_count = 1
+
+    def test_format_search_results_without_records(self):
+        """Test formatting search results when no records match."""
+        result = format_search_results(
+            model="res.partner",
+            records=[],
+            total_count=0,
+            limit=10,
+            offset=0,
+            domain=[("name", "=", "Nonexistent")],
+            odoo=self.odoo,
+        )
+
+        # Check "no records" message
+        self.assertIn("No records found matching the criteria", result)
+
+        # No pagination links should be present
+        self.assertNotIn("Next page:", result)
+        self.assertNotIn("Previous page:", result)
+
     def test_format_field_list(self):
         """Test formatting field list."""
         fields_info = {

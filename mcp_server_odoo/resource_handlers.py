@@ -210,33 +210,81 @@ class SearchResourceHandler(BaseResourceHandler):
                 domain_str = params["domain"]
                 # Handle both string and array formats
                 if isinstance(domain_str, str):
-                    domain = json.loads(domain_str)
+                    try:
+                        # First, try parsing as JSON
+                        domain = json.loads(domain_str)
+                    except json.JSONDecodeError:
+                        # If that fails, try to handle Odoo's string format like [('field','=',value)]
+                        # This is a common format in Odoo but not valid JSON
+                        logger.warning(f"Failed to parse domain as JSON: {domain_str}")
+                        # For now, we'll raise an error - this format requires custom parsing
+                        raise ResourceHandlerError(
+                            f"Invalid domain format: {domain_str}. Use valid JSON array format."
+                        )
+                elif isinstance(domain_str, list):
+                    domain = domain_str
+
+                # Validate domain structure - simple check to ensure it's a list
+                if not isinstance(domain, list):
+                    raise ResourceHandlerError(
+                        "Invalid domain structure: domain must be a list"
+                    )
+
+                # Ensure all domain items are properly formatted as lists, not tuples
+                # (This addresses tuple vs list representation differences)
+                for i, item in enumerate(domain):
+                    if isinstance(item, tuple):
+                        domain[i] = list(item)
+                    elif isinstance(item, list) and len(item) == 3:
+                        # Already in the right format
+                        pass
+                    # Skip logical operators (&, |, !) - they're just strings
+                    elif item in ("&", "|", "!"):
+                        pass
+                    else:
+                        # All other domain items should be 3-element lists
+                        if not (isinstance(item, list) and len(item) == 3):
+                            raise ResourceHandlerError(
+                                f"Invalid domain item format: {item}. Expected [field, operator, value]"
+                            )
             except json.JSONDecodeError:
                 raise ResourceHandlerError(f"Invalid domain format: {params['domain']}")
+            except Exception as e:
+                logger.error(f"Error parsing domain: {e}", exc_info=True)
+                raise ResourceHandlerError(f"Error parsing domain: {e}")
 
-        # Parse other parameters
-        fields = (
-            params.get("fields", "").split(",")
-            if "fields" in params and params["fields"]
-            else None
-        )
+        # Parse fields parameter - supports comma-separated string or list
+        fields = None
+        if "fields" in params and params["fields"]:
+            if isinstance(params["fields"], str):
+                fields = [f.strip() for f in params["fields"].split(",") if f.strip()]
+            elif isinstance(params["fields"], list):
+                fields = params["fields"]
+
+            # Validate fields are non-empty
+            if not fields:
+                fields = None
 
         # Handle limit with default and max constraints
         limit = self.default_limit
         if "limit" in params:
             try:
                 limit = int(params["limit"])
-                limit = min(limit, self.max_limit)
+                # Ensure limit is at least 1 and at most max_limit
+                limit = max(1, min(limit, self.max_limit))
             except ValueError:
-                pass
+                logger.warning(
+                    f"Invalid limit parameter: {params['limit']}, using default {self.default_limit}"
+                )
 
-        # Parse offset
+        # Parse offset, ensure non-negative
         offset = 0
         if "offset" in params:
             try:
                 offset = int(params["offset"])
+                offset = max(0, offset)  # Ensure non-negative
             except ValueError:
-                pass
+                logger.warning(f"Invalid offset parameter: {params['offset']}, using 0")
 
         # Parse order
         order = params.get("order")
@@ -277,7 +325,12 @@ class SearchResourceHandler(BaseResourceHandler):
             }
 
         except OdooConnectionError as e:
+            # Let the parent handler chain handle common errors
             raise ResourceHandlerError(str(e))
+        except Exception as e:
+            # Catch any other unexpected errors
+            logger.error(f"Error during search operation: {e}", exc_info=True)
+            raise ResourceHandlerError(f"Error during search operation: {e}")
 
 
 class BrowseResourceHandler(BaseResourceHandler):

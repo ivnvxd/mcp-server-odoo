@@ -158,14 +158,58 @@ def format_search_results(
     lines = []
 
     # Header information
+    model_display = model.replace(".", " ").title()
     lines.append(f"Search Results: {model} ({total_count} total matches)")
 
     # Pagination info
-    from_record = offset + 1
-    to_record = min(offset + limit, total_count)
-
     if total_count > 0:
+        from_record = offset + 1
+        to_record = min(offset + limit, total_count)
         lines.append(f"Showing: Records {from_record}-{to_record} of {total_count}")
+
+        # Add summary information if we have a large number of records
+        if total_count > 20:
+            # Try to get some basic model information
+            model_fields = odoo.get_model_fields(model)
+
+            # Add model-specific summaries based on available fields
+            # This is just a basic implementation - can be enhanced with more model-specific logic
+            type_field = None
+            for field_name in ["type", "state", "status", "category_id"]:
+                if field_name in model_fields:
+                    type_field = field_name
+                    break
+
+            if type_field and len(records) > 0 and type_field in records[0]:
+                # If we have type information in the results, show a simple distribution
+                types = {}
+                for record in records:
+                    record_type = record.get(type_field)
+                    if record_type:
+                        if isinstance(record_type, list):
+                            # Handle many2many/one2many fields
+                            if record_type and isinstance(record_type[0], dict):
+                                for item in record_type:
+                                    item_name = item.get("name", "Unknown")
+                                    types[item_name] = types.get(item_name, 0) + 1
+                        else:
+                            # Handle scalar or many2one fields
+                            if isinstance(record_type, dict) and "name" in record_type:
+                                record_type = record_type["name"]
+                            types[record_type] = types.get(record_type, 0) + 1
+
+                if types:
+                    type_field_label = model_fields[type_field].get(
+                        "string", type_field.capitalize()
+                    )
+                    lines.append("\nSummary:")
+                    lines.append(
+                        f"- By {type_field_label}: "
+                        + ", ".join(
+                            f"{type_name} ({count})"
+                            for type_name, count in types.items()
+                        )
+                    )
 
     # Add records
     if records:
@@ -191,21 +235,48 @@ def format_search_results(
         lines.append("\nNo records found matching the criteria.")
 
     # Add pagination links
-    if total_count > to_record:
-        # There are more records, add next page link
+    domain_str = str(domain).replace(" ", "")
+
+    # Add next page link if there are more records
+    if total_count > offset + limit:
         next_offset = offset + limit
-        domain_str = str(domain).replace(" ", "")
         lines.append(
             f"\nNext page: odoo://{model}/search?domain={domain_str}&offset={next_offset}&limit={limit}"
         )
 
+    # Add previous page link if we're not on the first page
     if offset > 0:
-        # We're not on the first page, add previous page link
         prev_offset = max(0, offset - limit)
-        domain_str = str(domain).replace(" ", "")
         lines.append(
             f"Previous page: odoo://{model}/search?domain={domain_str}&offset={prev_offset}&limit={limit}"
         )
+
+    # Add refinement options for large result sets
+    if total_count > 20:
+        lines.append("\nRefinement options:")
+
+        # Model-specific refinement suggestions
+        if model == "res.partner":
+            lines.append(
+                f"- Companies only: odoo://{model}/search?domain=[('is_company','=',True)]"
+            )
+            lines.append(
+                f"- Individuals only: odoo://{model}/search?domain=[('is_company','=',False)]"
+            )
+        elif model == "product.product":
+            lines.append(
+                f"- Stockable products: odoo://{model}/search?domain=[('type','=','product')]"
+            )
+            lines.append(
+                f"- Services: odoo://{model}/search?domain=[('type','=','service')]"
+            )
+        elif model == "sale.order":
+            lines.append(
+                f"- Draft orders: odoo://{model}/search?domain=[('state','=','draft')]"
+            )
+            lines.append(
+                f"- Confirmed orders: odoo://{model}/search?domain=[('state','=','sale')]"
+            )
 
     return "\n".join(lines)
 

@@ -1,10 +1,13 @@
 """Tests for resource handlers."""
 
+import json
 import unittest
+import urllib.parse
 from unittest.mock import MagicMock, patch
 
 from mcp import Resource
 
+from mcp_server_odoo.odoo_connection import OdooConnectionError
 from mcp_server_odoo.resource_handlers import (
     BrowseResourceHandler,
     CountResourceHandler,
@@ -259,6 +262,246 @@ class TestSearchResourceHandlerFunctions(unittest.TestCase):
             # Verify Odoo methods were called
             self.odoo.count.assert_called_once()
             self.odoo.search.assert_called_once()
+
+    def test_domain_parsing_and_validation(self):
+        """Test domain parameter parsing and validation."""
+        # Domain as string - use lists instead of tuples to match what Odoo expects
+        domain = [["is_company", "=", True], ["customer_rank", ">", 0]]
+        domain_str = json.dumps(domain)
+
+        resource = Resource(
+            uri=f"odoo://res.partner/search?domain={urllib.parse.quote(domain_str)}",
+            name="Partner Search with Domain",
+        )
+
+        # Mock Odoo responses
+        self.odoo.count.return_value = 5
+        self.odoo.search.return_value = [{"id": 1, "name": "Test Company"}]
+
+        # Use patch to mock the formatter
+        with patch(
+            "mcp_server_odoo.resource_handlers.format_search_results"
+        ) as mock_format:
+            mock_format.return_value = "Formatted domain search results"
+
+            # Handle the resource
+            self.handler.handle(resource)
+
+            # Verify domain was correctly passed to Odoo methods
+            self.odoo.count.assert_called_once_with("res.partner", domain)
+            self.odoo.search.assert_called_once()
+            search_args = self.odoo.search.call_args
+            self.assertEqual(search_args[1]["domain"], domain)
+
+    def test_invalid_domain_format(self):
+        """Test handling of invalid domain format."""
+        # Invalid JSON in domain
+        resource = Resource(
+            uri="odoo://res.partner/search?domain=invalid_json",
+            name="Invalid Domain Search",
+        )
+
+        # Should raise a ResourceHandlerError
+        with self.assertRaises(ResourceHandlerError) as context:
+            self.handler.handle(resource)
+
+        # Check error message
+        self.assertIn("Invalid domain format", str(context.exception))
+
+    def test_field_selection(self):
+        """Test field selection from 'fields' parameter."""
+        # Resource with fields parameter
+        fields = "name,email,phone"
+        resource = Resource(
+            uri=f"odoo://res.partner/search?fields={fields}",
+            name="Partner Search with Fields",
+        )
+
+        # Mock Odoo responses
+        self.odoo.count.return_value = 2
+        self.odoo.search.return_value = [
+            {"id": 1, "name": "Partner 1", "email": "p1@example.com"},
+            {"id": 2, "name": "Partner 2", "email": "p2@example.com"},
+        ]
+
+        # Use patch to mock the formatter
+        with patch(
+            "mcp_server_odoo.resource_handlers.format_search_results"
+        ) as mock_format:
+            # Handle the resource
+            self.handler.handle(resource)
+
+            # Verify fields were correctly passed to Odoo search
+            self.odoo.search.assert_called_once()
+            search_args = self.odoo.search.call_args
+            self.assertEqual(search_args[1]["fields"], fields.split(","))
+
+    def test_pagination_parameters(self):
+        """Test pagination parameters (limit and offset)."""
+        # Resource with pagination parameters
+        resource = Resource(
+            uri="odoo://res.partner/search?limit=5&offset=10",
+            name="Paginated Partner Search",
+        )
+
+        # Mock Odoo responses
+        self.odoo.count.return_value = 15
+        self.odoo.search.return_value = [{"id": 11, "name": "Partner 11"}]
+
+        # Use patch to mock the formatter
+        with patch(
+            "mcp_server_odoo.resource_handlers.format_search_results"
+        ) as mock_format:
+            # Handle the resource
+            self.handler.handle(resource)
+
+            # Verify pagination parameters were correctly passed
+            self.odoo.search.assert_called_once()
+            search_args = self.odoo.search.call_args
+            self.assertEqual(search_args[1]["limit"], 5)
+            self.assertEqual(search_args[1]["offset"], 10)
+
+            # Check formatter received correct parameters
+            mock_format.assert_called_once()
+            format_args = mock_format.call_args[1]
+            self.assertEqual(format_args["limit"], 5)
+            self.assertEqual(format_args["offset"], 10)
+            self.assertEqual(format_args["total_count"], 15)
+
+    def test_limit_constraints(self):
+        """Test limit parameter constraints (default and max)."""
+        # Test with limit exceeding max_limit
+        resource = Resource(
+            uri="odoo://res.partner/search?limit=200",  # max is 100
+            name="Partner Search with Large Limit",
+        )
+
+        # Mock Odoo responses
+        self.odoo.count.return_value = 5
+        self.odoo.search.return_value = []
+
+        # Use patch to mock the formatter
+        with patch(
+            "mcp_server_odoo.resource_handlers.format_search_results"
+        ) as mock_format:
+            # Handle the resource
+            self.handler.handle(resource)
+
+            # Verify limit was capped to max_limit
+            self.odoo.search.assert_called_once()
+            search_args = self.odoo.search.call_args
+            self.assertEqual(search_args[1]["limit"], 100)  # capped to max_limit
+
+        # Test with no limit (should use default)
+        self.odoo.reset_mock()
+        resource = Resource(
+            uri="odoo://res.partner/search",
+            name="Partner Search with Default Limit",
+        )
+
+        # Handle the resource
+        with patch(
+            "mcp_server_odoo.resource_handlers.format_search_results"
+        ) as mock_format:
+            self.handler.handle(resource)
+
+            # Verify default limit was used
+            self.odoo.search.assert_called_once()
+            search_args = self.odoo.search.call_args
+            self.assertEqual(search_args[1]["limit"], 10)  # default limit
+
+    def test_ordering(self):
+        """Test ordering parameter."""
+        # Resource with order parameter
+        resource = Resource(
+            uri="odoo://res.partner/search?order=name desc",
+            name="Ordered Partner Search",
+        )
+
+        # Mock Odoo responses
+        self.odoo.count.return_value = 2
+        self.odoo.search.return_value = [
+            {"id": 2, "name": "Partner Z"},
+            {"id": 1, "name": "Partner A"},
+        ]
+
+        # Use patch to mock the formatter
+        with patch(
+            "mcp_server_odoo.resource_handlers.format_search_results"
+        ) as mock_format:
+            # Handle the resource
+            self.handler.handle(resource)
+
+            # Verify order parameter was passed correctly
+            self.odoo.search.assert_called_once()
+            search_args = self.odoo.search.call_args
+            self.assertEqual(search_args[1]["order"], "name desc")
+
+    def test_empty_results(self):
+        """Test handling of empty search results."""
+        # Mock Odoo responses for empty results
+        self.odoo.count.return_value = 0
+        self.odoo.search.return_value = []
+
+        # Use proper JSON format for the domain
+        domain = [["name", "=", "Nonexistent"]]
+        domain_str = json.dumps(domain)
+
+        resource = Resource(
+            uri=f"odoo://res.partner/search?domain={urllib.parse.quote(domain_str)}",
+            name="Empty Search Results",
+        )
+
+        # Use patch to check format_search_results is called with empty records
+        with patch(
+            "mcp_server_odoo.resource_handlers.format_search_results"
+        ) as mock_format:
+            # Handle the resource
+            self.handler.handle(resource)
+
+            # Verify formatter was called with empty records list
+            mock_format.assert_called_once()
+            format_args = mock_format.call_args[1]
+            self.assertEqual(format_args["records"], [])
+            self.assertEqual(format_args["total_count"], 0)
+
+    def test_search_with_invalid_model(self):
+        """Test search with a model that doesn't exist or isn't enabled."""
+        resource = Resource(
+            uri="odoo://nonexistent.model/search",
+            name="Invalid Model Search",
+        )
+
+        # Mock OdooConnectionError for invalid model
+        self.odoo.count.side_effect = OdooConnectionError(
+            "Model 'nonexistent.model' is not enabled for MCP access"
+        )
+
+        # Should raise a ResourceHandlerError
+        with self.assertRaises(ResourceHandlerError) as context:
+            self.handler.handle(resource)
+
+        # Check error message contains Odoo error
+        self.assertIn("not enabled for MCP access", str(context.exception))
+
+    def test_search_with_security_error(self):
+        """Test search when user doesn't have access rights."""
+        resource = Resource(
+            uri="odoo://res.partner/search",
+            name="Security Error Search",
+        )
+
+        # Mock OdooConnectionError for security error
+        self.odoo.count.side_effect = OdooConnectionError(
+            "Access denied: You don't have access rights for this operation"
+        )
+
+        # Should raise a ResourceHandlerError
+        with self.assertRaises(ResourceHandlerError) as context:
+            self.handler.handle(resource)
+
+        # Check error message contains security error
+        self.assertIn("Access denied", str(context.exception))
 
 
 class TestCountResourceHandlerFunctions(unittest.TestCase):
