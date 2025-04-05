@@ -31,7 +31,7 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov",
-    "pytest-asyncio",
+    "pytest-asyncio>=0.21.0",
     "black",
     "isort",
     "mypy",
@@ -57,3 +57,6 @@ strict = true
 [tool.ruff]
 line-length = 88
 target-version = "py310"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

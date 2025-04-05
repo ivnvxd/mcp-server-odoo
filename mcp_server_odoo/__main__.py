@@ -69,14 +69,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def get_config(args: argparse.Namespace) -> Dict[str, str]:
+def get_config(args: argparse.Namespace) -> Dict[str, any]:
     """Get configuration from arguments and environment variables.
 
     Args:
         args: Parsed command line arguments
 
     Returns:
-        Dict[str, str]: Configuration dictionary
+        Dict[str, any]: Configuration dictionary with proper types
 
     Raises:
         ValueError: If required configuration is missing
@@ -87,30 +87,40 @@ def get_config(args: argparse.Namespace) -> Dict[str, str]:
     else:
         dotenv.load_dotenv()  # Try to load from default .env location
 
-    # Configuration mapping: arg_name -> (env_var_name, required)
+    # Configuration mapping: arg_name -> (env_var_name, required, type_converter)
     config_map = {
-        "url": ("ODOO_URL", True),
-        "db": ("ODOO_DB", True),
-        "token": ("ODOO_MCP_TOKEN", True),
-        "log_level": ("ODOO_MCP_LOG_LEVEL", False),
-        "default_limit": ("ODOO_MCP_DEFAULT_LIMIT", False),
-        "max_limit": ("ODOO_MCP_MAX_LIMIT", False),
+        "url": ("ODOO_URL", True, str),
+        "db": ("ODOO_DB", True, str),
+        "token": ("ODOO_MCP_TOKEN", True, str),
+        "log_level": ("ODOO_MCP_LOG_LEVEL", False, str),
+        "default_limit": ("ODOO_MCP_DEFAULT_LIMIT", False, int),
+        "max_limit": ("ODOO_MCP_MAX_LIMIT", False, int),
     }
 
     config = {}
     missing_required = []
 
     # Process each configuration item
-    for arg_name, (env_name, required) in config_map.items():
+    for arg_name, (env_name, required, type_converter) in config_map.items():
         # Get value from args or environment
         arg_value = getattr(args, arg_name)
         env_value = os.environ.get(env_name)
 
         # Use arg value if provided, otherwise use env value
         if arg_value is not None:
-            config[arg_name] = arg_value
+            try:
+                config[arg_name] = type_converter(arg_value)
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid value for {arg_name}: {arg_value}")
+                if required:
+                    missing_required.append(f"--{arg_name} or {env_name}")
         elif env_value is not None:
-            config[arg_name] = env_value
+            try:
+                config[arg_name] = type_converter(env_value)
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid value for {env_name}: {env_value}")
+                if required:
+                    missing_required.append(f"--{arg_name} or {env_name}")
         elif required:
             missing_required.append(f"--{arg_name} or {env_name}")
 
@@ -140,8 +150,8 @@ def main() -> None:
             odoo_url=config["url"],
             odoo_db=config["db"],
             odoo_token=config["token"],
-            default_limit=int(config.get("default_limit", 20)),
-            max_limit=int(config.get("max_limit", 100)),
+            default_limit=config.get("default_limit", 20),
+            max_limit=config.get("max_limit", 100),
         )
 
         # Start the server

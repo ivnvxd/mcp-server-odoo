@@ -13,9 +13,10 @@ from typing import AsyncIterator
 from mcp import Resource
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
+from mcp.server.stdio import stdio_server
 from mcp.types import ServerCapabilities
 
-from mcp_server_odoo.odoo_connection import OdooConnection
+from mcp_server_odoo.odoo_connection import OdooConnection, OdooConnectionError
 from mcp_server_odoo.resource_handlers import ResourceHandlerRegistry
 
 logger = logging.getLogger(__name__)
@@ -163,11 +164,11 @@ class MCPOdooServer:
             logging={"verbosity": "info"},
         )
 
-    def start(self) -> None:
-        """Start the MCP server with stdio transport.
+    async def run_async(self) -> None:
+        """Run the MCP server asynchronously with stdio transport.
 
-        This method initializes the server and begins listening for
-        client messages using the stdio transport.
+        This method asynchronously starts the server and handles
+        client communication using the stdio transport.
         """
         try:
             # Create initialization options
@@ -177,10 +178,39 @@ class MCPOdooServer:
                 capabilities=self.get_capabilities(),
             )
 
-            # Start server using the stdin/stdout transport
             logger.info("Starting MCP Server for Odoo")
-            asyncio.run(self.server.run(sys.stdin, sys.stdout, init_options))
 
+            # Use the stdio_server context manager to get read/write streams
+            async with stdio_server() as (read_stream, write_stream):
+                # Run the server with standard stdio transport
+                await self.server.run(
+                    read_stream,
+                    write_stream,
+                    init_options,
+                )
+
+            logger.info("MCP Server for Odoo shutdown successfully")
+
+        except OdooConnectionError as e:
+            logger.error(f"Odoo connection error: {e}")
+            raise
+        except Exception as e:
+            logger.exception(f"Error running MCP server: {e}")
+            raise
+
+    def start(self) -> None:
+        """Start the MCP server with stdio transport.
+
+        This method initializes the server and begins listening for
+        client messages using the stdio transport.
+        """
+        try:
+            # Run the async server in the asyncio event loop
+            asyncio.run(self.run_async())
+
+        except OdooConnectionError as e:
+            logger.error(f"Odoo connection error: {e}")
+            sys.exit(1)
         except Exception as e:
             logger.exception(f"Failed to start MCP server: {e}")
             sys.exit(1)

@@ -1,12 +1,15 @@
 """Tests for the MCP server implementation."""
 
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
 from mcp import Resource
 import mcp.server
+import mcp.server.stdio
 
-from mcp_server_odoo.server import MCPOdooServer
+from mcp_server_odoo.server import MCPOdooServer, odoo_lifespan
 
 
 class TestMCPOdooServer(unittest.TestCase):
@@ -132,6 +135,209 @@ class TestMCPOdooServer(unittest.TestCase):
         finally:
             # Restore the original run method
             self.server.server.run = original_run
+
+    def test_initialization_with_defaults(self):
+        """Test server initialization with default values."""
+        # Create a server with minimal required parameters
+        server = MCPOdooServer(
+            odoo_url="http://test.odoo.com",
+            odoo_db="test_db",
+            odoo_token="test_token",
+        )
+
+        # Check default values were applied
+        self.assertEqual(server.default_limit, 20)
+        self.assertEqual(server.max_limit, 100)
+
+    def test_get_capabilities(self):
+        """Test that the server returns correct capabilities."""
+        capabilities = self.server.get_capabilities()
+
+        # Check resource capabilities
+        self.assertIsNotNone(capabilities.resources)
+        self.assertTrue(capabilities.resources.listResources)
+
+        # Check that tools and prompts are disabled
+        self.assertIsNone(capabilities.tools)
+        self.assertIsNone(capabilities.prompts)
+
+        # Check logging capability
+        self.assertIsNotNone(capabilities.logging)
+        self.assertEqual(capabilities.logging.verbosity, "info")
+
+
+@pytest.mark.asyncio
+async def test_odoo_lifespan():
+    """Test the odoo_lifespan context manager."""
+    # Mock the server
+    server_mock = MagicMock()
+
+    # Mock OdooConnection
+    odoo_mock = MagicMock()
+
+    # Mock ResourceHandlerRegistry
+    registry_mock = MagicMock()
+
+    with (
+        patch(
+            "mcp_server_odoo.server.OdooConnection", return_value=odoo_mock
+        ) as odoo_class_mock,
+        patch(
+            "mcp_server_odoo.server.ResourceHandlerRegistry", return_value=registry_mock
+        ) as registry_class_mock,
+    ):
+        # Test successful lifespan execution
+        async with odoo_lifespan(
+            server_mock, "http://test.odoo.com", "test_db", "test_token"
+        ) as context:
+            # Check that connection was tested
+            odoo_mock.test_connection.assert_called_once()
+
+            # Check that context contains expected objects
+            assert context.odoo == odoo_mock
+            assert context.registry == registry_mock
+
+            # Check registry was created with correct parameters
+            registry_class_mock.assert_called_once_with(
+                odoo=odoo_mock, default_limit=20, max_limit=100
+            )
+
+
+@pytest.mark.asyncio
+async def test_odoo_lifespan_error_handling():
+    """Test error handling in odoo_lifespan."""
+    # Mock the server
+    server_mock = MagicMock()
+
+    # Mock OdooConnection
+    odoo_mock = MagicMock()
+    odoo_mock.test_connection.side_effect = Exception("Connection failed")
+
+    with patch("mcp_server_odoo.server.OdooConnection", return_value=odoo_mock):
+        # Test exception during lifespan execution
+        with pytest.raises(Exception, match="Connection failed"):
+            async with odoo_lifespan(
+                server_mock, "http://test.odoo.com", "test_db", "test_token"
+            ):
+                pass
+
+
+def test_env_var_config_defaults(env_vars_cleanup):
+    """Test environment variable configuration with defaults."""
+    # Reset environment variables
+    for key in list(os.environ.keys()):
+        if key.startswith("ODOO_"):
+            del os.environ[key]
+
+    # Set basic environment variables
+    os.environ["ODOO_URL"] = "http://env.odoo.com"
+    os.environ["ODOO_DB"] = "env_db"
+    os.environ["ODOO_MCP_TOKEN"] = "env_token"
+
+    # Import the module fresh
+    from importlib import import_module
+    import sys
+
+    if "mcp_server_odoo.__main__" in sys.modules:
+        del sys.modules["mcp_server_odoo.__main__"]
+    main_module = import_module("mcp_server_odoo.__main__")
+
+    # Create mock args
+    args = MagicMock()
+    args.url = None
+    args.db = None
+    args.token = None
+    args.log_level = None
+    args.default_limit = None
+    args.max_limit = None
+    args.env_file = None
+
+    # Call get_config
+    config = main_module.get_config(args)
+
+    # Verify config
+    assert config["url"] == "http://env.odoo.com"
+    assert config["db"] == "env_db"
+    assert config["token"] == "env_token"
+    assert "default_limit" not in config or config["default_limit"] == 20
+    assert "max_limit" not in config or config["max_limit"] == 100
+
+
+def test_env_var_config_custom_limits(env_vars_cleanup):
+    """Test environment variable configuration with custom limits."""
+    # Reset environment variables
+    for key in list(os.environ.keys()):
+        if key.startswith("ODOO_"):
+            del os.environ[key]
+
+    # Set environment variables with custom limits
+    os.environ["ODOO_URL"] = "http://env.odoo.com"
+    os.environ["ODOO_DB"] = "env_db"
+    os.environ["ODOO_MCP_TOKEN"] = "env_token"
+    os.environ["ODOO_MCP_DEFAULT_LIMIT"] = "30"
+    os.environ["ODOO_MCP_MAX_LIMIT"] = "200"
+
+    # Import the module fresh
+    from importlib import import_module
+    import sys
+
+    if "mcp_server_odoo.__main__" in sys.modules:
+        del sys.modules["mcp_server_odoo.__main__"]
+    main_module = import_module("mcp_server_odoo.__main__")
+
+    # Create mock args
+    args = MagicMock()
+    args.url = None
+    args.db = None
+    args.token = None
+    args.log_level = None
+    args.default_limit = None
+    args.max_limit = None
+    args.env_file = None
+
+    # Call get_config
+    config = main_module.get_config(args)
+
+    # Verify config
+    assert config["url"] == "http://env.odoo.com"
+    assert config["db"] == "env_db"
+    assert config["token"] == "env_token"
+    assert config["default_limit"] == 30
+    assert config["max_limit"] == 200
+
+
+def test_missing_required_config(env_vars_cleanup):
+    """Test error handling when required configuration is missing."""
+    # Reset environment variables
+    for key in list(os.environ.keys()):
+        if key.startswith("ODOO_"):
+            del os.environ[key]
+
+    # Import the main function directly
+    from importlib import import_module
+    import sys
+
+    if "mcp_server_odoo.__main__" in sys.modules:
+        del sys.modules["mcp_server_odoo.__main__"]
+    main_module = import_module("mcp_server_odoo.__main__")
+
+    # Create mock args with missing URL
+    args = MagicMock()
+    args.url = None
+    args.db = "test_db"
+    args.token = "test_token"
+    args.log_level = None
+    args.default_limit = None
+    args.max_limit = None
+    args.env_file = None
+
+    # Call get_config and check for ValueError
+    with pytest.raises(ValueError) as excinfo:
+        main_module.get_config(args)
+
+    # Check error message
+    assert "Missing required configuration" in str(excinfo.value)
+    assert "ODOO_URL" in str(excinfo.value)
 
 
 if __name__ == "__main__":
