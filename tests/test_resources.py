@@ -551,6 +551,58 @@ class TestCountResourceHandlerFunctions(unittest.TestCase):
         # Verify Odoo method was called with empty domain by default
         self.odoo.count.assert_called_once_with("res.partner", [])
 
+    def test_handle_with_domain(self):
+        """Test count operation with domain filter."""
+        # Mock Odoo response
+        self.odoo.count.return_value = 15
+
+        # Create a mock Resource with domain
+        domain = [["is_company", "=", True]]
+        encoded_domain = json.dumps(domain)
+        resource = Resource(
+            uri=f"odoo://res.partner/count?domain={encoded_domain}",
+            name="Count with Domain",
+        )
+
+        # Handle the resource
+        result = self.handler.handle(resource)
+
+        # Check result
+        self.assertFalse(result["is_error"])
+        self.assertIn("15", result["content"][0]["text"])
+
+        # Verify domain was correctly passed to Odoo
+        self.odoo.count.assert_called_once_with("res.partner", domain)
+
+    def test_handle_with_invalid_domain(self):
+        """Test error handling with invalid domain format."""
+        # Create a mock Resource with invalid domain
+        resource = Resource(
+            uri="odoo://res.partner/count?domain=invalid_domain", name="Invalid Domain"
+        )
+
+        # Should raise a ResourceHandlerError
+        with self.assertRaises(ResourceHandlerError) as context:
+            self.handler.handle(resource)
+
+        # Check error message
+        self.assertIn("Invalid domain format", str(context.exception))
+
+    def test_handle_with_odoo_error(self):
+        """Test handling of Odoo connection errors."""
+        # Mock Odoo to raise an error
+        self.odoo.count.side_effect = OdooConnectionError("Access denied")
+
+        # Create a mock Resource
+        resource = Resource(uri="odoo://res.partner/count", name="Error Resource")
+
+        # Should raise a ResourceHandlerError
+        with self.assertRaises(ResourceHandlerError) as context:
+            self.handler.handle(resource)
+
+        # Check error message
+        self.assertIn("Access denied", str(context.exception))
+
 
 class TestBrowseResourceHandlerFunctions(unittest.TestCase):
     """Test browse resource handler functionality."""
@@ -610,6 +662,95 @@ class TestBrowseResourceHandlerFunctions(unittest.TestCase):
 
             # Verify Odoo method was called with the right parameters
             self.odoo.read.assert_called_once_with("res.partner", [1, 2], None)
+
+    def test_handle_with_fields(self):
+        """Test browse with specific fields."""
+        # Mock Odoo response
+        self.odoo.read.return_value = [
+            {"id": 1, "name": "Partner 1"},
+            {"id": 2, "name": "Partner 2"},
+        ]
+
+        # Create a mock Resource with fields
+        resource = Resource(
+            uri="odoo://res.partner/browse?ids=1,2&fields=name,email,phone",
+            name="Browse with Fields",
+        )
+
+        # Use patch to mock the formatter function
+        with patch("mcp_server_odoo.resource_handlers.format_record") as mock_format:
+            mock_format.return_value = "Formatted record with specific fields"
+
+            # Handle the resource
+            result = self.handler.handle(resource)
+
+            # Check result
+            self.assertFalse(result["is_error"])
+
+            # Verify Odoo method was called with the right fields
+            self.odoo.read.assert_called_once_with(
+                "res.partner", [1, 2], ["name", "email", "phone"]
+            )
+
+    def test_handle_no_ids(self):
+        """Test error when no IDs are provided."""
+        # Create a mock Resource without IDs
+        resource = Resource(uri="odoo://res.partner/browse", name="No IDs")
+
+        # Should raise a ResourceHandlerError
+        with self.assertRaises(ResourceHandlerError) as context:
+            self.handler.handle(resource)
+
+        # Check error message
+        self.assertIn("No record IDs provided", str(context.exception))
+
+    def test_handle_invalid_ids(self):
+        """Test error with invalid ID format."""
+        # Create a mock Resource with invalid IDs
+        resource = Resource(
+            uri="odoo://res.partner/browse?ids=abc,def", name="Invalid IDs"
+        )
+
+        # Should raise a ResourceHandlerError
+        with self.assertRaises(ResourceHandlerError) as context:
+            self.handler.handle(resource)
+
+        # Check error message
+        self.assertIn("Invalid ids format", str(context.exception))
+
+    def test_handle_no_records_found(self):
+        """Test error when no records are found."""
+        # Mock Odoo to return empty list
+        self.odoo.read.return_value = []
+
+        # Create a mock Resource
+        resource = Resource(
+            uri="odoo://res.partner/browse?ids=99999", name="Non-existent Records"
+        )
+
+        # Should raise a ResourceHandlerError
+        with self.assertRaises(ResourceHandlerError) as context:
+            self.handler.handle(resource)
+
+        # Check error message
+        self.assertIn("No records found", str(context.exception))
+
+    def test_handle_odoo_error(self):
+        """Test handling of Odoo connection errors."""
+        # Mock Odoo to raise an error
+        self.odoo.read.side_effect = OdooConnectionError("Access denied")
+
+        # Create a mock Resource
+        resource = Resource(
+            uri="odoo://res.partner/browse?ids=1,2", name="Error Resource"
+        )
+
+        # Should raise a ResourceHandlerError
+        with self.assertRaises(ResourceHandlerError) as context:
+            self.handler.handle(resource)
+
+        # Check error message
+        self.assertIn("Access denied", str(context.exception))
 
 
 class TestFieldsResourceHandlerFunctions(unittest.TestCase):
