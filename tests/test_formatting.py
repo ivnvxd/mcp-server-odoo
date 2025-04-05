@@ -79,6 +79,10 @@ class TestDataFormatting(unittest.TestCase):
 
     def test_format_field_value_many2one(self):
         """Test formatting many2one field."""
+        # Setup the mock to return an empty field definition
+        # This will cause the formatter to use the field name as the relation
+        self.odoo.get_model_fields.return_value = {}
+
         result = format_field_value(
             field_name="Partner",
             field_value=[1, "Test Partner"],
@@ -88,8 +92,43 @@ class TestDataFormatting(unittest.TestCase):
         )
         self.assertEqual(result, "Partner: Test Partner [odoo://Partner/record/1]")
 
+        # Now let's test with a proper relation definition
+        self.odoo.get_model_fields.return_value = {
+            "partner": {
+                "type": "many2one",
+                "string": "Partner",
+                "relation": "res.partner",
+            }
+        }
+
+        result = format_field_value(
+            field_name="Partner",
+            field_value=[1, "Test Partner"],
+            field_type="many2one",
+            model="test.model",
+            odoo=self.odoo,
+        )
+        self.assertEqual(result, "Partner: Test Partner [odoo://res.partner/record/1]")
+
     def test_format_record(self):
         """Test formatting a complete record."""
+        # Setup mock to provide field definitions
+        self.odoo.get_model_fields.return_value = {
+            "name": {"type": "char", "string": "Name"},
+            "age": {"type": "integer", "string": "Age"},
+            "is_active": {"type": "boolean", "string": "Active"},
+            "partner_id": {
+                "type": "many2one",
+                "string": "Partner",
+                "relation": "res.partner",
+            },
+            "tag_ids": {
+                "type": "many2many",
+                "string": "Tags",
+                "relation": "res.partner.category",
+            },
+        }
+
         record = {
             "id": 1,
             "name": "Test Record",
@@ -111,7 +150,9 @@ class TestDataFormatting(unittest.TestCase):
         self.assertIn("Age: 30", result)
         self.assertIn("Active: Yes", result)
         self.assertIn("Partner: Test Partner", result)
+        self.assertIn("res.partner/record/2", result)  # Check for relation URI
         self.assertIn("Tags: 3 related records", result)
+        self.assertIn("res.partner.category/browse", result)  # Check for relation URI
 
 
 if __name__ == "__main__":

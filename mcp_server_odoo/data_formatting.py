@@ -7,6 +7,7 @@ human-readable text suitable for MCP resources.
 import logging
 from typing import Any, Dict, List
 
+from mcp_server_odoo.field_formatters import format_field
 from mcp_server_odoo.odoo_connection import OdooConnection
 
 logger = logging.getLogger(__name__)
@@ -35,82 +36,21 @@ def format_field_value(
     """
     indent_str = "  " * indent
 
-    # Handle null values
-    if field_value is None:
-        return f"{indent_str}{field_name}: Not set"
+    # Use the field formatters system
+    formatted = format_field(
+        field_name=field_name,
+        field_value=field_value,
+        field_type=field_type,
+        model=model,
+        odoo=odoo,
+    )
 
-    # Handle different field types
-    if field_type == "char" or field_type == "text":
-        return f"{indent_str}{field_name}: {field_value}"
+    # Apply indentation
+    if indent > 0:
+        lines = formatted.split("\n")
+        return "\n".join(f"{indent_str}{line}" for line in lines)
 
-    elif field_type == "integer":
-        return f"{indent_str}{field_name}: {field_value}"
-
-    elif field_type == "float":
-        return f"{indent_str}{field_name}: {field_value}"
-
-    elif field_type == "monetary":
-        # TODO: Get currency from record
-        return f"{indent_str}{field_name}: {field_value}"
-
-    elif field_type == "boolean":
-        if field_value is False:
-            return f"{indent_str}{field_name}: No"
-        return f"{indent_str}{field_name}: Yes"
-
-    elif field_type == "date":
-        return f"{indent_str}{field_name}: {field_value}"
-
-    elif field_type == "datetime":
-        return f"{indent_str}{field_name}: {field_value}"
-
-    elif field_type == "selection":
-        return f"{indent_str}{field_name}: {field_value}"
-
-    elif field_type == "many2one":
-        # For many2one, field_value is typically [id, name]
-        if isinstance(field_value, list) and len(field_value) == 2:
-            related_id, related_name = field_value
-            relation = (
-                odoo.get_model_fields(model)
-                .get(field_name.lower(), {})
-                .get("relation", "")
-            )
-            if not relation:
-                # Fallback to using the field name if relation is not found
-                relation = field_name
-            return (
-                f"{indent_str}{field_name}: {related_name} "
-                f"[odoo://{relation}/record/{related_id}]"
-            )
-        else:
-            return f"{indent_str}{field_name}: {field_value}"
-
-    elif field_type == "one2many" or field_type == "many2many":
-        # For *2many fields, value is usually a list of IDs
-        if isinstance(field_value, list):
-            count = len(field_value)
-            # Get the relation model from field metadata
-            field_info = odoo.get_model_fields(model).get(field_name.lower(), {})
-            relation = field_info.get("relation", "")
-
-            if relation and count > 0:
-                ids_str = ",".join(str(i) for i in field_value)
-                return (
-                    f"{indent_str}{field_name}: {count} related records "
-                    f"[odoo://{relation}/browse?ids={ids_str}]"
-                )
-            else:
-                return f"{indent_str}{field_name}: {count} related records"
-        else:
-            return f"{indent_str}{field_name}: {field_value}"
-
-    elif field_type == "binary":
-        return f"{indent_str}{field_name}: [Binary data]"
-
-    else:
-        # Default for unknown types
-        return f"{indent_str}{field_name}: {field_value}"
+    return formatted
 
 
 def format_record(
