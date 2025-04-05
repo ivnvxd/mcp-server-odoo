@@ -46,18 +46,27 @@ class OdooConnectionPool:
         self._init_done = True
         logger.debug("OdooConnectionPool initialized")
 
-    def get_connection(self, url: str, db: str, token: str) -> "OdooConnection":
+    def get_connection(
+        self,
+        url: str,
+        db: str,
+        token: str,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+    ) -> "OdooConnection":
         """Get a connection from the pool or create a new one.
 
         Args:
             url: URL of the Odoo instance
             db: Database name
             token: MCP authentication token
+            username: Optional username for Odoo authentication
+            password: Optional password for Odoo authentication
 
         Returns:
             OdooConnection: A connection object
         """
-        conn_key = (url, db, token)
+        conn_key = (url, db, token, username, password)
 
         with self._lock:
             # Clean up expired connections first
@@ -85,7 +94,7 @@ class OdooConnectionPool:
 
             # Create new connection
             logger.info(f"Creating new connection for {url}, {db}")
-            connection = OdooConnection(url, db, token)
+            connection = OdooConnection(url, db, token, username, password)
 
             # Save to the pool
             self._connections[conn_key] = (connection, time.time())
@@ -141,17 +150,28 @@ class OdooConnection:
     XML-RPC calls to Odoo.
     """
 
-    def __init__(self, url: str, db: str, token: str):
+    def __init__(
+        self,
+        url: str,
+        db: str,
+        token: str,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+    ):
         """Initialize Odoo connection.
 
         Args:
             url: URL of the Odoo instance
             db: Database name
             token: MCP authentication token
+            username: Optional username for Odoo authentication
+            password: Optional password for Odoo authentication
         """
         self.url = url.rstrip("/")
         self.db = db
         self.token = token
+        self.username = username
+        self.password = password
 
         # Initialize XML-RPC endpoints
         self.common_endpoint = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/common")
@@ -203,10 +223,39 @@ class OdooConnection:
             OdooConnectionError: If authentication fails
         """
         try:
-            # Authenticate with custom MCP method
-            uid = self._execute_with_retry(
-                "mcp.server", "authenticate_token", [self.token], use_uid=False
-            )
+            # If username and password are provided, use them to authenticate first
+            auth_uid = None
+            if self.username and self.password:
+                auth_uid = self.common_endpoint.authenticate(
+                    self.db, self.username, self.password, {}
+                )
+                if not auth_uid:
+                    raise OdooConnectionError(
+                        f"Failed to authenticate with credentials for user: {self.username}"
+                    )
+                logger.info(
+                    f"Successfully authenticated as user {self.username} with ID: {auth_uid}"
+                )
+
+                # Verify the MCP token using authenticated user
+                uid = self._execute_with_retry(
+                    "mcp.server",
+                    "authenticate_token",
+                    [self.token],
+                    use_uid=True,
+                    auth_credentials=(auth_uid, self.password),
+                )
+            else:
+                # Direct token authentication using XML-RPC
+                # We use uid=1 (default admin) for the initial call when we don't have our own uid yet
+                # This is safe because the token itself will be validated by Odoo
+                uid = self._execute_with_retry(
+                    "mcp.server",
+                    "authenticate_token",
+                    [self.token],
+                    use_uid=False,
+                    auth_credentials=None,
+                )
 
             if not uid:
                 raise OdooConnectionError("Invalid MCP token")
@@ -391,18 +440,20 @@ class OdooConnection:
         self,
         model: str,
         method: str,
-        args: List,
+        args: List[Any],
         kwargs: Optional[Dict[str, Any]] = None,
         use_uid: bool = True,
+        auth_credentials: Optional[Tuple[int, str]] = None,
     ) -> Any:
-        """Execute an XML-RPC method with retry logic.
+        """Execute a method on the model with retries.
 
         Args:
             model: Model name
             method: Method name
             args: Positional arguments
             kwargs: Keyword arguments
-            use_uid: Whether to use UID for authentication (False for auth methods)
+            use_uid: Whether to use UID for authentication
+            auth_credentials: Optional tuple of (uid, password) for authentication
 
         Returns:
             Any: Method result
@@ -413,11 +464,19 @@ class OdooConnection:
         if kwargs is None:
             kwargs = {}
 
-        # Use UID 1 (admin) for unauthenticated calls
-        uid = self.uid if use_uid and self.uid else 1
+        # Use provided credentials or current uid
+        if auth_credentials:
+            uid, password = auth_credentials
+        else:
+            # Use current uid if authenticated, or 1 (admin) as fallback
+            uid = self.uid if use_uid and self.uid else 1
+
+            # For password: first try the provided password,
+            # then 'admin' to maintain compatibility with existing tests
+            password = self.password if self.password else "admin"
 
         # Prepare call arguments - ensure empty lists are explicitly passed
-        base_args = [self.db, uid, "admin", model, method, args]
+        base_args = [self.db, uid, password, model, method, args]
         if kwargs:
             base_args.append(kwargs)
 
@@ -458,7 +517,13 @@ class OdooConnection:
         )
 
 
-def get_odoo_connection(url: str, db: str, token: str) -> OdooConnection:
+def get_odoo_connection(
+    url: str,
+    db: str,
+    token: str,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> OdooConnection:
     """Get a connection from the pool or create a new one.
 
     This is the preferred way to get an OdooConnection instead of
@@ -468,9 +533,11 @@ def get_odoo_connection(url: str, db: str, token: str) -> OdooConnection:
         url: URL of the Odoo instance
         db: Database name
         token: MCP authentication token
+        username: Optional username for Odoo authentication
+        password: Optional password for Odoo authentication
 
     Returns:
         OdooConnection: A connection object from the pool
     """
     pool = OdooConnectionPool()
-    return pool.get_connection(url, db, token)
+    return pool.get_connection(url, db, token, username, password)

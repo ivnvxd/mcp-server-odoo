@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import sys
-from typing import Dict, Any
+from typing import Any, Dict
 
 import dotenv
 import requests
@@ -40,12 +40,18 @@ def parse_args() -> argparse.Namespace:
         help="Odoo database name (env: ODOO_DB). If not specified, will try to auto-detect the default database.",
     )
     parser.add_argument("--token", help="Odoo API token (env: ODOO_MCP_TOKEN)")
+    parser.add_argument(
+        "--username", help="Odoo username for authentication (env: ODOO_USERNAME)"
+    )
+    parser.add_argument(
+        "--password", help="Odoo password for authentication (env: ODOO_PASSWORD)"
+    )
 
     # Configuration parameters
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Log level (env: ODOO_LOG_LEVEL, default: INFO)",
+        help="Log level (env: ODOO_MCP_LOG_LEVEL, default: INFO)",
     )
     parser.add_argument(
         "--default-limit",
@@ -156,7 +162,9 @@ def get_config(args: argparse.Namespace) -> Dict[str, Any]:
         "url": ("ODOO_URL", True, None, str),
         "db": ("ODOO_DB", False, None, str),
         "token": ("ODOO_MCP_TOKEN", True, None, str),
-        "log_level": ("ODOO_LOG_LEVEL", False, "INFO", str),
+        "username": ("ODOO_USERNAME", False, None, str),
+        "password": ("ODOO_PASSWORD", False, None, str),
+        "log_level": ("ODOO_MCP_LOG_LEVEL", False, "INFO", str),
         "default_limit": ("ODOO_MCP_DEFAULT_LIMIT", False, 50, int),
         "max_limit": ("ODOO_MCP_MAX_LIMIT", False, 100, int),
     }
@@ -242,6 +250,8 @@ def main() -> None:
             odoo_url=config["url"],
             odoo_db=config["db"],
             odoo_token=config["token"],
+            odoo_username=config.get("username"),
+            odoo_password=config.get("password"),
             default_limit=config.get("default_limit", 50),
             max_limit=config.get("max_limit", 100),
         )

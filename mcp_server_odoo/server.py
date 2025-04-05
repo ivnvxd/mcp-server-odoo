@@ -8,7 +8,7 @@ import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from mcp import Resource
 from mcp.server import Server
@@ -46,6 +46,8 @@ async def odoo_lifespan(
     odoo_url: str,
     odoo_db: str,
     odoo_token: str,
+    odoo_username: Optional[str] = None,
+    odoo_password: Optional[str] = None,
     default_limit: int = 50,
     max_limit: int = 100,
 ) -> AsyncIterator[OdooContext]:
@@ -59,6 +61,8 @@ async def odoo_lifespan(
         odoo_url: URL of the Odoo instance
         odoo_db: Odoo database name (can be auto-detected if not provided)
         odoo_token: Authentication token for Odoo MCP
+        odoo_username: Optional username for Odoo authentication
+        odoo_password: Optional password for Odoo authentication
         default_limit: Default record limit for search operations (default: 50)
         max_limit: Maximum allowed record limit (default: 100)
 
@@ -73,6 +77,8 @@ async def odoo_lifespan(
         url=odoo_url,
         db=odoo_db,
         token=odoo_token,
+        username=odoo_username,
+        password=odoo_password,
     )
 
     try:
@@ -111,6 +117,8 @@ class MCPOdooServer:
         odoo_url: str,
         odoo_db: str,
         odoo_token: str,
+        odoo_username: Optional[str] = None,
+        odoo_password: Optional[str] = None,
         default_limit: int = 50,
         max_limit: int = 100,
     ):
@@ -120,12 +128,16 @@ class MCPOdooServer:
             odoo_url: URL of the Odoo instance
             odoo_db: Odoo database name (will be auto-detected if not provided)
             odoo_token: Authentication token for Odoo MCP
+            odoo_username: Optional username for Odoo authentication
+            odoo_password: Optional password for Odoo authentication
             default_limit: Default record limit for search operations (default: 50)
             max_limit: Maximum allowed record limit (default: 100)
         """
         self.odoo_url = odoo_url
         self.odoo_db = odoo_db
         self.odoo_token = odoo_token
+        self.odoo_username = odoo_username
+        self.odoo_password = odoo_password
         self.default_limit = default_limit
         self.max_limit = max_limit
 
@@ -134,6 +146,8 @@ class MCPOdooServer:
             url=odoo_url,
             db=odoo_db,
             token=odoo_token,
+            username=odoo_username,
+            password=odoo_password,
         )
 
         # Create resource handler registry
@@ -148,7 +162,14 @@ class MCPOdooServer:
             name="odoo",
             version="0.1.0",
             lifespan=lambda server: odoo_lifespan(
-                server, odoo_url, odoo_db, odoo_token, default_limit, max_limit
+                server,
+                odoo_url,
+                odoo_db,
+                odoo_token,
+                odoo_username,
+                odoo_password,
+                default_limit,
+                max_limit,
             ),
         )
 
