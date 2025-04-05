@@ -8,6 +8,7 @@ A Model Context Protocol (MCP) server implementation for Odoo. This package allo
 - Search functionality with domain filters
 - Pagination and summarization for large datasets
 - Easy configuration through environment variables or CLI arguments
+- Auto-detection of default database when not specified
 
 ## Installation
 
@@ -22,17 +23,28 @@ uv install mcp-server-odoo
 Configure the MCP server using environment variables:
 
 - `ODOO_URL`: URL of your Odoo instance
-- `ODOO_DB`: Database name
+- `ODOO_DB`: Database name (optional - will auto-detect if not specified)
 - `ODOO_MCP_TOKEN`: Authentication token from the Odoo MCP module
 - `ODOO_MCP_LOG_LEVEL`: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-- `ODOO_MCP_DEFAULT_LIMIT`: Default record limit (default: 20)
+- `ODOO_MCP_DEFAULT_LIMIT`: Default record limit (default: 50)
 - `ODOO_MCP_MAX_LIMIT`: Maximum allowed record limit (default: 100)
 
 Or use command-line arguments:
 
 ```bash
-mcp-server-odoo --url https://example.odoo.com --db mydb --token abc123
+mcp-server-odoo --url https://example.odoo.com --token abc123
 ```
+
+### Database Auto-detection
+
+If the `ODOO_DB` environment variable or `--db` argument is not provided, the server will attempt to detect the default database for the Odoo instance automatically. This is particularly useful for single-database Odoo installations.
+
+The auto-detection process:
+
+1. Tries to query the database list endpoint (`/web/database/list`)
+2. If that fails, attempts to extract the database from the login page
+
+If auto-detection fails, you'll need to specify the database explicitly.
 
 ## Resource URI Format
 

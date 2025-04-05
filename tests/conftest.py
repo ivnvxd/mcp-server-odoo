@@ -72,8 +72,24 @@ def sample_fields_resource():
 
 @pytest.fixture
 def env_vars_cleanup():
-    """Clean up test environment variables."""
-    old_environ = os.environ.copy()
+    """Clean up test environment variables.
+
+    This fixture preserves the current environment, allows tests to modify
+    environment variables, and then restores the original state after the test.
+    """
+    # Store original environment variables
+    original_env = {}
+    for key in list(os.environ.keys()):
+        if key.startswith("ODOO_"):
+            original_env[key] = os.environ[key]
+            del os.environ[key]
+
     yield
-    os.environ.clear()
-    os.environ.update(old_environ)
+
+    # Restore original environment variables
+    for key in list(os.environ.keys()):
+        if key.startswith("ODOO_"):
+            del os.environ[key]
+
+    for key, value in original_env.items():
+        os.environ[key] = value

@@ -46,21 +46,27 @@ async def odoo_lifespan(
     odoo_url: str,
     odoo_db: str,
     odoo_token: str,
-    default_limit: int = 20,
+    default_limit: int = 50,
     max_limit: int = 100,
 ) -> AsyncIterator[OdooContext]:
     """Manage the Odoo connection lifecycle.
 
+    This context manager handles the initialization, usage, and cleanup
+    of the Odoo connection during the MCP server lifecycle.
+
     Args:
         server: MCP server instance
         odoo_url: URL of the Odoo instance
-        odoo_db: Odoo database name
+        odoo_db: Odoo database name (can be auto-detected if not provided)
         odoo_token: Authentication token for Odoo MCP
-        default_limit: Default record limit for search operations
-        max_limit: Maximum allowed record limit
+        default_limit: Default record limit for search operations (default: 50)
+        max_limit: Maximum allowed record limit (default: 100)
 
     Yields:
         OdooContext: Context with initialized Odoo connection
+
+    Raises:
+        OdooConnectionError: If connecting to Odoo fails
     """
     # Create Odoo connection
     odoo = OdooConnection(
@@ -97,7 +103,7 @@ class MCPOdooServer:
 
     This class manages the MCP server lifecycle and connects to Odoo
     using provided configuration. It handles client communication and
-    resource management.
+    resource management through the Model Context Protocol.
     """
 
     def __init__(
@@ -105,17 +111,17 @@ class MCPOdooServer:
         odoo_url: str,
         odoo_db: str,
         odoo_token: str,
-        default_limit: int = 20,
+        default_limit: int = 50,
         max_limit: int = 100,
     ):
         """Initialize the MCP Odoo Server.
 
         Args:
             odoo_url: URL of the Odoo instance
-            odoo_db: Odoo database name
+            odoo_db: Odoo database name (will be auto-detected if not provided)
             odoo_token: Authentication token for Odoo MCP
-            default_limit: Default record limit for search operations
-            max_limit: Maximum allowed record limit
+            default_limit: Default record limit for search operations (default: 50)
+            max_limit: Maximum allowed record limit (default: 100)
         """
         self.odoo_url = odoo_url
         self.odoo_db = odoo_db

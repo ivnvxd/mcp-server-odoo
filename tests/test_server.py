@@ -4,10 +4,11 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-import pytest
-from mcp import Resource
 import mcp.server
 import mcp.server.stdio
+import pytest
+import requests
+from mcp import Resource
 
 from mcp_server_odoo.server import MCPOdooServer, odoo_lifespan
 
@@ -58,7 +59,7 @@ class TestMCPOdooServer(unittest.TestCase):
         self.assertEqual(self.server.odoo_url, "http://test.odoo.com")
         self.assertEqual(self.server.odoo_db, "test_db")
         self.assertEqual(self.server.odoo_token, "test_token")
-        self.assertEqual(self.server.default_limit, 20)
+        self.assertEqual(self.server.default_limit, 50)
         self.assertEqual(self.server.max_limit, 100)
 
         # Check that the components were initialized
@@ -146,7 +147,7 @@ class TestMCPOdooServer(unittest.TestCase):
         )
 
         # Check default values were applied
-        self.assertEqual(server.default_limit, 20)
+        self.assertEqual(server.default_limit, 50)
         self.assertEqual(server.max_limit, 100)
 
     def test_get_capabilities(self):
@@ -199,7 +200,7 @@ async def test_odoo_lifespan():
 
             # Check registry was created with correct parameters
             registry_class_mock.assert_called_once_with(
-                odoo=odoo_mock, default_limit=20, max_limit=100
+                odoo=odoo_mock, default_limit=50, max_limit=100
             )
 
 
@@ -222,27 +223,53 @@ async def test_odoo_lifespan_error_handling():
                 pass
 
 
-def test_env_var_config_defaults(env_vars_cleanup):
-    """Test environment variable configuration with defaults."""
-    # Reset environment variables
+@pytest.fixture
+def clean_env_vars():
+    """Fixture to reset Odoo-specific environment variables before and after tests."""
+    # Store original environment variables
+    original_env = {}
+    for key in list(os.environ.keys()):
+        if key.startswith("ODOO_"):
+            original_env[key] = os.environ[key]
+            del os.environ[key]
+
+    yield
+
+    # Restore original environment variables
     for key in list(os.environ.keys()):
         if key.startswith("ODOO_"):
             del os.environ[key]
 
+    for key, value in original_env.items():
+        os.environ[key] = value
+
+
+@pytest.fixture
+def mock_main_module():
+    """Fixture to provide a fresh import of the main module for each test."""
+    import importlib
+    import sys
+
+    # Ensure we get a fresh copy of the module
+    if "mcp_server_odoo.__main__" in sys.modules:
+        del sys.modules["mcp_server_odoo.__main__"]
+
+    main_module = importlib.import_module("mcp_server_odoo.__main__")
+    return main_module
+
+
+def test_env_var_config_defaults(clean_env_vars, mock_main_module):
+    """Test environment variable configuration with defaults.
+
+    This test verifies that the config is properly loaded from environment
+    variables and default values are applied when not specified.
+    """
     # Set basic environment variables
     os.environ["ODOO_URL"] = "http://env.odoo.com"
     os.environ["ODOO_DB"] = "env_db"
     os.environ["ODOO_MCP_TOKEN"] = "env_token"
 
-    # Import the module fresh
-    from importlib import import_module
-    import sys
-
-    if "mcp_server_odoo.__main__" in sys.modules:
-        del sys.modules["mcp_server_odoo.__main__"]
-    main_module = import_module("mcp_server_odoo.__main__")
-
-    # Create mock args
+    # Create mock args with no values (will use env vars)
     args = MagicMock()
     args.url = None
     args.db = None
@@ -252,24 +279,27 @@ def test_env_var_config_defaults(env_vars_cleanup):
     args.max_limit = None
     args.env_file = None
 
-    # Call get_config
-    config = main_module.get_config(args)
+    with patch.object(mock_main_module, "detect_default_database", return_value=None):
+        # Call get_config
+        config = mock_main_module.get_config(args)
 
-    # Verify config
+    # Verify basic configuration was loaded from env vars
     assert config["url"] == "http://env.odoo.com"
     assert config["db"] == "env_db"
     assert config["token"] == "env_token"
-    assert "default_limit" not in config or config["default_limit"] == 20
-    assert "max_limit" not in config or config["max_limit"] == 100
+
+    # Verify default values were applied
+    assert config["log_level"] == "INFO"
+    assert config["default_limit"] == 50
+    assert config["max_limit"] == 100
 
 
-def test_env_var_config_custom_limits(env_vars_cleanup):
-    """Test environment variable configuration with custom limits."""
-    # Reset environment variables
-    for key in list(os.environ.keys()):
-        if key.startswith("ODOO_"):
-            del os.environ[key]
+def test_env_var_config_custom_limits(clean_env_vars, mock_main_module):
+    """Test environment variable configuration with custom limits.
 
+    This test verifies that custom limit values from environment variables
+    are properly loaded into the configuration.
+    """
     # Set environment variables with custom limits
     os.environ["ODOO_URL"] = "http://env.odoo.com"
     os.environ["ODOO_DB"] = "env_db"
@@ -277,15 +307,7 @@ def test_env_var_config_custom_limits(env_vars_cleanup):
     os.environ["ODOO_MCP_DEFAULT_LIMIT"] = "30"
     os.environ["ODOO_MCP_MAX_LIMIT"] = "200"
 
-    # Import the module fresh
-    from importlib import import_module
-    import sys
-
-    if "mcp_server_odoo.__main__" in sys.modules:
-        del sys.modules["mcp_server_odoo.__main__"]
-    main_module = import_module("mcp_server_odoo.__main__")
-
-    # Create mock args
+    # Create mock args with no values (will use env vars)
     args = MagicMock()
     args.url = None
     args.db = None
@@ -296,9 +318,9 @@ def test_env_var_config_custom_limits(env_vars_cleanup):
     args.env_file = None
 
     # Call get_config
-    config = main_module.get_config(args)
+    config = mock_main_module.get_config(args)
 
-    # Verify config
+    # Verify custom limits were applied
     assert config["url"] == "http://env.odoo.com"
     assert config["db"] == "env_db"
     assert config["token"] == "env_token"
@@ -306,38 +328,169 @@ def test_env_var_config_custom_limits(env_vars_cleanup):
     assert config["max_limit"] == 200
 
 
-def test_missing_required_config(env_vars_cleanup):
-    """Test error handling when required configuration is missing."""
-    # Reset environment variables
-    for key in list(os.environ.keys()):
-        if key.startswith("ODOO_"):
-            del os.environ[key]
+def test_missing_required_config(clean_env_vars, mock_main_module):
+    """Test error handling when required configuration is missing.
 
-    # Import the main function directly
-    from importlib import import_module
-    import sys
-
-    if "mcp_server_odoo.__main__" in sys.modules:
-        del sys.modules["mcp_server_odoo.__main__"]
-    main_module = import_module("mcp_server_odoo.__main__")
-
-    # Create mock args with missing URL
+    This test verifies that a ValueError is raised when required
+    configuration values are missing.
+    """
+    # Create mocked args with missing token
     args = MagicMock()
-    args.url = None
-    args.db = "test_db"
-    args.token = "test_token"
+    args.url = "http://test.odoo.com"  # URL is present
+    args.db = "test_db"  # DB is present
+    args.token = None  # Token is missing
     args.log_level = None
     args.default_limit = None
     args.max_limit = None
     args.env_file = None
 
-    # Call get_config and check for ValueError
-    with pytest.raises(ValueError) as excinfo:
-        main_module.get_config(args)
+    # Ensure auto-detection is bypassed to test only the missing token
+    with patch.object(
+        mock_main_module,
+        "detect_default_database",
+        side_effect=Exception("Skip detection"),
+    ):
+        # Call get_config and verify it raises ValueError
+        with pytest.raises(ValueError) as excinfo:
+            mock_main_module.get_config(args)
 
-    # Check error message
-    assert "Missing required configuration" in str(excinfo.value)
-    assert "ODOO_URL" in str(excinfo.value)
+        # Check error message details
+        error_msg = str(excinfo.value)
+        assert "Missing required configuration" in error_msg
+        assert "ODOO_MCP_TOKEN" in error_msg
+
+
+def test_db_autodetection(clean_env_vars, mock_main_module):
+    """Test database auto-detection when database is not specified.
+
+    This test verifies that the server will attempt to auto-detect
+    the database when not provided, and use the detected value.
+    """
+    # Set required environment variables except database
+    os.environ["ODOO_URL"] = "http://env.odoo.com"
+    os.environ["ODOO_MCP_TOKEN"] = "env_token"
+
+    # Create a detection function that returns a predictable value
+    def mock_detect(url):
+        assert url == "http://env.odoo.com", (
+            "URL passed to detection should match environment"
+        )
+        return "auto_detected_db"
+
+    # Mock the detection function
+    with patch.object(
+        mock_main_module, "detect_default_database", side_effect=mock_detect
+    ):
+        # Create mock args
+        args = MagicMock()
+        args.url = None  # Use env var
+        args.db = None  # Not specified, should trigger auto-detection
+        args.token = None  # Use env var
+        args.log_level = None
+        args.default_limit = None
+        args.max_limit = None
+        args.env_file = None
+
+        # Call get_config
+        config = mock_main_module.get_config(args)
+
+    # Verify config has the auto-detected database
+    assert config["url"] == "http://env.odoo.com"
+    assert config["db"] == "auto_detected_db"
+    assert config["token"] == "env_token"
+
+
+def test_db_autodetection_failure(clean_env_vars, mock_main_module):
+    """Test error handling when database auto-detection fails.
+
+    This test verifies that a ValueError is raised when the database
+    is not specified and auto-detection fails.
+    """
+    # Set required environment variables except database
+    os.environ["ODOO_URL"] = "http://env.odoo.com"
+    os.environ["ODOO_MCP_TOKEN"] = "env_token"
+
+    # Mock detection to fail (return empty string)
+    with patch.object(mock_main_module, "detect_default_database", return_value=""):
+        # Create mock args without database
+        args = MagicMock()
+        args.url = None  # Use env var
+        args.db = None  # Not specified, should trigger auto-detection
+        args.token = None  # Use env var
+        args.log_level = None
+        args.default_limit = None
+        args.max_limit = None
+        args.env_file = None
+
+        # Call get_config and check for ValueError
+        with pytest.raises(ValueError) as excinfo:
+            mock_main_module.get_config(args)
+
+    # Check error message format
+    error_msg = str(excinfo.value)
+    assert "Missing required configuration" in error_msg
+    assert "ODOO_DB" in error_msg
+
+
+def test_detect_default_database(clean_env_vars, mock_main_module):
+    """Test the database detection function directly.
+
+    This test verifies that the detect_default_database function
+    correctly extracts database information from Odoo responses.
+    """
+    # Test case 1: Database list endpoint returns databases
+    with patch("requests.get") as mock_get:
+        # Configure mock to return a successful response with databases
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"result": ["db1", "db2"]}
+        mock_get.return_value = mock_response
+
+        # Call the function
+        result = mock_main_module.detect_default_database("http://test.odoo.com")
+
+        # Verify correct database was returned
+        assert result == "db1"
+        mock_get.assert_called_once()
+
+    # Test case 2: Database list fails, login page has database
+    with patch("requests.get") as mock_get:
+        # First call fails or returns no databases
+        first_response = MagicMock()
+        first_response.status_code = 200
+        first_response.json.return_value = {"result": []}
+
+        # Second call returns HTML with database in input field
+        second_response = MagicMock()
+        second_response.status_code = 200
+        second_response.text = '<form><input name="db" value="login_db" /></form>'
+
+        # Configure mock to return different responses for each URL
+        def get_side_effect(url, **kwargs):
+            if "/web/database/list" in url:
+                return first_response
+            else:
+                return second_response
+
+        mock_get.side_effect = get_side_effect
+
+        # Call the function
+        result = mock_main_module.detect_default_database("http://test.odoo.com")
+
+        # Verify correct database was returned
+        assert result == "login_db"
+        assert mock_get.call_count == 2
+
+    # Test case 3: Both methods fail
+    with patch("requests.get") as mock_get:
+        # Configure both calls to fail
+        mock_get.side_effect = requests.RequestException("Connection failed")
+
+        # Call the function
+        result = mock_main_module.detect_default_database("http://test.odoo.com")
+
+        # Verify empty string is returned on failure
+        assert result == ""
 
 
 if __name__ == "__main__":
