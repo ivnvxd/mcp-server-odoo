@@ -150,6 +150,10 @@ class RecordResourceHandler(BaseResourceHandler):
 
         except OdooConnectionError as e:
             raise ResourceHandlerError(str(e))
+        except Exception as e:
+            # Catch any other unexpected errors
+            logger.error(f"Error retrieving record: {e}", exc_info=True)
+            raise ResourceHandlerError(f"Error retrieving record: {e}")
 
 
 class SearchResourceHandler(BaseResourceHandler):

@@ -71,9 +71,17 @@ def format_field_value(
         # For many2one, field_value is typically [id, name]
         if isinstance(field_value, list) and len(field_value) == 2:
             related_id, related_name = field_value
+            relation = (
+                odoo.get_model_fields(model)
+                .get(field_name.lower(), {})
+                .get("relation", "")
+            )
+            if not relation:
+                # Fallback to using the field name if relation is not found
+                relation = field_name
             return (
                 f"{indent_str}{field_name}: {related_name} "
-                f"[odoo://{field_name}/record/{related_id}]"
+                f"[odoo://{relation}/record/{related_id}]"
             )
         else:
             return f"{indent_str}{field_name}: {field_value}"
@@ -82,9 +90,9 @@ def format_field_value(
         # For *2many fields, value is usually a list of IDs
         if isinstance(field_value, list):
             count = len(field_value)
-            relation = (
-                odoo.get_model_fields(model).get(field_name, {}).get("relation", "")
-            )
+            # Get the relation model from field metadata
+            field_info = odoo.get_model_fields(model).get(field_name.lower(), {})
+            relation = field_info.get("relation", "")
 
             if relation and count > 0:
                 ids_str = ",".join(str(i) for i in field_value)
@@ -155,6 +163,12 @@ def format_record(
         "write_date",
         "message_ids",
         "message_follower_ids",
+        "activity_ids",
+        "activity_state",
+        "activity_user_id",
+        "activity_type_id",
+        "activity_date_deadline",
+        "activity_summary",
     ]
 
     for field_name in field_names:
@@ -257,33 +271,71 @@ def format_search_results(
 
 
 def format_field_list(model: str, fields_info: Dict[str, Dict[str, Any]]) -> str:
-    """Format field list for a model.
+    """Format model field definitions for display.
 
     Args:
         model: Model name
-        fields_info: Field definitions
+        fields_info: Dictionary of field definitions
 
     Returns:
         str: Formatted field list
     """
-    lines = [f"Fields for {model}:\n"]
+    lines = [f"Fields for {model}:"]
 
-    for field_name, field_info in sorted(fields_info.items()):
+    # Group fields by type
+    fields_by_type = {}
+    for field_name, field_info in fields_info.items():
         field_type = field_info.get("type", "unknown")
-        field_string = field_info.get("string", field_name)
-        field_help = field_info.get("help", "")
+        if field_type not in fields_by_type:
+            fields_by_type[field_type] = []
+        fields_by_type[field_type].append((field_name, field_info))
 
-        lines.append(f"{field_name} ({field_type}): {field_string}")
+    # Sort each group alphabetically by field name
+    for field_type in fields_by_type:
+        fields_by_type[field_type].sort(key=lambda x: x[0])
 
-        if field_help:
-            lines.append(f"  Description: {field_help}")
+    # Order of field types to display
+    type_order = [
+        "char",
+        "text",
+        "integer",
+        "float",
+        "monetary",
+        "boolean",
+        "date",
+        "datetime",
+        "selection",
+        "many2one",
+        "one2many",
+        "many2many",
+        "binary",
+    ]
 
-        # Add relation info for relational fields
-        if field_type in ("many2one", "one2many", "many2many"):
-            relation = field_info.get("relation", "")
-            if relation:
-                lines.append(f"  Related model: {relation}")
+    # Add remaining types not in the predefined order
+    for field_type in sorted(fields_by_type.keys()):
+        if field_type not in type_order:
+            type_order.append(field_type)
 
-        lines.append("")
+    # Output fields grouped by type
+    for field_type in type_order:
+        if field_type not in fields_by_type:
+            continue
 
+        lines.append(f"\n{field_type.capitalize()} Fields:")
+        for field_name, field_info in fields_by_type[field_type]:
+            field_string = field_info.get("string", field_name)
+            field_required = field_info.get("required", False)
+
+            # Add relation info for relational fields
+            if field_type in ["many2one", "one2many", "many2many"]:
+                relation = field_info.get("relation", "unknown")
+                lines.append(
+                    f"  {field_name} ({field_string}) -> {relation}{'*' if field_required else ''}"
+                )
+            else:
+                lines.append(
+                    f"  {field_name} ({field_string}){'*' if field_required else ''}"
+                )
+
+    lines.append("\n* Required fields")
     return "\n".join(lines)
