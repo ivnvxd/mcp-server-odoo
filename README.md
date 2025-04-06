@@ -229,12 +229,12 @@ This Python package is designed to work alongside the `mcp_server` Odoo module. 
 ### Integration Flow
 
 ```
-┌──────────────────┐      ┌─────────────────────┐      ┌────────────────┐
-│                  │      │                     │      │                │
-│  MCP Client      │◄────►│  mcp-server-odoo    │◄────►│  Odoo Instance │
-│  (Claude/etc)    │ stdio│  (Python Package)   │XML-RPC│  with mcp_server │
-│                  │      │                     │      │                │
-└──────────────────┘      └─────────────────────┘      └────────────────┘
+┌─────────────────┐      ┌─────────────────────┐       ┌──────────────────┐
+│                 │      │                     │       │                  │
+│   MCP Client    │◄────►│   mcp-server-odoo   │◄─────►│   Odoo Instance  │
+│  (Claude/etc)   │ stdio│   (Python Package)  │XML-RPC│  with mcp_server │
+│                 │      │                     │       │                  │
+└─────────────────┘      └─────────────────────┘       └──────────────────┘
 ```
 
 The Odoo module must be installed in your Odoo instance before using this Python package. For information on installing and configuring the Odoo module, please refer to the [mcp_server module documentation](https://github.com/ivnvxd/odoo-apps/tree/main/mcp_server).
