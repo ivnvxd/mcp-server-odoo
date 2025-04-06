@@ -15,7 +15,7 @@ from typing import Any, Dict
 import dotenv
 import requests
 
-from mcp_server_odoo.fastmcp_server import OdooServer
+from mcp_server_odoo.server import MCPOdooServer
 
 # Configure logging
 logging.basicConfig(
@@ -91,6 +91,7 @@ def detect_default_database(url: str) -> str:
     """
     # Clean URL to ensure consistent formatting
     clean_url = url.rstrip("/")
+    logger.debug(f"Attempting database auto-detection for: {clean_url}")
 
     try:
         # First try the database list endpoint
@@ -98,6 +99,7 @@ def detect_default_database(url: str) -> str:
         logger.debug(f"Attempting to detect database from list endpoint: {db_list_url}")
 
         response = requests.get(db_list_url, timeout=5)
+        logger.debug(f"Response status from {db_list_url}: {response.status_code}")
 
         if response.status_code == 200:
             try:
@@ -108,8 +110,15 @@ def detect_default_database(url: str) -> str:
                         db_name = databases[0]
                         logger.info(f"Auto-detected database: {db_name}")
                         return db_name
+                logger.debug(f"Response from database list endpoint: {data}")
             except ValueError:
                 logger.debug("Failed to parse JSON from database list endpoint")
+                # Even if JSON parsing fails, try to find database name in content
+                match = re.search(r'"databases":\s*\[\s*"([^"]+)"\s*\]', response.text)
+                if match and match.group(1):
+                    db_name = match.group(1)
+                    logger.info(f"Auto-detected database from response text: {db_name}")
+                    return db_name
     except requests.RequestException as e:
         logger.debug(f"Error accessing database list endpoint: {e}")
     except Exception as e:
@@ -121,6 +130,7 @@ def detect_default_database(url: str) -> str:
         logger.debug(f"Attempting to detect database from login page: {login_url}")
 
         response = requests.get(login_url, timeout=5)
+        logger.debug(f"Response status from {login_url}: {response.status_code}")
 
         if response.status_code == 200:
             # Look for database input field with a value
@@ -131,12 +141,34 @@ def detect_default_database(url: str) -> str:
                 db_name = match.group(1)
                 logger.info(f"Auto-detected database from login page: {db_name}")
                 return db_name
+
+            # Try to find database name in session params
+            match = re.search(
+                r'session_info\s*=\s*{[^}]*"db":\s*"([^"]+)"', response.text
+            )
+            if match and match.group(1):
+                db_name = match.group(1)
+                logger.info(f"Auto-detected database from session info: {db_name}")
+                return db_name
+
+            # Try other common locations in HTML
+            match = re.search(r'data-db="([^"]+)"', response.text)
+            if match and match.group(1):
+                db_name = match.group(1)
+                logger.info(
+                    f"Auto-detected database from HTML data attribute: {db_name}"
+                )
+                return db_name
+
+            logger.debug("No database found in login page HTML")
     except requests.RequestException as e:
         logger.debug(f"Error accessing login page: {e}")
     except Exception as e:
         logger.debug(f"Unexpected error detecting database from login page: {e}")
 
-    logger.warning("Failed to auto-detect database")
+    logger.warning(
+        "Failed to auto-detect database. Please specify the database name using ODOO_DB environment variable or --db parameter."
+    )
     return ""
 
 
@@ -203,7 +235,24 @@ def get_config(args: argparse.Namespace) -> Dict[str, Any]:
 
     # Check for missing required configuration
     if missing:
-        raise ValueError(f"Missing required configuration: {', '.join(missing)}")
+        missing_str = ", ".join(missing)
+        error_message = f"""Missing required configuration: {missing_str}
+
+Required environment variables:
+- ODOO_URL: URL of your Odoo instance (e.g., http://localhost:8069)
+- ODOO_MCP_TOKEN: Authentication token for MCP server
+
+Optional environment variables:
+- ODOO_DB: Odoo database name (will attempt auto-detection if not provided)
+- ODOO_USERNAME: Odoo username for authentication (optional)
+- ODOO_PASSWORD: Odoo password for authentication (optional)
+- ODOO_MCP_LOG_LEVEL: Logging level (default: INFO)
+- ODOO_MCP_DEFAULT_LIMIT: Default record limit for search operations (default: 50)
+- ODOO_MCP_MAX_LIMIT: Maximum allowed record limit (default: 100)
+
+These can be provided via environment variables, command line arguments, or a .env file.
+"""
+        raise ValueError(error_message)
 
     # Auto-detect database if not specified
     if config.get("db") is None:
@@ -215,7 +264,10 @@ def get_config(args: argparse.Namespace) -> Dict[str, Any]:
         logger.info("Database not specified, attempting auto-detection...")
         detected_db = detect_default_database(config["url"])
         if not detected_db:
-            raise ValueError("Missing required configuration: ODOO_DB")
+            raise ValueError(
+                "Missing required configuration: ODOO_DB\n"
+                "Auto-detection failed. Please specify the database name explicitly."
+            )
 
         logger.info(f"Using auto-detected database: {detected_db}")
         config["db"] = detected_db
@@ -223,47 +275,84 @@ def get_config(args: argparse.Namespace) -> Dict[str, Any]:
     return config
 
 
-def main() -> None:
-    """Main entry point for MCP Server Odoo.
+def set_log_level(level_name: str) -> None:
+    """Set the logging level.
 
-    This function handles setting up the server with user configuration
-    and gracefully managing errors during startup.
+    Args:
+        level_name: Name of the logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     """
     try:
-        args = parse_args()
+        level = getattr(logging, level_name)
+        logger.setLevel(level)
+        logger.debug(f"Log level set to {level_name}")
+    except AttributeError:
+        logger.warning(f"Invalid log level: {level_name}. Using INFO.")
+        logger.setLevel(logging.INFO)
 
-        # Set logging level from args
-        if args.log_level:
-            log_level = getattr(logging, args.log_level)
-            logger.setLevel(log_level)
-            logger.debug(f"Log level set to {args.log_level}")
 
-        # Get configuration
+def main() -> None:
+    """Run the MCP Server Odoo CLI.
+
+    This function is the main entry point for the CLI. It parses arguments,
+    loads configuration, and starts the server.
+    """
+    # Parse command line arguments
+    args = parse_args()
+
+    # Configure logging
+    if args.log_level:
+        set_log_level(args.log_level)
+
+    # Load .env file if specified
+    if args.env_file:
+        if not os.path.exists(args.env_file):
+            logger.error(f"Environment file not found: {args.env_file}")
+            sys.exit(1)
+        dotenv.load_dotenv(args.env_file)
+
+    # Get configuration
+    try:
         config = get_config(args)
-
-        logger.info(
-            f"Starting Odoo MCP server with URL: {config['url']}, DB: {config['db']}"
-        )
-
-        # Create and start server using the FastMCP implementation
-        server = OdooServer(
-            odoo_url=config["url"],
-            odoo_db=config["db"],
-            odoo_token=config["token"],
-            odoo_username=config.get("username"),
-            odoo_password=config.get("password"),
-            default_limit=config["default_limit"],
-            max_limit=config["max_limit"],
-        )
-
-        # Start the server
-        server.start()
-
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
         sys.exit(1)
+
+    # Try to detect database if not specified
+    if not config["db"] and config["url"]:
+        logger.info(
+            f"Database not specified, attempting auto-detection for {config['url']}..."
+        )
+        config["db"] = detect_default_database(config["url"])
+        if not config["db"]:
+            logger.error(
+                "No database specified and auto-detection failed.\n"
+                "Please specify the database using one of these methods:\n"
+                "1. Command line: --db DATABASE_NAME\n"
+                "2. Environment variable: ODOO_DB=DATABASE_NAME\n"
+                "3. .env file: ODOO_DB=DATABASE_NAME\n"
+                "If you're using a multi-database Odoo instance, you must explicitly specify which database to connect to."
+            )
+            sys.exit(1)
+        else:
+            logger.info(f"Using auto-detected database: {config['db']}")
+
+    # Create and run server
+    try:
+        logger.info(
+            f"Connecting to Odoo at {config['url']} using database {config['db']}"
+        )
+        server = MCPOdooServer(
+            odoo_url=config["url"],
+            odoo_db=config["db"],
+            odoo_token=config["token"],
+            odoo_username=config["username"],
+            odoo_password=config["password"],
+            default_limit=config["default_limit"],
+            max_limit=config["max_limit"],
+        )
+        server.start()
     except Exception as e:
-        logger.exception(f"Unexpected error: {e}")
+        logger.error(f"Server error: {e}")
         sys.exit(1)
 
 

@@ -62,7 +62,7 @@ class TestIntegration(unittest.TestCase):
         object_mock.execute_kw.side_effect = ConnectionError("Connection refused")
 
         # Define the side effect function for the ServerProxy mock
-        def side_effect(url):
+        def side_effect(url, **kwargs):
             if "common" in url:
                 return common_mock
             return object_mock

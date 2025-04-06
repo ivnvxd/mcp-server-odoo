@@ -27,7 +27,7 @@ def mock_odoo_endpoints():
         mock_object = mock.MagicMock()
 
         # Configure ServerProxy to return appropriate endpoint
-        def side_effect(url):
+        def side_effect(url, **kwargs):
             if "common" in url:
                 return mock_common
             elif "object" in url:
@@ -73,8 +73,8 @@ class TestOdooConnection:
 
         # Check that ServerProxy was called with the correct URLs
         expected_calls = [
-            mock.call("http://test.example.com/xmlrpc/2/common"),
-            mock.call("http://test.example.com/xmlrpc/2/object"),
+            mock.call("http://test.example.com/xmlrpc/2/common", allow_none=True),
+            mock.call("http://test.example.com/xmlrpc/2/object", allow_none=True),
         ]
         mock_odoo_endpoints["proxy"].assert_has_calls(expected_calls, any_order=True)
 
@@ -752,7 +752,7 @@ class TestOdooConnectionErrors:
             mock_common = mock.MagicMock()
             mock_object = mock.MagicMock()
 
-            def mock_server_proxy_side_effect(url):
+            def mock_server_proxy_side_effect(url, **kwargs):
                 if "common" in url:
                     return mock_common
                 else:
@@ -775,6 +775,35 @@ class TestOdooConnectionErrors:
 
             # Check exception message
             assert "Failed to connect to Odoo" in str(exc_info.value)
+
+    def test_test_connection_generic_exception(self):
+        """Test generic exception handling in test_connection."""
+        # Mock to simulate exception in version() call
+        with mock.patch("xmlrpc.client.ServerProxy") as mock_server_proxy:
+            # Setup to raise a generic exception on version() call
+            mock_common = mock.MagicMock()
+            mock_common.version.side_effect = Exception("General server error")
+
+            def side_effect(url, **kwargs):
+                if "common" in url:
+                    return mock_common
+                else:
+                    return mock.MagicMock()
+
+            mock_server_proxy.side_effect = side_effect
+
+            # Initialize connection
+            connection = OdooConnection(
+                "http://test.example.com", "test_db", "test_token"
+            )
+
+            # Test connection should fail
+            with pytest.raises(OdooConnectionError) as exc_info:
+                connection.test_connection()
+
+            # Verify exception message contains the original error message
+            assert "Failed to connect to Odoo" in str(exc_info.value)
+            assert "General server error" in str(exc_info.value)
 
 
 def test_get_odoo_connection(mock_odoo_endpoints, clear_connection_pool):
@@ -805,7 +834,7 @@ class TestOdooConnectionInitialization:
             mock_common = mock.MagicMock()
             mock_object = mock.MagicMock()
 
-            def side_effect(url):
+            def side_effect(url, **kwargs):
                 if "common" in url:
                     return mock_common
                 else:
@@ -820,8 +849,12 @@ class TestOdooConnectionInitialization:
 
             # Check that ServerProxy was called correctly
             assert mock_server_proxy.call_count == 2
-            mock_server_proxy.assert_any_call("http://test.example.com/xmlrpc/2/common")
-            mock_server_proxy.assert_any_call("http://test.example.com/xmlrpc/2/object")
+            mock_server_proxy.assert_any_call(
+                "http://test.example.com/xmlrpc/2/common", allow_none=True
+            )
+            mock_server_proxy.assert_any_call(
+                "http://test.example.com/xmlrpc/2/object", allow_none=True
+            )
 
             # Verify connection state
             assert connection.url == "http://test.example.com"
@@ -841,7 +874,7 @@ class TestOdooConnectionInitialization:
             mock_common = mock.MagicMock()
             mock_common.version.side_effect = Exception("General server error")
 
-            def side_effect(url):
+            def side_effect(url, **kwargs):
                 if "common" in url:
                     return mock_common
                 else:
