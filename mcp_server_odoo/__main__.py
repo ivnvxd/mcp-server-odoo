@@ -15,7 +15,7 @@ from typing import Any, Dict
 import dotenv
 import requests
 
-from mcp_server_odoo.server import MCPOdooServer
+from mcp_server_odoo.fastmcp_server import OdooServer
 
 # Configure logging
 logging.basicConfig(
@@ -245,15 +245,15 @@ def main() -> None:
             f"Starting Odoo MCP server with URL: {config['url']}, DB: {config['db']}"
         )
 
-        # Create and start server
-        server = MCPOdooServer(
+        # Create and start server using the FastMCP implementation
+        server = OdooServer(
             odoo_url=config["url"],
             odoo_db=config["db"],
             odoo_token=config["token"],
             odoo_username=config.get("username"),
             odoo_password=config.get("password"),
-            default_limit=config.get("default_limit", 50),
-            max_limit=config.get("max_limit", 100),
+            default_limit=config["default_limit"],
+            max_limit=config["max_limit"],
         )
 
         # Start the server
@@ -263,7 +263,7 @@ def main() -> None:
         logger.error(f"Configuration error: {e}")
         sys.exit(1)
     except Exception as e:
-        logger.exception(f"Error starting server: {e}")
+        logger.exception(f"Unexpected error: {e}")
         sys.exit(1)
 
 

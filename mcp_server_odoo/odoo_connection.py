@@ -174,8 +174,12 @@ class OdooConnection:
         self.password = password
 
         # Initialize XML-RPC endpoints
-        self.common_endpoint = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/common")
-        self.object_endpoint = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/object")
+        self.common_endpoint = xmlrpc.client.ServerProxy(
+            f"{self.url}/xmlrpc/2/common", allow_none=True
+        )
+        self.object_endpoint = xmlrpc.client.ServerProxy(
+            f"{self.url}/xmlrpc/2/object", allow_none=True
+        )
 
         # Session state
         self.uid = None

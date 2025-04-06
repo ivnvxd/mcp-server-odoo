@@ -6,3 +6,7 @@ AI models in a standardized format.
 """
 
 __version__ = "0.1.0"
+
+from mcp_server_odoo.fastmcp_server import OdooServer
+
+__all__ = ["OdooServer"]
