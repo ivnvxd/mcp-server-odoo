@@ -243,3 +243,140 @@ class TestConfigSingleton:
         config2 = get_config()
         assert config2.url == "http://second.odoo.com"
         assert config1 is not config2
+
+
+class TestYoloMode:
+    """Test YOLO mode configuration."""
+
+    def test_yolo_mode_default_off(self):
+        """Test YOLO mode is disabled by default."""
+        config = OdooConfig(url="http://localhost:8069", api_key="test")
+        assert config.yolo_mode == "off"
+        assert config.is_yolo_enabled is False
+        assert config.is_write_allowed is False
+
+    def test_yolo_mode_read_only(self):
+        """Test read-only YOLO mode."""
+        config = OdooConfig(
+            url="http://localhost:8069", username="admin", password="admin", yolo_mode="read"
+        )
+        assert config.yolo_mode == "read"
+        assert config.is_yolo_enabled is True
+        assert config.is_write_allowed is False
+
+    def test_yolo_mode_full_access(self):
+        """Test full access YOLO mode."""
+        config = OdooConfig(
+            url="http://localhost:8069", username="admin", password="admin", yolo_mode="true"
+        )
+        assert config.yolo_mode == "true"
+        assert config.is_yolo_enabled is True
+        assert config.is_write_allowed is True
+
+    def test_invalid_yolo_mode(self):
+        """Test invalid YOLO mode raises error."""
+        with pytest.raises(ValueError, match="Invalid YOLO mode"):
+            OdooConfig(
+                url="http://localhost:8069", username="admin", password="admin", yolo_mode="invalid"
+            )
+
+    def test_endpoint_paths_standard_mode(self):
+        """Test endpoint paths in standard mode."""
+        config = OdooConfig(url="http://localhost:8069", api_key="test", yolo_mode="off")
+        paths = config.get_endpoint_paths()
+        assert paths["common"] == "/mcp/xmlrpc/common"
+        assert paths["object"] == "/mcp/xmlrpc/object"
+        assert paths["db"] == "/mcp/xmlrpc/db"
+
+    def test_endpoint_paths_yolo_modes(self):
+        """Test endpoint paths in YOLO modes."""
+        # Read-only mode
+        config = OdooConfig(
+            url="http://localhost:8069", username="test", password="test", yolo_mode="read"
+        )
+        paths = config.get_endpoint_paths()
+        assert paths["common"] == "/xmlrpc/2/common"
+        assert paths["object"] == "/xmlrpc/2/object"
+        assert paths["db"] == "/xmlrpc/db"
+
+        # Full access mode
+        config = OdooConfig(
+            url="http://localhost:8069", username="test", password="test", yolo_mode="true"
+        )
+        paths = config.get_endpoint_paths()
+        assert paths["common"] == "/xmlrpc/2/common"
+        assert paths["object"] == "/xmlrpc/2/object"
+        assert paths["db"] == "/xmlrpc/db"
+
+    def test_yolo_mode_auth_requirements(self):
+        """Test YOLO mode authentication requirements."""
+        # YOLO mode with username/password - should work
+        config = OdooConfig(
+            url="http://localhost:8069", username="admin", password="admin", yolo_mode="read"
+        )
+        assert config.is_yolo_enabled is True
+
+        # YOLO mode with username/API key - should work
+        config = OdooConfig(
+            url="http://localhost:8069", username="admin", api_key="test-key", yolo_mode="true"
+        )
+        assert config.is_yolo_enabled is True
+
+        # YOLO mode without proper auth - should fail
+        with pytest.raises(ValueError, match="YOLO mode requires"):
+            OdooConfig(
+                url="http://localhost:8069",
+                api_key="test-key",  # Missing username
+                yolo_mode="read",
+            )
+
+    def test_yolo_mode_from_env(self, monkeypatch):
+        """Test loading YOLO mode from environment variables."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_USER", "admin")
+        monkeypatch.setenv("ODOO_PASSWORD", "admin")
+
+        # Test "read" mode
+        monkeypatch.setenv("ODOO_YOLO", "read")
+        config = load_config()
+        assert config.yolo_mode == "read"
+        assert config.is_yolo_enabled is True
+        assert config.is_write_allowed is False
+
+        # Test "true" mode
+        monkeypatch.setenv("ODOO_YOLO", "true")
+        config = load_config()
+        assert config.yolo_mode == "true"
+        assert config.is_yolo_enabled is True
+        assert config.is_write_allowed is True
+
+        # Test "off" mode (default)
+        monkeypatch.delenv("ODOO_YOLO")
+        config = load_config()
+        assert config.yolo_mode == "off"
+        assert config.is_yolo_enabled is False
+        assert config.is_write_allowed is False
+
+    def test_yolo_mode_env_aliases(self, monkeypatch):
+        """Test YOLO mode environment variable aliases."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_USER", "admin")
+        monkeypatch.setenv("ODOO_PASSWORD", "admin")
+
+        # Test various aliases for "off"
+        for value in ["", "false", "0", "off", "no"]:
+            monkeypatch.setenv("ODOO_YOLO", value)
+            config = load_config()
+            assert config.yolo_mode == "off"
+
+        # Test various aliases for "read"
+        for value in ["read", "readonly", "read-only"]:
+            monkeypatch.setenv("ODOO_YOLO", value)
+            config = load_config()
+            assert config.yolo_mode == "read"
+
+        # Test various aliases for "true"
+        for value in ["true", "1", "yes", "full"]:
+            monkeypatch.setenv("ODOO_YOLO", value)
+            config = load_config()
+            assert config.yolo_mode == "true"
