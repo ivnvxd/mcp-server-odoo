@@ -82,7 +82,16 @@ class AccessController:
         # Parse base URL
         self.base_url = config.url.rstrip("/")
 
-        # Validate API key is available
+        # In YOLO mode, skip API key validation and MCP checks
+        if config.is_yolo_enabled:
+            mode_desc = "READ-ONLY" if config.yolo_mode == "read" else "FULL ACCESS"
+            logger.warning(
+                f"🚨 YOLO mode ({mode_desc}): Access control bypassed! "
+                f"All models accessible, MCP security disabled."
+            )
+            return  # Skip API validation
+
+        # Validate API key is available for standard mode
         if not config.api_key:
             raise AccessControlError(
                 "API key required for access control. Please configure ODOO_API_KEY."
@@ -170,6 +179,11 @@ class AccessController:
         Raises:
             AccessControlError: If request fails
         """
+        # In YOLO mode, return empty list (all models are allowed)
+        if self.config.is_yolo_enabled:
+            logger.debug("YOLO mode: All models are accessible")
+            return []  # Empty list indicates all models allowed
+
         cache_key = "enabled_models"
 
         # Check cache
@@ -196,6 +210,11 @@ class AccessController:
         Returns:
             True if model is enabled, False otherwise
         """
+        # In YOLO mode, all models are enabled
+        if self.config.is_yolo_enabled:
+            logger.debug(f"YOLO mode: Model '{model}' is accessible")
+            return True
+
         try:
             enabled_models = self.get_enabled_models()
             return any(m["model"] == model for m in enabled_models)
@@ -215,6 +234,29 @@ class AccessController:
         Raises:
             AccessControlError: If request fails
         """
+        # In YOLO mode, return permissions based on mode level
+        if self.config.is_yolo_enabled:
+            if self.config.yolo_mode == "read":
+                # Read-only mode: only read operations allowed
+                return ModelPermissions(
+                    model=model,
+                    enabled=True,
+                    can_read=True,
+                    can_write=False,
+                    can_create=False,
+                    can_unlink=False,
+                )
+            else:  # yolo_mode == "true"
+                # Full access mode: all operations allowed
+                return ModelPermissions(
+                    model=model,
+                    enabled=True,
+                    can_read=True,
+                    can_write=True,
+                    can_create=True,
+                    can_unlink=True,
+                )
+
         cache_key = f"permissions_{model}"
 
         # Check cache
@@ -253,8 +295,34 @@ class AccessController:
         Returns:
             Tuple of (allowed, error_message)
         """
+        # In YOLO mode, check based on mode level
+        if self.config.is_yolo_enabled:
+            # Define read operations
+            read_operations = {
+                "read",
+                "search",
+                "search_read",
+                "fields_get",
+                "count",
+                "search_count",
+            }
+
+            # Check operation based on mode
+            if operation in read_operations:
+                # Read operations always allowed in YOLO mode
+                return True, None
+            elif self.config.yolo_mode == "true":
+                # All operations allowed in full mode
+                return True, None
+            else:
+                # Write operations blocked in read-only mode
+                return False, (
+                    f"Write operation '{operation}' not allowed in read-only YOLO mode. "
+                    f"Only read operations are permitted for safety."
+                )
+
         try:
-            # Get model permissions
+            # Standard mode: Get model permissions from MCP
             permissions = self.get_model_permissions(model)
 
             # Check if model is enabled
@@ -294,6 +362,11 @@ class AccessController:
         Returns:
             List of enabled model names
         """
+        # In YOLO mode, all models are enabled
+        if self.config.is_yolo_enabled:
+            logger.debug(f"YOLO mode: All {len(models)} models are accessible")
+            return models  # Return all models unfiltered
+
         try:
             enabled_models = self.get_enabled_models()
             enabled_set = {m["model"] for m in enabled_models}
