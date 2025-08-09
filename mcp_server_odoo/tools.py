@@ -767,7 +767,102 @@ class OdooToolHandler:
         """Handle list models tool request with permissions."""
         try:
             with perf_logger.track_operation("tool_list_models"):
-                # Get basic model list
+                # Check if YOLO mode is enabled
+                if self.config.is_yolo_enabled:
+                    # Query actual models from ir.model in YOLO mode
+                    try:
+                        # Exclude transient models and less useful system models
+                        domain = [
+                            "&",
+                            ("transient", "=", False),
+                            "|",
+                            "|",
+                            ("model", "not like", "ir.%"),
+                            ("model", "not like", "base.%"),
+                            (
+                                "model",
+                                "in",
+                                [
+                                    "ir.attachment",
+                                    "ir.model",
+                                    "ir.model.fields",
+                                    "ir.config_parameter",
+                                ],
+                            ),
+                        ]
+
+                        # Query models from database
+                        model_records = self.connection.search_read(
+                            "ir.model",
+                            domain,
+                            ["model", "name"],
+                            order="name ASC",
+                            limit=200,  # Reasonable limit for practical use
+                        )
+
+                        # Prepare response with YOLO mode indicator
+                        enriched_models = []
+                        mode_desc = (
+                            "READ-ONLY" if self.config.yolo_mode == "read" else "FULL ACCESS"
+                        )
+
+                        # Add warning as first "model" in the list
+                        warning_model = {
+                            "model": "⚠️ YOLO MODE",
+                            "name": f"🚨 {mode_desc} - All models accessible without MCP security!",
+                            "operations": {
+                                "read": True,
+                                "write": self.config.yolo_mode == "true",
+                                "create": self.config.yolo_mode == "true",
+                                "unlink": self.config.yolo_mode == "true",
+                            },
+                        }
+                        enriched_models.append(warning_model)
+
+                        # Process actual models
+                        for record in model_records:
+                            # Get permissions based on YOLO mode level
+                            permissions = self.access_controller.get_model_permissions(
+                                record["model"]
+                            )
+
+                            enriched_model = {
+                                "model": record["model"],
+                                "name": record["name"] or record["model"],
+                                "operations": {
+                                    "read": permissions.can_read,
+                                    "write": permissions.can_write,
+                                    "create": permissions.can_create,
+                                    "unlink": permissions.can_unlink,
+                                },
+                            }
+                            enriched_models.append(enriched_model)
+
+                        logger.info(
+                            f"YOLO mode ({mode_desc}): Listed {len(model_records)} models from database"
+                        )
+
+                        return {"models": enriched_models}
+
+                    except Exception as e:
+                        logger.error(f"Failed to query models in YOLO mode: {e}")
+                        # Fall back to returning a warning with error
+                        return {
+                            "models": [
+                                {
+                                    "model": "⚠️ ERROR",
+                                    "name": f"Failed to query models: {str(e)}",
+                                    "operations": {
+                                        "read": False,
+                                        "write": False,
+                                        "create": False,
+                                        "unlink": False,
+                                    },
+                                }
+                            ]
+                        }
+
+                # Standard mode: Get models from MCP access controller
                 models = self.access_controller.get_enabled_models()
 
                 # Enrich with permissions for each model
