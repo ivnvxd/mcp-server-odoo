@@ -28,16 +28,12 @@ class OdooConnectionError(Exception):
 
 
 class OdooConnection:
-    """Manages XML-RPC connections to Odoo with MCP-specific endpoints.
+    """Manages XML-RPC connections to Odoo with dynamic endpoint selection.
 
     This class provides connection management, health checking, and
-    proper resource cleanup for Odoo XML-RPC connections.
+    proper resource cleanup for Odoo XML-RPC connections. Supports both
+    standard MCP endpoints and YOLO mode with standard Odoo endpoints.
     """
-
-    # MCP-specific endpoints
-    MCP_DB_ENDPOINT = "/mcp/xmlrpc/db"
-    MCP_COMMON_ENDPOINT = "/mcp/xmlrpc/common"
-    MCP_OBJECT_ENDPOINT = "/mcp/xmlrpc/object"
 
     # Connection timeout in seconds
     DEFAULT_TIMEOUT = 30
@@ -59,6 +55,26 @@ class OdooConnection:
         self.timeout = timeout
         self._url_components = self._parse_url(config.url)
 
+        # Get appropriate endpoints based on mode
+        endpoints = config.get_endpoint_paths()
+        self.DB_ENDPOINT = endpoints["db"]
+        self.COMMON_ENDPOINT = endpoints["common"]
+        self.OBJECT_ENDPOINT = endpoints["object"]
+
+        # Log YOLO mode if enabled
+        if config.is_yolo_enabled:
+            if config.yolo_mode == "read":
+                logger.warning(
+                    "📖 YOLO MODE: READ-ONLY - Connecting to standard Odoo endpoints. "
+                    "Write operations will be blocked. Safe for demos and testing."
+                )
+            elif config.yolo_mode == "true":
+                logger.warning(
+                    "🚨 YOLO MODE: FULL ACCESS - Connecting to standard Odoo endpoints. "
+                    "ALL operations enabled! No MCP security controls. "
+                    "FOR DEVELOPMENT/TESTING ONLY - NEVER USE IN PRODUCTION!"
+                )
+
         # Performance manager for optimizations
         self._performance_manager = performance_manager or PerformanceManager(config)
 
@@ -74,7 +90,8 @@ class OdooConnection:
         self._authenticated = False
         self._auth_method: Optional[str] = None  # 'api_key' or 'password'
 
-        logger.info(f"Initialized OdooConnection for {self._url_components['host']}")
+        mode_info = f" (YOLO mode: {config.yolo_mode})" if config.is_yolo_enabled else ""
+        logger.info(f"Initialized OdooConnection for {self._url_components['host']}{mode_info}")
 
     def _parse_url(self, url: str) -> Dict[str, Any]:
         """Parse and validate Odoo URL.
@@ -159,15 +176,13 @@ class OdooConnection:
             return
 
         try:
-            # Use connection pool for proxies
-            self._db_proxy = self._performance_manager.get_optimized_connection(
-                self.MCP_DB_ENDPOINT
-            )
+            # Use connection pool for proxies with dynamic endpoints
+            self._db_proxy = self._performance_manager.get_optimized_connection(self.DB_ENDPOINT)
             self._common_proxy = self._performance_manager.get_optimized_connection(
-                self.MCP_COMMON_ENDPOINT
+                self.COMMON_ENDPOINT
             )
             self._object_proxy = self._performance_manager.get_optimized_connection(
-                self.MCP_OBJECT_ENDPOINT
+                self.OBJECT_ENDPOINT
             )
 
             # Test connection by calling server_version
@@ -351,11 +366,30 @@ class OdooConnection:
         if not self._connected:
             raise OdooConnectionError("Not connected to Odoo")
 
+        # Warn about potential restrictions in YOLO mode
+        if self.config.is_yolo_enabled:
+            logger.debug(
+                "YOLO mode: Database listing may be restricted on standard Odoo. "
+                "Consider specifying ODOO_DB explicitly if listing fails."
+            )
+
         try:
             # Call list_db method on database proxy
             databases = self.db_proxy.list()
             logger.info(f"Found {len(databases)} databases: {databases}")
             return databases
+        except xmlrpc.client.Fault as e:
+            if self.config.is_yolo_enabled and "Access Denied" in str(e):
+                # Common error when database listing is restricted
+                logger.warning(
+                    "Database listing is restricted on this server. "
+                    "Please specify ODOO_DB in your configuration."
+                )
+                if self.config.database:
+                    # Return configured database as fallback
+                    return [self.config.database]
+            logger.error(f"Failed to list databases: {e}")
+            raise OdooConnectionError(f"Failed to list databases: {e}") from e
         except Exception as e:
             logger.error(f"Failed to list databases: {e}")
             raise OdooConnectionError(f"Failed to list databases: {e}") from e
@@ -498,8 +532,37 @@ class OdooConnection:
         if not self.config.api_key:
             return False
 
+        # In YOLO mode, use API key as password for standard auth
+        if self.config.is_yolo_enabled:
+            if not self.config.username:
+                logger.warning("YOLO mode requires username with API key")
+                return False
+
+            try:
+                # Use standard XML-RPC auth with API key as password
+                uid = self.common_proxy.authenticate(
+                    database, self.config.username, self.config.api_key, {}
+                )
+
+                if uid:
+                    self._uid = uid
+                    self._database = database
+                    self._auth_method = "api_key"
+                    self._authenticated = True
+                    logger.info(
+                        f"YOLO mode: Authenticated with API key for user {self.config.username} (UID: {uid})"
+                    )
+                    return True
+                else:
+                    logger.warning("YOLO mode: API key authentication failed")
+                    return False
+
+            except Exception as e:
+                logger.warning(f"YOLO mode API key auth failed: {e}")
+                return False
+
         try:
-            # Build URL for API key validation endpoint
+            # Standard MCP API key validation
             url = f"{self._url_components['base_url']}/mcp/auth/validate"
 
             # Create request with API key header
@@ -598,11 +661,13 @@ class OdooConnection:
 
         # Try API key authentication first
         if self.config.uses_api_key:
-            logger.info("Attempting API key authentication")
+            auth_method = "API key (YOLO mode)" if self.config.is_yolo_enabled else "API key"
+            logger.info(f"Attempting {auth_method} authentication")
             if self._authenticate_api_key(db_name):
                 return
             else:
-                logger.info("API key authentication failed, trying username/password")
+                if not self.config.is_yolo_enabled:
+                    logger.info("API key authentication failed, trying username/password")
 
         # Try username/password authentication
         if self.config.uses_credentials:

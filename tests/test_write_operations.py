@@ -23,6 +23,13 @@ class TestWriteOperations:
         config.api_key = None
         config.uses_api_key = False
         config.uses_credentials = True
+        config.is_yolo_enabled = False
+        config.yolo_mode = "off"
+        config.get_endpoint_paths.return_value = {
+            "db": "/mcp/xmlrpc/db",
+            "common": "/mcp/xmlrpc/common",
+            "object": "/mcp/xmlrpc/object",
+        }
         return config
 
     @pytest.fixture
@@ -35,6 +42,7 @@ class TestWriteOperations:
         cm.__exit__ = Mock(return_value=None)
         manager.monitor.track_operation.return_value = cm
         manager.invalidate_record_cache = Mock()
+        manager.get_optimized_connection = Mock(return_value=Mock())
         return manager
 
     @pytest.fixture

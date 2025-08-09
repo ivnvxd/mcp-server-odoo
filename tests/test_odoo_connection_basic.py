@@ -100,24 +100,23 @@ class TestOdooConnectionInit:
         """Test endpoint URL building."""
         conn = OdooConnection(test_config)
 
-        db_url = conn._build_endpoint_url(OdooConnection.MCP_DB_ENDPOINT)
+        # Get the endpoints from config
+        endpoints = test_config.get_endpoint_paths()
+
+        db_url = conn._build_endpoint_url(endpoints["db"])
         # Build expected URL from config
         from urllib.parse import urlparse
 
         parsed = urlparse(test_config.url)
-        expected_url = f"{parsed.scheme}://{parsed.netloc}{OdooConnection.MCP_DB_ENDPOINT}"
+        expected_url = f"{parsed.scheme}://{parsed.netloc}{endpoints['db']}"
         assert db_url == expected_url
 
-        common_url = conn._build_endpoint_url(OdooConnection.MCP_COMMON_ENDPOINT)
-        expected_common_url = (
-            f"{parsed.scheme}://{parsed.netloc}{OdooConnection.MCP_COMMON_ENDPOINT}"
-        )
+        common_url = conn._build_endpoint_url(endpoints["common"])
+        expected_common_url = f"{parsed.scheme}://{parsed.netloc}{endpoints['common']}"
         assert common_url == expected_common_url
 
-        object_url = conn._build_endpoint_url(OdooConnection.MCP_OBJECT_ENDPOINT)
-        expected_object_url = (
-            f"{parsed.scheme}://{parsed.netloc}{OdooConnection.MCP_OBJECT_ENDPOINT}"
-        )
+        object_url = conn._build_endpoint_url(endpoints["object"])
+        expected_object_url = f"{parsed.scheme}://{parsed.netloc}{endpoints['object']}"
         assert object_url == expected_object_url
 
 
