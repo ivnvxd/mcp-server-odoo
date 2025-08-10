@@ -819,22 +819,11 @@ class OdooToolHandler:
                         }
                         enriched_models.append(warning_model)
 
-                        # Process actual models
+                        # Process actual models (no need to repeat permissions in YOLO mode)
                         for record in model_records:
-                            # Get permissions based on YOLO mode level
-                            permissions = self.access_controller.get_model_permissions(
-                                record["model"]
-                            )
-
                             enriched_model = {
                                 "model": record["model"],
                                 "name": record["name"] or record["model"],
-                                "operations": {
-                                    "read": permissions.can_read,
-                                    "write": permissions.can_write,
-                                    "create": permissions.can_create,
-                                    "unlink": permissions.can_unlink,
-                                },
                             }
                             enriched_models.append(enriched_model)
 

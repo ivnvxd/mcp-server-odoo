@@ -81,17 +81,6 @@ class TestYoloModeTools:
             {"model": "sale.order", "name": "Sales Order"},
         ]
 
-        # Mock permissions for read-only mode
-        def mock_get_permissions(model):
-            mock_perm = MagicMock()
-            mock_perm.can_read = True
-            mock_perm.can_write = False
-            mock_perm.can_create = False
-            mock_perm.can_unlink = False
-            return mock_perm
-
-        mock_access_controller.get_model_permissions.side_effect = mock_get_permissions
-
         # Create handler
         handler = OdooToolHandler(
             mock_app, mock_connection, mock_access_controller, config_yolo_read
@@ -120,12 +109,11 @@ class TestYoloModeTools:
         assert warning_model["operations"]["create"] is False
         assert warning_model["operations"]["unlink"] is False
 
-        # Check actual models have read-only permissions
+        # Check actual models don't have operations field (only in warning model)
         for model in models[1:]:
-            assert model["operations"]["read"] is True
-            assert model["operations"]["write"] is False
-            assert model["operations"]["create"] is False
-            assert model["operations"]["unlink"] is False
+            assert "operations" not in model
+            assert "model" in model
+            assert "name" in model
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_full_mode(
@@ -137,17 +125,6 @@ class TestYoloModeTools:
             {"model": "res.partner", "name": "Contact"},
             {"model": "account.move", "name": "Journal Entry"},
         ]
-
-        # Mock permissions for full access mode
-        def mock_get_permissions(model):
-            mock_perm = MagicMock()
-            mock_perm.can_read = True
-            mock_perm.can_write = True
-            mock_perm.can_create = True
-            mock_perm.can_unlink = True
-            return mock_perm
-
-        mock_access_controller.get_model_permissions.side_effect = mock_get_permissions
 
         # Create handler
         handler = OdooToolHandler(
@@ -170,12 +147,11 @@ class TestYoloModeTools:
         assert warning_model["operations"]["create"] is True
         assert warning_model["operations"]["unlink"] is True
 
-        # Check actual models have full permissions
+        # Check actual models don't have operations field (only in warning model)
         for model in models[1:]:
-            assert model["operations"]["read"] is True
-            assert model["operations"]["write"] is True
-            assert model["operations"]["create"] is True
-            assert model["operations"]["unlink"] is True
+            assert "operations" not in model
+            assert "model" in model
+            assert "name" in model
 
     @pytest.mark.asyncio
     async def test_list_models_standard_mode(
@@ -286,16 +262,6 @@ class TestYoloModeTools:
             {"model": "ir.model", "name": "Models"},
         ]
 
-        def mock_get_permissions(model):
-            mock_perm = MagicMock()
-            mock_perm.can_read = True
-            mock_perm.can_write = True
-            mock_perm.can_create = True
-            mock_perm.can_unlink = True
-            return mock_perm
-
-        mock_access_controller.get_model_permissions.side_effect = mock_get_permissions
-
         # Create handler
         handler = OdooToolHandler(
             mock_app, mock_connection, mock_access_controller, config_yolo_full
@@ -323,16 +289,6 @@ class TestYoloModeTools:
         mock_connection.search_read.return_value = [
             {"model": "res.partner", "name": "Contact"},
         ]
-
-        def mock_get_permissions(model):
-            mock_perm = MagicMock()
-            mock_perm.can_read = True
-            mock_perm.can_write = False
-            mock_perm.can_create = False
-            mock_perm.can_unlink = False
-            return mock_perm
-
-        mock_access_controller.get_model_permissions.side_effect = mock_get_permissions
 
         # Create handler
         handler = OdooToolHandler(
