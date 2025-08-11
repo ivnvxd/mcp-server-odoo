@@ -86,12 +86,14 @@ class TestYoloModeE2E:
         # 2. List models - should work and show indicator
         models_result = await handler._handle_list_models_tool()
         assert "models" in models_result
+        assert "yolo_mode" in models_result
         assert len(models_result["models"]) > 0
 
-        # Check for YOLO warning
-        first_model = models_result["models"][0]
-        assert "YOLO MODE" in first_model["model"]
-        assert "READ-ONLY" in first_model["name"]
+        # Check for YOLO metadata
+        yolo_meta = models_result["yolo_mode"]
+        assert yolo_meta["enabled"] is True
+        assert yolo_meta["level"] == "read"
+        assert "READ-ONLY" in yolo_meta["description"]
 
         # 3. Search records - should work
         search_result = await handler._handle_search_tool(
@@ -165,11 +167,13 @@ class TestYoloModeE2E:
         # 2. List models - should work and show warning
         models_result = await handler._handle_list_models_tool()
         assert "models" in models_result
+        assert "yolo_mode" in models_result
 
-        # Check for YOLO warning
-        first_model = models_result["models"][0]
-        assert "YOLO MODE" in first_model["model"]
-        assert "FULL ACCESS" in first_model["name"]
+        # Check for YOLO metadata
+        yolo_meta = models_result["yolo_mode"]
+        assert yolo_meta["enabled"] is True
+        assert yolo_meta["level"] == "true"
+        assert "FULL ACCESS" in yolo_meta["description"]
 
         # 3. Create a test record - should work
         create_result = await handler._handle_create_record_tool(
@@ -367,10 +371,10 @@ class TestYoloModeE2E:
 
         # Check list_models indicator
         models_result = await handler._handle_list_models_tool()
-        first_model = models_result["models"][0]
-        assert "READ-ONLY" in first_model["name"]
-        assert first_model["operations"]["read"] is True
-        assert first_model["operations"]["write"] is False
+        yolo_meta = models_result["yolo_mode"]
+        assert "READ-ONLY" in yolo_meta["description"]
+        assert yolo_meta["operations"]["read"] is True
+        assert yolo_meta["operations"]["write"] is False
 
         connection.disconnect()
 
@@ -384,14 +388,14 @@ class TestYoloModeE2E:
 
         # Check list_models indicator
         models_result = await handler._handle_list_models_tool()
-        first_model = models_result["models"][0]
-        assert "FULL ACCESS" in first_model["name"]
+        yolo_meta = models_result["yolo_mode"]
+        assert "FULL ACCESS" in yolo_meta["description"]
         assert all(
             [
-                first_model["operations"]["read"],
-                first_model["operations"]["write"],
-                first_model["operations"]["create"],
-                first_model["operations"]["unlink"],
+                yolo_meta["operations"]["read"],
+                yolo_meta["operations"]["write"],
+                yolo_meta["operations"]["create"],
+                yolo_meta["operations"]["unlink"],
             ]
         )
 

@@ -96,21 +96,25 @@ class TestYoloModeTools:
         assert "transient" in str(call_args[0][1])  # Domain includes transient filter
 
         # Check result structure
+        assert "yolo_mode" in result
         assert "models" in result
+        assert "total" in result
+
+        # Check YOLO mode metadata
+        yolo_meta = result["yolo_mode"]
+        assert yolo_meta["enabled"] is True
+        assert yolo_meta["level"] == "read"
+        assert "READ-ONLY" in yolo_meta["description"]
+        assert "🚨" in yolo_meta["warning"]
+        assert yolo_meta["operations"]["read"] is True
+        assert yolo_meta["operations"]["write"] is False
+        assert yolo_meta["operations"]["create"] is False
+        assert yolo_meta["operations"]["unlink"] is False
+
+        # Check actual models are clean (no operations field)
         models = result["models"]
-        assert len(models) > 0
-
-        # Check for YOLO warning as first model
-        warning_model = models[0]
-        assert "YOLO MODE" in warning_model["model"]
-        assert "READ-ONLY" in warning_model["name"]
-        assert warning_model["operations"]["read"] is True
-        assert warning_model["operations"]["write"] is False
-        assert warning_model["operations"]["create"] is False
-        assert warning_model["operations"]["unlink"] is False
-
-        # Check actual models don't have operations field (only in warning model)
-        for model in models[1:]:
+        assert len(models) == 3  # Should match mock data
+        for model in models:
             assert "operations" not in model
             assert "model" in model
             assert "name" in model
@@ -135,20 +139,25 @@ class TestYoloModeTools:
         result = await handler._handle_list_models_tool()
 
         # Check result structure
+        assert "yolo_mode" in result
         assert "models" in result
+        assert "total" in result
+
+        # Check YOLO mode metadata
+        yolo_meta = result["yolo_mode"]
+        assert yolo_meta["enabled"] is True
+        assert yolo_meta["level"] == "true"
+        assert "FULL ACCESS" in yolo_meta["description"]
+        assert "🚨" in yolo_meta["warning"]
+        assert yolo_meta["operations"]["read"] is True
+        assert yolo_meta["operations"]["write"] is True
+        assert yolo_meta["operations"]["create"] is True
+        assert yolo_meta["operations"]["unlink"] is True
+
+        # Check actual models are clean (no operations field)
         models = result["models"]
-
-        # Check for YOLO warning as first model
-        warning_model = models[0]
-        assert "YOLO MODE" in warning_model["model"]
-        assert "FULL ACCESS" in warning_model["name"]
-        assert warning_model["operations"]["read"] is True
-        assert warning_model["operations"]["write"] is True
-        assert warning_model["operations"]["create"] is True
-        assert warning_model["operations"]["unlink"] is True
-
-        # Check actual models don't have operations field (only in warning model)
-        for model in models[1:]:
+        assert len(models) == 2  # Should match mock data
+        for model in models:
             assert "operations" not in model
             assert "model" in model
             assert "name" in model
@@ -214,16 +223,23 @@ class TestYoloModeTools:
         # Call the method
         result = await handler._handle_list_models_tool()
 
-        # Check error response
+        # Check error response structure
+        assert "yolo_mode" in result
         assert "models" in result
-        models = result["models"]
-        assert len(models) == 1
+        assert "error" in result
 
-        error_model = models[0]
-        assert "ERROR" in error_model["model"]
-        assert "Failed to query models" in error_model["name"]
-        assert error_model["operations"]["read"] is False
-        assert error_model["operations"]["write"] is False
+        # Check YOLO mode metadata in error case
+        yolo_meta = result["yolo_mode"]
+        assert yolo_meta["enabled"] is True
+        assert yolo_meta["level"] == "read"
+        assert "Error querying models" in yolo_meta["warning"]
+        assert yolo_meta["operations"]["read"] is False
+        assert yolo_meta["operations"]["write"] is False
+
+        # Models should be empty on error
+        assert result["models"] == []
+        assert result["total"] == 0
+        assert "Database connection failed" in result["error"]
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_domain_construction(
@@ -272,7 +288,7 @@ class TestYoloModeTools:
 
         # Check that system models are included
         models = result["models"]
-        model_names = [m["model"] for m in models[1:]]  # Skip warning model
+        model_names = [m["model"] for m in models]
         assert "ir.attachment" in model_names
         assert "ir.model" in model_names
 
