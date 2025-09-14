@@ -7,7 +7,7 @@ for connecting to Odoo via XML-RPC.
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
 
 from dotenv import load_dotenv
 
@@ -36,6 +36,9 @@ class OdooConfig:
     host: str = "localhost"
     port: int = 8000
 
+    # YOLO mode configuration
+    yolo_mode: str = "off"  # "off", "read", or "true"
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         # Validate URL
@@ -46,15 +49,28 @@ class OdooConfig:
         if not self.url.startswith(("http://", "https://")):
             raise ValueError("ODOO_URL must start with http:// or https://")
 
-        # Validate authentication
+        # Validate YOLO mode
+        valid_yolo_modes = {"off", "read", "true"}
+        if self.yolo_mode not in valid_yolo_modes:
+            raise ValueError(
+                f"Invalid YOLO mode: {self.yolo_mode}. "
+                f"Must be one of: {', '.join(valid_yolo_modes)}"
+            )
+
+        # Validate authentication (relaxed for YOLO mode)
         has_api_key = bool(self.api_key)
         has_credentials = bool(self.username and self.password)
 
-        if not has_api_key and not has_credentials:
-            raise ValueError(
-                "Authentication required: provide either ODOO_API_KEY or "
-                "both ODOO_USER and ODOO_PASSWORD"
-            )
+        # In YOLO mode, we might need username even with API key for standard auth
+        if self.is_yolo_enabled:
+            if not has_credentials and not (has_api_key and self.username):
+                raise ValueError("YOLO mode requires either username/password or username/API key")
+        else:
+            if not has_api_key and not has_credentials:
+                raise ValueError(
+                    "Authentication required: provide either ODOO_API_KEY or "
+                    "both ODOO_USER and ODOO_PASSWORD"
+                )
 
         # Validate numeric fields
         if self.default_limit <= 0:
@@ -95,6 +111,33 @@ class OdooConfig:
     def uses_credentials(self) -> bool:
         """Check if configuration uses username/password authentication."""
         return bool(self.username and self.password)
+
+    @property
+    def is_yolo_enabled(self) -> bool:
+        """Check if any YOLO mode is active."""
+        return self.yolo_mode != "off"
+
+    @property
+    def is_write_allowed(self) -> bool:
+        """Check if write operations are allowed in current mode."""
+        return self.yolo_mode == "true"
+
+    def get_endpoint_paths(self) -> Dict[str, str]:
+        """Get appropriate endpoint paths based on mode.
+
+        Returns:
+            Dict[str, str]: Mapping of endpoint names to paths
+        """
+        if self.is_yolo_enabled:
+            # Use standard Odoo endpoints in YOLO mode
+            return {"db": "/xmlrpc/db", "common": "/xmlrpc/2/common", "object": "/xmlrpc/2/object"}
+        else:
+            # Use MCP-specific endpoints in standard mode
+            return {
+                "db": "/mcp/xmlrpc/db",
+                "common": "/mcp/xmlrpc/common",
+                "object": "/mcp/xmlrpc/object",
+            }
 
     @classmethod
     def from_env(cls, env_file: Optional[Path] = None) -> "OdooConfig":
@@ -152,6 +195,20 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         except ValueError:
             raise ValueError(f"{key} must be a valid integer") from None
 
+    # Helper function to parse YOLO mode
+    def get_yolo_mode() -> str:
+        yolo_env = os.getenv("ODOO_YOLO", "off").strip().lower()
+        # Map various inputs to valid modes
+        if yolo_env in ["", "false", "0", "off", "no"]:
+            return "off"
+        elif yolo_env in ["read", "readonly", "read-only"]:
+            return "read"
+        elif yolo_env in ["true", "1", "yes", "full"]:
+            return "true"
+        else:
+            # Invalid value - will be caught by validation
+            return yolo_env
+
     # Create configuration
     config = OdooConfig(
         url=os.getenv("ODOO_URL", "").strip(),
@@ -166,6 +223,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         transport=os.getenv("ODOO_MCP_TRANSPORT", "stdio").strip(),
         host=os.getenv("ODOO_MCP_HOST", "localhost").strip(),
         port=get_int_env("ODOO_MCP_PORT", 8000),
+        yolo_mode=get_yolo_mode(),
     )
 
     return config

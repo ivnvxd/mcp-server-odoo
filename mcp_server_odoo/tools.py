@@ -763,11 +763,106 @@ class OdooToolHandler:
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ToolError(f"Failed to get record: {sanitized_msg}") from e
 
-    async def _handle_list_models_tool(self) -> Dict[str, List[Dict[str, Any]]]:
+    async def _handle_list_models_tool(self) -> Dict[str, Any]:
         """Handle list models tool request with permissions."""
         try:
             with perf_logger.track_operation("tool_list_models"):
-                # Get basic model list
+                # Check if YOLO mode is enabled
+                if self.config.is_yolo_enabled:
+                    # Query actual models from ir.model in YOLO mode
+                    try:
+                        # Exclude transient models and less useful system models
+                        domain = [
+                            "&",
+                            ("transient", "=", False),
+                            "|",
+                            "|",
+                            ("model", "not like", "ir.%"),
+                            ("model", "not like", "base.%"),
+                            (
+                                "model",
+                                "in",
+                                [
+                                    "ir.attachment",
+                                    "ir.model",
+                                    "ir.model.fields",
+                                    "ir.config_parameter",
+                                ],
+                            ),
+                        ]
+
+                        # Query models from database
+                        model_records = self.connection.search_read(
+                            "ir.model",
+                            domain,
+                            ["model", "name"],
+                            order="name ASC",
+                            limit=200,  # Reasonable limit for practical use
+                        )
+
+                        # Prepare response with YOLO mode metadata
+                        mode_desc = (
+                            "READ-ONLY" if self.config.yolo_mode == "read" else "FULL ACCESS"
+                        )
+
+                        # Create metadata about YOLO mode
+                        yolo_metadata = {
+                            "enabled": True,
+                            "level": self.config.yolo_mode,  # "read" or "true"
+                            "description": mode_desc,
+                            "warning": "🚨 All models accessible without MCP security!",
+                            "operations": {
+                                "read": True,
+                                "write": self.config.yolo_mode == "true",
+                                "create": self.config.yolo_mode == "true",
+                                "unlink": self.config.yolo_mode == "true",
+                            },
+                        }
+
+                        # Process actual models (clean data without permissions)
+                        models_list = []
+                        for record in model_records:
+                            model_entry = {
+                                "model": record["model"],
+                                "name": record["name"] or record["model"],
+                            }
+                            models_list.append(model_entry)
+
+                        logger.info(
+                            f"YOLO mode ({mode_desc}): Listed {len(model_records)} models from database"
+                        )
+
+                        return {
+                            "yolo_mode": yolo_metadata,
+                            "models": models_list,
+                            "total": len(models_list),
+                        }
+
+                    except Exception as e:
+                        logger.error(f"Failed to query models in YOLO mode: {e}")
+                        # Return error in consistent structure
+                        mode_desc = (
+                            "READ-ONLY" if self.config.yolo_mode == "read" else "FULL ACCESS"
+                        )
+                        return {
+                            "yolo_mode": {
+                                "enabled": True,
+                                "level": self.config.yolo_mode,
+                                "description": mode_desc,
+                                "warning": f"⚠️ Error querying models: {str(e)}",
+                                "operations": {
+                                    "read": False,
+                                    "write": False,
+                                    "create": False,
+                                    "unlink": False,
+                                },
+                            },
+                            "models": [],
+                            "total": 0,
+                            "error": str(e),
+                        }
+
+                # Standard mode: Get models from MCP access controller
                 models = self.access_controller.get_enabled_models()
 
                 # Enrich with permissions for each model

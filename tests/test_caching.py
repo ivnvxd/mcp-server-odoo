@@ -28,6 +28,13 @@ class TestOdooConnectionCaching:
         config.api_key = None
         config.uses_api_key = False
         config.uses_credentials = True
+        config.is_yolo_enabled = False
+        config.yolo_mode = "off"
+        config.get_endpoint_paths.return_value = {
+            "db": "/mcp/xmlrpc/db",
+            "common": "/mcp/xmlrpc/common",
+            "object": "/mcp/xmlrpc/object",
+        }
         return config
 
     @pytest.fixture

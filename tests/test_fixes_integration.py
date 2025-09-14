@@ -19,6 +19,8 @@ class TestFixesIntegration:
         config = Mock()
         config.default_limit = 10
         config.max_limit = 100
+        config.is_yolo_enabled = False  # Ensure standard mode for these tests
+        config.yolo_mode = "off"
 
         return OdooToolHandler(app, connection, access_controller, config)
 
@@ -34,6 +36,14 @@ class TestFixesIntegration:
             {"model": "res.company", "name": "Companies"},
         ]
         tool_handler.access_controller.get_enabled_models.return_value = mock_models
+
+        # Mock permissions for each model
+        mock_permissions = Mock()
+        mock_permissions.can_read = True
+        mock_permissions.can_write = True
+        mock_permissions.can_create = False
+        mock_permissions.can_unlink = False
+        tool_handler.access_controller.get_model_permissions.return_value = mock_permissions
 
         models_result = await tool_handler._handle_list_models_tool()
 

@@ -10,6 +10,8 @@
 
 An MCP server that enables AI assistants like Claude to interact with Odoo ERP systems. Access business data, search records, create new entries, update existing data, and manage your Odoo instance through natural language.
 
+**Works with any Odoo instance!** Use [YOLO mode](#yolo-mode-developmenttesting-only-) for quick testing and demos with any standard Odoo installation. For enterprise security, access controls, and production use, install the [Odoo MCP module](https://apps.odoo.com/apps/modules/18.0/mcp_server).
+
 ## Features
 
 - 🔍 **Search and retrieve** any Odoo record (customers, products, invoices, etc.)
@@ -22,6 +24,7 @@ An MCP server that enables AI assistants like Claude to interact with Odoo ERP s
 - 🔐 **Secure access** with API key or username/password authentication
 - 🎯 **Smart pagination** for large datasets
 - 💬 **LLM-optimized output** with hierarchical text formatting
+- 🚀 **YOLO Mode** for quick access with any Odoo instance (no module required)
 
 ## Installation
 
@@ -29,8 +32,8 @@ An MCP server that enables AI assistants like Claude to interact with Odoo ERP s
 
 - Python 3.10 or higher
 - Access to an Odoo instance (version 17.0+)
-- The [Odoo MCP module](https://apps.odoo.com/apps/modules/18.0/mcp_server) installed on your Odoo server
-- (optional) An API key generated in Odoo (Settings > Users > API Keys)
+- For production use: The [Odoo MCP module](https://apps.odoo.com/apps/modules/18.0/mcp_server) installed on your Odoo server
+- For testing/demos: Any standard Odoo instance (use YOLO mode)
 
 ### Install UV First
 
@@ -202,6 +205,7 @@ The server requires the following environment variables:
 | `ODOO_USER` | Yes* | Username (if not using API key) | `admin` |
 | `ODOO_PASSWORD` | Yes* | Password (if not using API key) | `admin` |
 | `ODOO_DB` | No | Database name (auto-detected if not set) | `mycompany` |
+| `ODOO_YOLO` | No | YOLO mode - bypasses MCP security (⚠️ DEV ONLY) | `off`, `read`, `true` |
 
 *Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required.
 
@@ -284,6 +288,94 @@ The HTTP endpoint will be available at: `http://localhost:8000/mcp/`
    - Select your user
    - Under the "API Keys" tab, create a new key
    - Copy the key for your MCP configuration
+
+### YOLO Mode (Development/Testing Only) ⚠️
+
+YOLO mode allows the MCP server to connect directly to any standard Odoo instance **without requiring the MCP module**. This mode bypasses all MCP security controls and is intended **ONLY for development, testing, and demos**.
+
+**🚨 WARNING: Never use YOLO mode in production environments!**
+
+#### YOLO Mode Levels
+
+1. **Read-Only Mode** (`ODOO_YOLO=read`):
+   - Allows all read operations (search, read, count)
+   - Blocks all write operations (create, update, delete)
+   - Safe for demos and testing
+   - Shows "READ-ONLY" indicators in responses
+
+2. **Full Access Mode** (`ODOO_YOLO=true`):
+   - Allows ALL operations without restrictions
+   - Full CRUD access to all models
+   - **EXTREMELY DANGEROUS** - use only in isolated environments
+   - Shows "FULL ACCESS" warnings in responses
+
+#### YOLO Mode Configuration
+
+<details>
+<summary>Read-Only YOLO Mode (safer for demos)</summary>
+
+```json
+{
+  "mcpServers": {
+    "odoo-demo": {
+      "command": "uvx",
+      "args": ["mcp-server-odoo"],
+      "env": {
+        "ODOO_URL": "http://localhost:8069",
+        "ODOO_USER": "admin",
+        "ODOO_PASSWORD": "admin",
+        "ODOO_DB": "demo",
+        "ODOO_YOLO": "read"
+      }
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary>Full Access YOLO Mode (⚠️ use with extreme caution)</summary>
+
+```json
+{
+  "mcpServers": {
+    "odoo-test": {
+      "command": "uvx",
+      "args": ["mcp-server-odoo"],
+      "env": {
+        "ODOO_URL": "http://localhost:8069",
+        "ODOO_USER": "admin",
+        "ODOO_PASSWORD": "admin",
+        "ODOO_DB": "test",
+        "ODOO_YOLO": "true"
+      }
+    }
+  }
+}
+```
+</details>
+
+#### When to Use YOLO Mode
+
+✅ **Appropriate Uses:**
+- Local development with test data
+- Quick demos with non-sensitive data
+- Testing MCP clients before installing the MCP module
+- Prototyping in isolated environments
+
+❌ **Never Use For:**
+- Production environments
+- Instances with real customer data
+- Shared development servers
+- Any environment with sensitive information
+
+#### YOLO Mode Security Notes
+
+- Connects directly to Odoo's standard XML-RPC endpoints
+- Bypasses all MCP access controls and model restrictions
+- No rate limiting is applied
+- All operations are logged but not restricted
+- Model listing shows 200+ models instead of just enabled ones
 
 ## Usage Examples
 
