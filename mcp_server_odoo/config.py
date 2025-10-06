@@ -174,12 +174,16 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
             )
         load_dotenv(env_file)
     else:
-        # Check current directory for .env
+        # Try to load .env from current directory
         default_env = Path(".env")
+        env_loaded = False
+        
         if default_env.exists():
-            load_dotenv()
-        elif not os.getenv("ODOO_URL"):
-            # No .env file and no ODOO_URL in environment
+            load_dotenv(default_env)
+            env_loaded = True
+        
+        # If no .env file found and no ODOO_URL in environment, raise error
+        if not env_loaded and not os.getenv("ODOO_URL"):
             raise ValueError(
                 "No .env file found and ODOO_URL not set in environment.\n"
                 "Please create a .env file based on .env.example or set environment variables."
