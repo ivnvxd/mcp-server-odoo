@@ -30,6 +30,7 @@ class OdooConfig:
     default_limit: int = 10
     max_limit: int = 100
     max_smart_fields: int = 15
+    locale: Optional[str] = None
 
     # MCP transport configuration
     transport: Literal["stdio", "streamable-http"] = "stdio"
@@ -216,6 +217,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         username=os.getenv("ODOO_USER", "").strip() or None,
         password=os.getenv("ODOO_PASSWORD", "").strip() or None,
         database=os.getenv("ODOO_DB", "").strip() or None,
+        locale=os.getenv("ODOO_LOCALE", "").strip() or None,
         log_level=os.getenv("ODOO_MCP_LOG_LEVEL", "INFO").strip(),
         default_limit=get_int_env("ODOO_MCP_DEFAULT_LIMIT", 10),
         max_limit=get_int_env("ODOO_MCP_MAX_LIMIT", 100),
