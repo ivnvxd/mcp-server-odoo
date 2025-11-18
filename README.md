@@ -90,7 +90,26 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_API_KEY": "your-api-key-here",
-        "ODOO_DB": "your-database-name"
+        "ODOO_DB": "your-database-name",
+        "ODOO_LOCALE": "es_ES"
+      }
+    }
+  }
+}
+```
+
+**For Spanish (Argentina):**
+```json
+{
+  "mcpServers": {
+    "odoo": {
+      "command": "uvx",
+      "args": ["mcp-server-odoo"],
+      "env": {
+        "ODOO_URL": "https://your-odoo-instance.com",
+        "ODOO_API_KEY": "your-api-key-here",
+        "ODOO_DB": "your-database-name",
+        "ODOO_LOCALE": "es_AR"
       }
     }
   }
@@ -205,6 +224,7 @@ The server requires the following environment variables:
 | `ODOO_USER` | Yes* | Username (if not using API key) | `admin` |
 | `ODOO_PASSWORD` | Yes* | Password (if not using API key) | `admin` |
 | `ODOO_DB` | No | Database name (auto-detected if not set) | `mycompany` |
+| `ODOO_LOCALE` | No | Language/locale for Odoo responses | `es_ES`, `es_AR`, `en_US`, `fr_FR` |
 | `ODOO_YOLO` | No | YOLO mode - bypasses MCP security (⚠️ DEV ONLY) | `off`, `read`, `true` |
 
 *Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required.
@@ -212,6 +232,7 @@ The server requires the following environment variables:
 **Notes:**
 - If database listing is restricted on your server, you must specify `ODOO_DB`
 - API key authentication is recommended for better security
+- When `ODOO_LOCALE` is set, Odoo will return translated field labels, selection values, and messages in that language
 
 ### Transport Options
 
@@ -396,6 +417,41 @@ Once configured, you can ask Claude:
 - "Update the phone number for customer John Doe to +1-555-0123"
 - "Change the status of order SO/2024/001 to confirmed"
 - "Delete the test contact we created earlier"
+
+### Multi-Language Support
+
+When you configure `ODOO_LOCALE`, Odoo will return all data in that language:
+
+**With `ODOO_LOCALE=es_ES` (Spanish):**
+```
+# Field labels will be in Spanish
+Cliente: Acme Corporation
+Correo electrónico: info@acme.com
+Estado: Borrador
+
+# Selection values will be in Spanish
+Tipo: Cliente
+País: España
+```
+
+**With `ODOO_LOCALE=es_AR` (Argentine Spanish):**
+```
+# Uses Argentine terminology and formats
+Razón Social: La Valeria S.A.
+CUIT: 30-12345678-9
+Provincia: Buenos Aires
+```
+
+**Supported locales include:**
+- `es_ES` - Spanish (Spain)
+- `es_AR` - Spanish (Argentina)
+- `es_MX` - Spanish (Mexico)
+- `en_US` - English (United States)
+- `en_GB` - English (United Kingdom)
+- `fr_FR` - French (France)
+- `pt_BR` - Portuguese (Brazil)
+- `de_DE` - German (Germany)
+- Any other locale installed in your Odoo instance
 
 ## Available Tools
 

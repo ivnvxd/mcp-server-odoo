@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Multi-Language Support**: Added `ODOO_LOCALE` environment variable to request Odoo responses in different languages
+  - Automatically injects language context into all Odoo API calls
+  - Supports any locale installed in your Odoo instance (es_ES, es_AR, fr_FR, etc.)
+  - Returns translated field labels, selection values, and error messages
+  - Preserves existing context values when locale is added
+
 ## [0.3.0] - 2025-09-14
 
 ### Added

@@ -835,6 +835,14 @@ class OdooConnection:
             self.config.api_key if self._auth_method == "api_key" else self.config.password
         )
 
+        # Inject locale into context if configured
+        if self.config.locale:
+            if 'context' not in kwargs:
+                kwargs['context'] = {}
+            # Set language in Odoo context
+            kwargs['context']['lang'] = self.config.locale
+            logger.info(f"🌍 Locale injected: {self.config.locale}")
+
         try:
             # Log the operation
             logger.debug(f"Executing {method} on {model} with args={args}, kwargs={kwargs}")
