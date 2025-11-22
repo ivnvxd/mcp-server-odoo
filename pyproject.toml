@@ -3,16 +3,18 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcp-server-odoo"
+name = "mcp-server-odoo-ei"
 version = "0.3.0"
 description = "A Model Context Protocol server for Odoo ERP systems"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-    { name = "Andrey Ivanov", email = "ivnv.xd@gmail.com" }
+    { name = "Andrey Ivanov", email = "ivnv.xd@gmail.com" },
+    { name = "Luciano Bustos", email = "luciano.bustos@elevateinformatics.com" }
 ]
 maintainers = [
-    { name = "Andrey Ivanov", email = "ivnv.xd@gmail.com" }
+    { name = "Andrey Ivanov", email = "ivnv.xd@gmail.com" },
+    { name = "Luciano Bustos", email = "luciano.bustos@elevateinformatics.com" }
 ]
 license = { text = "MPL-2.0" }
 keywords = ["mcp", "odoo", "erp", "model-context-protocol", "ai", "llm", "claude", "anthropic"]
@@ -38,11 +40,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ivnvxd/mcp-server-odoo"
-Documentation = "https://github.com/ivnvxd/mcp-server-odoo#readme"
-Repository = "https://github.com/ivnvxd/mcp-server-odoo"
-Issues = "https://github.com/ivnvxd/mcp-server-odoo/issues"
-Changelog = "https://github.com/ivnvxd/mcp-server-odoo/releases"
+Homepage = "https://github.com/elevateinformatics/mcp-server-odoo"
+Documentation = "https://github.com/elevateinformatics/mcp-server-odoo#readme"
+Repository = "https://github.com/elevateinformatics/mcp-server-odoo"
+Issues = "https://github.com/elevateinformatics/mcp-server-odoo/issues"
+Changelog = "https://github.com/elevateinformatics/mcp-server-odoo/releases"
 
 [project.optional-dependencies]
 dev = [
