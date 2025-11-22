@@ -837,10 +837,10 @@ class OdooConnection:
 
         # Inject locale into context if configured
         if self.config.locale:
-            if 'context' not in kwargs:
-                kwargs['context'] = {}
+            if "context" not in kwargs:
+                kwargs["context"] = {}
             # Set language in Odoo context
-            kwargs['context']['lang'] = self.config.locale
+            kwargs["context"]["lang"] = self.config.locale
             logger.info(f"🌍 Locale injected: {self.config.locale}")
 
         try:

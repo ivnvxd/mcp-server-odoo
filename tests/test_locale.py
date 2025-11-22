@@ -140,12 +140,7 @@ class TestLocaleSupport:
         conn._object_proxy = mock_proxy
 
         # Pass existing context with some values
-        kwargs = {
-            "context": {
-                "active_test": False,
-                "tz": "America/Argentina/Buenos_Aires"
-            }
-        }
+        kwargs = {"context": {"active_test": False, "tz": "America/Argentina/Buenos_Aires"}}
         conn.execute_kw("res.partner", "search_read", [[]], kwargs)
 
         call_args = mock_proxy.execute_kw.call_args
@@ -162,12 +157,15 @@ class TestLocaleSupport:
         with patch.dict("os.environ", {"ODOO_LOCALE": "fr_FR"}):
             from mcp_server_odoo.config import load_config
 
-            with patch.dict("os.environ", {
-                "ODOO_URL": "https://test.odoo.com",
-                "ODOO_USER": "test",
-                "ODOO_PASSWORD": "test",
-                "ODOO_YOLO": "true",
-            }):
+            with patch.dict(
+                "os.environ",
+                {
+                    "ODOO_URL": "https://test.odoo.com",
+                    "ODOO_USER": "test",
+                    "ODOO_PASSWORD": "test",
+                    "ODOO_YOLO": "true",
+                },
+            ):
                 config = load_config()
                 assert config.locale == "fr_FR"
 
