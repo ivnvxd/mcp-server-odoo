@@ -4,8 +4,9 @@ This module tests that locale configuration is properly applied
 to Odoo API calls, allowing responses in different languages.
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.odoo_connection import OdooConnection
