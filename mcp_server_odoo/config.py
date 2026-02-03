@@ -3,14 +3,11 @@
 This module handles loading and validation of environment variables
 for connecting to Odoo via XML-RPC.
 """
-
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Literal, Optional
-
 from dotenv import load_dotenv
-
 
 @dataclass
 class OdooConfig:
@@ -18,24 +15,20 @@ class OdooConfig:
 
     # Required fields
     url: str
-
     # Authentication (one method required)
     api_key: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
-
     # Optional fields with defaults
     database: Optional[str] = None
     log_level: str = "INFO"
     default_limit: int = 10
     max_limit: int = 100
     max_smart_fields: int = 15
-
     # MCP transport configuration
     transport: Literal["stdio", "streamable-http"] = "stdio"
     host: str = "localhost"
     port: int = 8000
-
     # YOLO mode configuration
     yolo_mode: str = "off"  # "off", "read", or "true"
 
@@ -128,16 +121,12 @@ class OdooConfig:
         Returns:
             Dict[str, str]: Mapping of endpoint names to paths
         """
-        if self.is_yolo_enabled:
-            # Use standard Odoo endpoints in YOLO mode
-            return {"db": "/xmlrpc/db", "common": "/xmlrpc/2/common", "object": "/xmlrpc/2/object"}
-        else:
-            # Use MCP-specific endpoints in standard mode
-            return {
-                "db": "/mcp/xmlrpc/db",
-                "common": "/mcp/xmlrpc/common",
-                "object": "/mcp/xmlrpc/object",
-            }
+        # Odoo 18: XML-RPC solo existe en endpoints core
+        return {
+            "db": "/xmlrpc/2/db",
+            "common": "/xmlrpc/2/common",
+            "object": "/xmlrpc/2/object",
+        }
 
     @classmethod
     def from_env(cls, env_file: Optional[Path] = None) -> "OdooConfig":
@@ -151,7 +140,6 @@ class OdooConfig:
         """
         return load_config(env_file)
 
-
 def load_config(env_file: Optional[Path] = None) -> OdooConfig:
     """Load configuration from environment variables and .env file.
 
@@ -161,7 +149,6 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
 
     Returns:
         OdooConfig: Validated configuration object
-
     Raises:
         ValueError: If required configuration is missing or invalid
     """
@@ -228,17 +215,14 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
 
     return config
 
-
 # Singleton configuration instance
 _config: Optional[OdooConfig] = None
 
-
 def get_config() -> OdooConfig:
-    """Get the singleton configuration instance.
+    """Get singleton configuration instance.
 
     Returns:
         OdooConfig: The configuration object
-
     Raises:
         ValueError: If configuration is not yet loaded
     """
@@ -246,7 +230,6 @@ def get_config() -> OdooConfig:
     if _config is None:
         _config = load_config()
     return _config
-
 
 def set_config(config: OdooConfig) -> None:
     """Set the singleton configuration instance.
@@ -258,7 +241,6 @@ def set_config(config: OdooConfig) -> None:
     """
     global _config
     _config = config
-
 
 def reset_config() -> None:
     """Reset the singleton configuration instance.
