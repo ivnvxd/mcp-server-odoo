@@ -89,6 +89,7 @@ class OdooConnection:
         self._database: Optional[str] = None
         self._authenticated = False
         self._auth_method: Optional[str] = None  # 'api_key' or 'password'
+        self._username: Optional[str] = None
 
         mode_info = f" (YOLO mode: {config.yolo_mode})" if config.is_yolo_enabled else ""
         logger.info(f"Initialized OdooConnection for {self._url_components['host']}{mode_info}")
@@ -579,9 +580,11 @@ class OdooConnection:
             # Standard MCP API key validation
             url = f"{self._url_components['base_url']}/mcp/auth/validate"
 
-            # Create request with API key header
-            req = urllib.request.Request(url)
+            # Create request with API key header and POST method
+            data = json.dumps({}).encode("utf-8")
+            req = urllib.request.Request(url, data=data, method="POST")
             req.add_header("X-API-Key", self.config.api_key)
+            req.add_header("Content-Type", "application/json")
 
             # Make the request
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
@@ -592,7 +595,10 @@ class OdooConnection:
                     self._database = database
                     self._auth_method = "api_key"
                     self._authenticated = True
-                    logger.info(f"Successfully authenticated with MCP API key (UID: {self._uid})")
+                    self._username = data["data"].get("login")
+                    logger.info(
+                        f"Successfully authenticated with MCP API key (UID: {self._uid}, Username: {self._username})"
+                    )
                     return True
                 else:
                     logger.warning("MCP API key validation failed")
@@ -673,7 +679,6 @@ class OdooConnection:
             else:
                 logger.warning("Username/password authentication failed")
                 return False
-
         except xmlrpc.client.Fault as e:
             logger.warning(f"Authentication fault: {e}")
             return False
@@ -831,9 +836,13 @@ class OdooConnection:
             raise OdooConnectionError("Not connected to Odoo")
 
         # Get the appropriate password/token based on auth method
-        password_or_token = (
-            self.config.api_key if self._auth_method == "api_key" else self.config.password
-        )
+        if self._auth_method == "api_key":
+            # For Odoo 18 compatibility: use password if available, otherwise API key
+            password_or_token = (
+                self.config.password if self.config.password else self.config.api_key
+            )
+        else:
+            password_or_token = self.config.password
 
         try:
             # Log the operation
