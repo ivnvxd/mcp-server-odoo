@@ -96,7 +96,7 @@ class TestAuthentication:
         connection_api_key.authenticate("mcp")
 
         # Verify authentication state
-        assert connection_api_key.is_authenticated()
+        assert connection_api_key.is_authenticated
         assert connection_api_key.uid == 2
         assert connection_api_key.database == "mcp"
         assert connection_api_key.auth_method == "api_key"
@@ -112,7 +112,7 @@ class TestAuthentication:
             connection_api_key.authenticate("mcp")
 
         # Verify not authenticated
-        assert not connection_api_key.is_authenticated()
+        assert not connection_api_key.is_authenticated
 
     def test_password_authentication_success(self, connection_password):
         """Test successful username/password authentication."""
@@ -125,7 +125,7 @@ class TestAuthentication:
         connection_password.authenticate("mcp")
 
         # Verify authentication state
-        assert connection_password.is_authenticated()
+        assert connection_password.is_authenticated
         assert connection_password.uid == 2
         assert connection_password.database == "mcp"
         assert connection_password.auth_method == "password"
@@ -147,7 +147,7 @@ class TestAuthentication:
             connection_password.authenticate("mcp")
 
         # Verify not authenticated
-        assert not connection_password.is_authenticated()
+        assert not connection_password.is_authenticated
 
     def test_password_authentication_fault(self, connection_password):
         """Test username/password authentication with XML-RPC fault."""
@@ -161,7 +161,7 @@ class TestAuthentication:
             connection_password.authenticate("mcp")
 
         # Verify not authenticated
-        assert not connection_password.is_authenticated()
+        assert not connection_password.is_authenticated
 
     @patch("urllib.request.urlopen")
     def test_authentication_fallback(self, mock_urlopen, config_both):
@@ -182,7 +182,7 @@ class TestAuthentication:
         conn.authenticate("mcp")
 
         # Verify authenticated with password
-        assert conn.is_authenticated()
+        assert conn.is_authenticated
         assert conn.uid == 3
         assert conn.auth_method == "password"
 
@@ -219,7 +219,7 @@ class TestAuthentication:
         connection_api_key.disconnect()
 
         # Verify state cleared
-        assert not connection_api_key.is_authenticated()
+        assert not connection_api_key.is_authenticated
         assert connection_api_key.uid is None
         assert connection_api_key.database is None
         assert connection_api_key.auth_method is None
@@ -257,7 +257,7 @@ class TestAuthenticationIntegration:
             conn.authenticate()
 
             # Verify authenticated
-            assert conn.is_authenticated()
+            assert conn.is_authenticated
             assert conn.uid is not None
             assert conn.database is not None
             assert conn.auth_method == "api_key"
@@ -271,7 +271,7 @@ class TestAuthenticationIntegration:
             conn.authenticate()
 
             # Verify authenticated
-            assert conn.is_authenticated()
+            assert conn.is_authenticated
             assert conn.uid is not None
             assert conn.database is not None
             assert conn.auth_method == "password"
@@ -399,7 +399,7 @@ class TestYoloModeAuthentication:
         success = conn._authenticate_api_key_standard("testdb")
 
         assert success is False
-        assert not conn.is_authenticated()
+        assert not conn.is_authenticated
 
     def test_yolo_api_key_auth_xmlrpc_fault(self, config_yolo_api_key):
         """Test API key authentication with XML-RPC fault in YOLO mode."""
@@ -417,7 +417,7 @@ class TestYoloModeAuthentication:
         success = conn._authenticate_api_key_standard("testdb")
 
         assert success is False
-        assert not conn.is_authenticated()
+        assert not conn.is_authenticated
 
     def test_yolo_password_auth(self, config_yolo_full):
         """Test password authentication in YOLO mode."""
@@ -537,7 +537,7 @@ class TestYoloModeAuthentication:
                 conn.authenticate("testdb")
 
                 mock_pwd.assert_called_once_with("testdb")
-                assert conn.is_authenticated()
+                assert conn.is_authenticated
 
     def test_authentication_error_messages(self):
         """Test detailed error messages for authentication failures."""

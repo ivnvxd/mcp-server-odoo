@@ -20,6 +20,7 @@ from .odoo_connection import OdooConnection, OdooConnectionError
 from .performance import PerformanceManager
 from .resources import register_resources
 from .tools import register_tools
+from .workflow_tools import register_workflow_tools
 
 # Set up logging
 logger = get_logger(__name__)
@@ -55,6 +56,7 @@ class OdooMCPServer:
         self.performance_manager: Optional[PerformanceManager] = None
         self.resource_handler = None
         self.tool_handler = None
+        self.workflow_handler = None
 
         # Create FastMCP instance with server metadata
         self.app = FastMCP(
@@ -113,6 +115,7 @@ class OdooMCPServer:
                 self.access_controller = None
                 self.resource_handler = None
                 self.tool_handler = None
+                self.workflow_handler = None
 
     def _setup_handlers(self):
         """Set up MCP handlers for resources, tools, and prompts.
@@ -141,6 +144,12 @@ class OdooMCPServer:
                 self.app, self.connection, self.access_controller, self.config
             )
             logger.info("Registered MCP tools")
+
+            # Register workflow-specific tools
+            self.workflow_handler = register_workflow_tools(
+                self.app, self.connection, self.access_controller, self.config
+            )
+            logger.info("Registered MCP workflow tools")
 
     async def run_stdio(self):
         """Run the server using stdio transport.

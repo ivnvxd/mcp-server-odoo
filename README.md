@@ -14,6 +14,7 @@ An MCP server that enables AI assistants like Claude to interact with Odoo ERP s
 
 ## Features
 
+### Core Operations
 - 🔍 **Search and retrieve** any Odoo record (customers, products, invoices, etc.)
 - ✨ **Create new records** with field validation and permission checks
 - ✏️ **Update existing data** with smart field handling
@@ -21,6 +22,17 @@ An MCP server that enables AI assistants like Claude to interact with Odoo ERP s
 - 📊 **Browse multiple records** and get formatted summaries
 - 🔢 **Count records** matching specific criteria
 - 📋 **Inspect model fields** to understand data structure
+
+### Workflow Tools (NEW!)
+- 📝 **Create and confirm quotations** → sales orders in one step
+- 🏭 **Manufacturing workflows** - create and confirm production orders
+- 🛒 **Purchase workflows** - create POs and receive inventory
+- 📦 **Delivery management** - validate outgoing shipments
+- 🔧 **Bill of Materials** - create BOMs for manufactured products
+- 📊 **Workflow status tracking** - trace orders through their complete lifecycle
+- 🔄 **End-to-end processes** - quotation → manufacturing → purchase → delivery
+
+### Infrastructure
 - 🔐 **Secure access** with API key or username/password authentication
 - 🎯 **Smart pagination** for large datasets
 - 💬 **LLM-optimized output** with hierarchical text formatting
@@ -475,6 +487,192 @@ Delete a record from Odoo.
   "model": "res.partner",
   "record_id": 42
 }
+```
+
+## Workflow Tools
+
+In addition to basic CRUD operations, the MCP server provides high-level workflow tools that combine multiple operations into complete business processes.
+
+### `create_quotation`
+Create a sales quotation with order lines.
+
+```json
+{
+  "customer_id": 15,
+  "product_lines": [
+    {
+      "product_id": 123,
+      "quantity": 2.0,
+      "price_unit": 350.0
+    },
+    {
+      "product_id": 124,
+      "quantity": 1.0
+    }
+  ],
+  "order_date": "2026-01-30"
+}
+```
+
+Returns quotation ID, name, total amount, and Odoo web URL.
+
+### `confirm_quotation`
+Convert a quotation to a confirmed sales order.
+
+```json
+{
+  "quotation_id": 42
+}
+```
+
+### `create_manufacturing_order`
+Create a manufacturing order for a product (requires MRP module).
+
+```json
+{
+  "product_id": 373,
+  "quantity": 2.0,
+  "origin": "S00276"
+}
+```
+
+### `confirm_manufacturing_order`
+Confirm a manufacturing order and assign materials.
+
+```json
+{
+  "mo_id": 15
+}
+```
+
+### `create_purchase_order`
+Create a purchase order for raw materials or products.
+
+```json
+{
+  "vendor_id": 42,
+  "product_lines": [
+    {
+      "product_id": 100,
+      "quantity": 10.0,
+      "price_unit": 15.0
+    }
+  ]
+}
+```
+
+### `confirm_purchase_order`
+Confirm a purchase order (creates incoming shipment).
+
+```json
+{
+  "po_id": 28
+}
+```
+
+### `receive_inventory`
+Receive inventory from a purchase order (validate incoming shipment).
+
+```json
+{
+  "po_name": "P00016"
+}
+```
+
+Or use picking ID directly:
+
+```json
+{
+  "picking_id": 87
+}
+```
+
+### `deliver_to_customer`
+Deliver products to customer (validate outgoing delivery).
+
+```json
+{
+  "so_name": "S00276"
+}
+```
+
+Or use picking ID directly:
+
+```json
+{
+  "picking_id": 92
+}
+```
+
+### `create_bom`
+Create a Bill of Materials for a product (requires MRP module).
+
+```json
+{
+  "product_id": 373,
+  "component_lines": [
+    {
+      "product_id": 369,
+      "quantity": 2.0
+    },
+    {
+      "product_id": 370,
+      "quantity": 4.0
+    }
+  ],
+  "bom_type": "normal"
+}
+```
+
+### `get_workflow_status`
+Get complete workflow status tracing an order through its lifecycle.
+
+```json
+{
+  "order_id": 42,
+  "order_type": "sale"
+}
+```
+
+Returns related manufacturing orders, purchase orders, deliveries, and invoices.
+
+**Example Complete Workflow:**
+
+```python
+# 1. Create quotation
+quotation = create_quotation(
+    customer_id=15,
+    product_lines=[{"product_id": 373, "quantity": 2.0}]
+)
+
+# 2. Confirm to sales order
+order = confirm_quotation(quotation_id=quotation["quotation_id"])
+
+# 3. Create manufacturing order
+mo = create_manufacturing_order(
+    product_id=373,
+    quantity=2.0,
+    origin=order["order_name"]
+)
+
+# 4. Create purchase order for raw materials
+po = create_purchase_order(
+    vendor_id=42,
+    product_lines=[{"product_id": 369, "quantity": 4.0, "price_unit": 15.0}]
+)
+
+# 5. Confirm purchase and receive inventory
+confirm_purchase_order(po_id=po["po_id"])
+receive_inventory(po_name=po["po_name"])
+
+# 6. Confirm manufacturing and produce goods
+confirm_manufacturing_order(mo_id=mo["mo_id"])
+
+# 7. Deliver to customer
+deliver_to_customer(so_name=order["order_name"])
+
+# 8. Get complete workflow status
+status = get_workflow_status(order_id=order["order_id"], order_type="sale")
 ```
 
 ## Resources
