@@ -11,8 +11,6 @@ import os
 import sys
 from typing import Optional
 
-from dotenv import load_dotenv
-
 from .config import load_config
 from .server import SERVER_VERSION, OdooMCPServer
 
