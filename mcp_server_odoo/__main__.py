@@ -29,8 +29,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     Returns:
         Exit code (0 for success, non-zero for failure)
     """
-    # Load environment variables from .env file
-    load_dotenv()
 
     # Create argument parser
     parser = argparse.ArgumentParser(
