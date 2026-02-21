@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - Unreleased
+
+### Added
+- **Structured output**: Tools return typed Pydantic models with auto-generated JSON schemas for MCP clients (`SearchResult`, `ModelsResult`, `CreateResult`, `UpdateResult`, `DeleteResult`)
+- **Tool annotations**: All tools declare `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` via MCP `ToolAnnotations`
+- **Resource annotations**: All resources declare `audience` and `priority` via MCP `Annotations`
+- **Human-readable titles**: All tools and resources include `title` for better display in MCP clients
+
+### Changed
+- **MCP SDK**: Upgraded from `>=1.9.4` to `>=1.26.0,<2`
+
 ## [0.3.1] - 2026-02-21
 
 ### Fixed

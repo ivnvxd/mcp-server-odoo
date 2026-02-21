@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import Annotations
 
 from .access_control import AccessControlError, AccessController
 from .config import OdooConfig
@@ -71,7 +72,12 @@ class OdooResourceHandler:
         self._register_concrete_resources()
 
         # Register record retrieval resource handler
-        @self.app.resource("odoo://{model}/record/{record_id}")
+        @self.app.resource(
+            "odoo://{model}/record/{record_id}",
+            title="Odoo Record",
+            description="Retrieve a specific record from an Odoo model by ID",
+            annotations=Annotations(audience=["assistant"], priority=0.5),
+        )
         async def get_record(model: str, record_id: str) -> str:
             """Retrieve a specific record from Odoo.
 
@@ -85,7 +91,12 @@ class OdooResourceHandler:
             return await self._handle_record_retrieval(model, record_id)
 
         # Register search resource (no parameters due to FastMCP limitations)
-        @self.app.resource("odoo://{model}/search")
+        @self.app.resource(
+            "odoo://{model}/search",
+            title="Odoo Search",
+            description="Search records with default settings (first 10 records)",
+            annotations=Annotations(audience=["assistant"], priority=0.5),
+        )
         async def search_records(model: str) -> str:
             """Search records with default settings.
 
@@ -98,7 +109,12 @@ class OdooResourceHandler:
         # Use get_record multiple times or search_records tool instead
 
         # Register count resource (no parameters due to FastMCP limitations)
-        @self.app.resource("odoo://{model}/count")
+        @self.app.resource(
+            "odoo://{model}/count",
+            title="Odoo Record Count",
+            description="Count all records in an Odoo model",
+            annotations=Annotations(audience=["assistant"], priority=0.3),
+        )
         async def count_records(model: str) -> str:
             """Count all records in the model.
 
@@ -107,7 +123,12 @@ class OdooResourceHandler:
             return await self._handle_count(model, None)
 
         # Register fields resource
-        @self.app.resource("odoo://{model}/fields")
+        @self.app.resource(
+            "odoo://{model}/fields",
+            title="Odoo Field Definitions",
+            description="Get field definitions and metadata for an Odoo model",
+            annotations=Annotations(audience=["assistant"], priority=0.4),
+        )
         async def get_fields(model: str) -> str:
             """Get field definitions for a model.
 

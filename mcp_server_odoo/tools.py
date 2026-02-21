@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from .access_control import AccessControlError, AccessController
 from .config import OdooConfig
@@ -20,6 +21,14 @@ from .error_handling import (
 from .error_sanitizer import ErrorSanitizer
 from .logging_config import get_logger, perf_logger
 from .odoo_connection import OdooConnection, OdooConnectionError
+from .schemas import (
+    CreateResult,
+    DeleteResult,
+    ModelsResult,
+    ResourceTemplatesResult,
+    SearchResult,
+    UpdateResult,
+)
 
 logger = get_logger(__name__)
 
@@ -381,7 +390,15 @@ class OdooToolHandler:
     def _register_tools(self):
         """Register all tool handlers with FastMCP."""
 
-        @self.app.tool()
+        @self.app.tool(
+            title="Search Records",
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=True,
+            ),
+        )
         async def search_records(
             model: str,
             domain: Optional[Union[str, List[Union[str, List[Any]]]]] = None,
@@ -389,7 +406,7 @@ class OdooToolHandler:
             limit: int = 10,
             offset: int = 0,
             order: Optional[str] = None,
-        ) -> Dict[str, Any]:
+        ) -> SearchResult:
             """Search for records in an Odoo model.
 
             Args:
@@ -408,11 +425,20 @@ class OdooToolHandler:
                 order: Sort order (e.g., 'name asc')
 
             Returns:
-                Dictionary with 'records' list and 'total' count
+                Search results with records, total count, and pagination info
             """
-            return await self._handle_search_tool(model, domain, fields, limit, offset, order)
+            result = await self._handle_search_tool(model, domain, fields, limit, offset, order)
+            return SearchResult(**result)
 
-        @self.app.tool()
+        @self.app.tool(
+            title="Get Record",
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
+        )
         async def get_record(
             model: str,
             record_id: int,
@@ -448,42 +474,40 @@ class OdooToolHandler:
                 get_record("res.partner", 1, fields=["__all__"])
 
             Returns:
-                Dictionary with record data containing requested fields.
-                When using smart defaults, includes _metadata with field statistics.
+                Record data with requested fields. When using smart defaults,
+                includes _metadata with field statistics.
             """
             return await self._handle_get_record_tool(model, record_id, fields)
 
-        @self.app.tool()
-        async def list_models() -> Dict[str, Any]:
+        @self.app.tool(
+            title="List Models",
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
+        )
+        async def list_models() -> ModelsResult:
             """List all models enabled for MCP access with their allowed operations.
 
             Returns:
-                Dictionary containing a list of model information dictionaries.
-                Each model includes:
-                - model: Technical name (e.g., 'res.partner')
-                - name: Display name (e.g., 'Contact')
-                - operations: Dict of allowed operations (read, write, create, unlink)
-
-            Example response:
-                {
-                    "models": [
-                        {
-                            "model": "res.partner",
-                            "name": "Contact",
-                            "operations": {
-                                "read": true,
-                                "write": true,
-                                "create": true,
-                                "unlink": false
-                            }
-                        }
-                    ]
-                }
+                List of models with their technical names, display names,
+                and allowed operations (read, write, create, unlink).
             """
-            return await self._handle_list_models_tool()
+            result = await self._handle_list_models_tool()
+            return ModelsResult(**result)
 
-        @self.app.tool()
-        async def list_resource_templates() -> Dict[str, Any]:
+        @self.app.tool(
+            title="List Resource Templates",
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
+        )
+        async def list_resource_templates() -> ResourceTemplatesResult:
             """List available resource URI templates.
 
             Since MCP resources with parameters are registered as templates,
@@ -491,18 +515,24 @@ class OdooToolHandler:
             information about available resource patterns you can use.
 
             Returns:
-                Dictionary with resource template information including:
-                - templates: List of resource template definitions
-                - examples: Example URIs for each template
-                - enabled_models: List of models you can use with these templates
+                Resource template definitions with examples and enabled models.
             """
-            return await self._handle_list_resource_templates_tool()
+            result = await self._handle_list_resource_templates_tool()
+            return ResourceTemplatesResult(**result)
 
-        @self.app.tool()
+        @self.app.tool(
+            title="Create Record",
+            annotations=ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=False,
+                openWorldHint=True,
+            ),
+        )
         async def create_record(
             model: str,
             values: Dict[str, Any],
-        ) -> Dict[str, Any]:
+        ) -> CreateResult:
             """Create a new record in an Odoo model.
 
             Args:
@@ -510,16 +540,25 @@ class OdooToolHandler:
                 values: Field values for the new record
 
             Returns:
-                Dictionary with created record details
+                Created record details with ID, URL, and confirmation.
             """
-            return await self._handle_create_record_tool(model, values)
+            result = await self._handle_create_record_tool(model, values)
+            return CreateResult(**result)
 
-        @self.app.tool()
+        @self.app.tool(
+            title="Update Record",
+            annotations=ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=True,
+            ),
+        )
         async def update_record(
             model: str,
             record_id: int,
             values: Dict[str, Any],
-        ) -> Dict[str, Any]:
+        ) -> UpdateResult:
             """Update an existing record.
 
             Args:
@@ -528,15 +567,24 @@ class OdooToolHandler:
                 values: Field values to update
 
             Returns:
-                Dictionary with updated record details
+                Updated record details with confirmation.
             """
-            return await self._handle_update_record_tool(model, record_id, values)
+            result = await self._handle_update_record_tool(model, record_id, values)
+            return UpdateResult(**result)
 
-        @self.app.tool()
+        @self.app.tool(
+            title="Delete Record",
+            annotations=ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=True,
+                idempotentHint=False,
+                openWorldHint=False,
+            ),
+        )
         async def delete_record(
             model: str,
             record_id: int,
-        ) -> Dict[str, Any]:
+        ) -> DeleteResult:
             """Delete a record.
 
             Args:
@@ -544,9 +592,10 @@ class OdooToolHandler:
                 record_id: The record ID to delete
 
             Returns:
-                Dictionary with deletion confirmation
+                Deletion confirmation with the deleted record's name and ID.
             """
-            return await self._handle_delete_record_tool(model, record_id)
+            result = await self._handle_delete_record_tool(model, record_id)
+            return DeleteResult(**result)
 
     async def _handle_search_tool(
         self,

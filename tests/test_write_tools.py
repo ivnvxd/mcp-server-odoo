@@ -16,7 +16,7 @@ class TestWriteTools:
     def mock_app(self):
         """Create mock FastMCP app."""
         app = Mock()
-        app.tool = Mock(side_effect=lambda: lambda func: func)
+        app.tool = Mock(side_effect=lambda **kwargs: lambda func: func)
         return app
 
     @pytest.fixture
@@ -203,7 +203,7 @@ class TestWriteTools:
         # Track functions that were decorated
         decorated_functions = []
 
-        def mock_tool_decorator():
+        def mock_tool_decorator(**kwargs):
             def decorator(func):
                 decorated_functions.append(func.__name__)
                 return func
