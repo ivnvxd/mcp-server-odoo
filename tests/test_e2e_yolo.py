@@ -478,9 +478,9 @@ class TestYoloModeE2E:
                     # Check permissions allow write
                     access_controller = AccessController(config)
                     allowed, _ = access_controller.check_operation_allowed("res.partner", "write")
-                    assert (
-                        allowed == should_allow_write
-                    ), f"Value '{value}' should {'allow' if should_allow_write else 'not allow'} write"
+                    assert allowed == should_allow_write, (
+                        f"Value '{value}' should {'allow' if should_allow_write else 'not allow'} write"
+                    )
                 else:
                     assert config.yolo_mode == "read"
                     # Check permissions block write

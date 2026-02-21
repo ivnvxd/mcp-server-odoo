@@ -93,12 +93,11 @@ include = ["mcp_server_odoo/"]
 exclude = ["venv/", ".venv/", "build/", "dist/"]
 
 [tool.ty.rules]
-# Start permissive (matching previous mypy posture), tighten over time
 possibly-unresolved-reference = "warn"
 invalid-argument-type = "ignore"
-invalid-parameter-default = "ignore"
-invalid-return-type = "ignore"
-invalid-assignment = "ignore"
+invalid-parameter-default = "error"
+invalid-return-type = "warn"
+invalid-assignment = "warn"
 unresolved-attribute = "ignore"
 
 [tool.ruff]

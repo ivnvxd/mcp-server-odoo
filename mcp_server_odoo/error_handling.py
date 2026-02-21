@@ -432,7 +432,9 @@ error_handler = ErrorHandler()
 
 
 # Utility functions for common error scenarios
-def handle_odoo_error(error: Exception, model: str = None, operation: str = None) -> MCPError:
+def handle_odoo_error(
+    error: Exception, model: str | None = None, operation: str | None = None
+) -> MCPError:
     """Handle Odoo-specific errors with appropriate categorization.
 
     Args:

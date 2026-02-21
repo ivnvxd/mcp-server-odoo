@@ -186,9 +186,9 @@ class TestTransportIntegration:
                 for i in range(3):
                     resources = await client.list_resources()
                     # Resources might be empty, that's ok - just testing transport stability
-                    assert (
-                        resources is not None
-                    ), f"Resource list should not be None on request {i + 1}"
+                    assert resources is not None, (
+                        f"Resource list should not be None on request {i + 1}"
+                    )
 
         except Exception as e:
             # Log the actual error for debugging
@@ -260,9 +260,9 @@ class TestTransportIntegration:
                 response = await tester._send_request("tools/list", {}, tester._next_id())
                 assert response is not None, f"No response to request {i + 1}"
                 assert "error" not in response, f"Error in request {i + 1}: {response}"
-                assert (
-                    tester.session_id == original_session_id
-                ), f"Session ID changed on request {i + 1}"
+                assert tester.session_id == original_session_id, (
+                    f"Session ID changed on request {i + 1}"
+                )
 
         finally:
             tester.stop_server()
