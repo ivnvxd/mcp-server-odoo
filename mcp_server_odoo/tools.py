@@ -454,7 +454,7 @@ class OdooToolHandler:
             return await self._handle_get_record_tool(model, record_id, fields)
 
         @self.app.tool()
-        async def list_models() -> Dict[str, List[Dict[str, Any]]]:
+        async def list_models() -> Dict[str, Any]:
             """List all models enabled for MCP access with their allowed operations.
 
             Returns:
