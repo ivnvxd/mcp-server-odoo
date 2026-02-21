@@ -765,6 +765,7 @@ class OdooConnection:
                 "Provide either API key or username/password credentials."
             )
 
+    @property
     def is_authenticated(self) -> bool:
         """Check if currently authenticated."""
         return self._authenticated

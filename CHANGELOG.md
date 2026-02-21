@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-02-21
+
+### Fixed
+- **Authentication bypass**: Add missing `@property` on `is_authenticated` — was always truthy as a method reference, bypassing auth guards
+
+### Changed
+- Update CI dependencies (black 26.1.0, GitHub Actions v6/v7)
+- Server version test validates semver format instead of hardcoded value
+
 ## [0.3.0] - 2025-09-14
 
 ### Added
