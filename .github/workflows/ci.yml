@@ -28,17 +28,17 @@ jobs:
       run: |
         uv pip install --system -e ".[dev]"
     
-    - name: Check code formatting with Black
+    - name: Check code formatting with Ruff
       run: |
-        black --check --diff .
+        ruff format --check --diff .
     
     - name: Lint with Ruff
       run: |
         ruff check . --output-format=github
     
-    - name: Type check with MyPy
+    - name: Type check with ty
       run: |
-        mypy .
+        ty check .
 
   test:
     name: Test Python ${{ matrix.python-version }}

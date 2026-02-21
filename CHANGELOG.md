@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **MCP SDK**: Upgraded from `>=1.9.4` to `>=1.26.0,<2`
+- **Tooling**: Replace black/mypy with ruff format/ty for formatting and type checking
 
 ## [0.3.1] - 2026-02-21
 
