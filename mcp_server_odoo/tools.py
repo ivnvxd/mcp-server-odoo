@@ -24,16 +24,15 @@ from .odoo_connection import OdooConnection, OdooConnectionError
 from .schemas import (
     CreateResult,
     DeleteResult,
+    FieldSelectionMetadata,
     ModelsResult,
+    RecordResult,
     ResourceTemplatesResult,
     SearchResult,
     UpdateResult,
 )
 
 logger = get_logger(__name__)
-
-# Legacy error type alias for backward compatibility
-ToolError = ValidationError
 
 
 class OdooToolHandler:
@@ -443,7 +442,7 @@ class OdooToolHandler:
             model: str,
             record_id: int,
             fields: Optional[List[str]] = None,
-        ) -> Dict[str, Any]:
+        ) -> RecordResult:
             """Get a specific record by ID with smart field selection.
 
             This tool supports selective field retrieval to optimize performance and response size.
@@ -475,7 +474,7 @@ class OdooToolHandler:
 
             Returns:
                 Record data with requested fields. When using smart defaults,
-                includes _metadata with field statistics.
+                includes metadata with field statistics.
             """
             return await self._handle_get_record_tool(model, record_id, fields)
 
@@ -722,20 +721,20 @@ class OdooToolHandler:
                 }
 
         except AccessControlError as e:
-            raise ToolError(f"Access denied: {e}") from e
+            raise ValidationError(f"Access denied: {e}") from e
         except OdooConnectionError as e:
-            raise ToolError(f"Connection error: {e}") from e
+            raise ValidationError(f"Connection error: {e}") from e
         except Exception as e:
             logger.error(f"Error in search_records tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
-            raise ToolError(f"Search failed: {sanitized_msg}") from e
+            raise ValidationError(f"Search failed: {sanitized_msg}") from e
 
     async def _handle_get_record_tool(
         self,
         model: str,
         record_id: int,
         fields: Optional[List[str]],
-    ) -> Dict[str, Any]:
+    ) -> RecordResult:
         """Handle get record tool request."""
         try:
             with perf_logger.track_operation("tool_get_record", model=model):
@@ -750,17 +749,20 @@ class OdooToolHandler:
                 fields_to_fetch = fields
                 use_smart_defaults = False
                 total_fields = None
+                field_selection_method = "explicit"
 
                 if fields is None:
                     # Use smart field selection
                     fields_to_fetch = self._get_smart_default_fields(model)
                     use_smart_defaults = True
+                    field_selection_method = "smart_defaults"
                     logger.debug(
                         f"Using smart defaults for {model}: {len(fields_to_fetch) if fields_to_fetch else 'all'} fields"
                     )
                 elif fields == ["__all__"]:
                     # Explicit request for all fields
                     fields_to_fetch = None  # Odoo interprets None as all fields
+                    field_selection_method = "all"
                     logger.debug(f"Fetching all fields for {model}")
                 else:
                     # Specific fields requested
@@ -770,47 +772,41 @@ class OdooToolHandler:
                 records = self.connection.read(model, [record_id], fields_to_fetch)
 
                 if not records:
-                    raise ToolError(f"Record not found: {model} with ID {record_id}")
+                    raise ValidationError(f"Record not found: {model} with ID {record_id}")
 
                 # Process datetime fields in the record
                 record = self._process_record_dates(records[0], model)
 
-                # Add metadata when using smart defaults
+                # Build metadata when using smart defaults
+                metadata = None
                 if use_smart_defaults:
                     try:
-                        # Get total field count for metadata
                         all_fields_info = self.connection.fields_get(model)
                         total_fields = len(all_fields_info)
                     except Exception:
-                        pass  # Don't fail if we can't get field count
+                        pass
 
-                    record["_metadata"] = {
-                        "fields_returned": (
-                            len(record) - 1 if "_metadata" in record else len(record)
-                        ),
-                        "field_selection_method": "smart_defaults",
-                        "note": "Limited fields returned for performance. Use fields=['__all__'] for all fields or see odoo://{}/fields for available fields.".format(
-                            model
-                        ),
-                    }
-                    if total_fields:
-                        record["_metadata"]["total_fields_available"] = total_fields
+                    metadata = FieldSelectionMetadata(
+                        fields_returned=len(record),
+                        field_selection_method=field_selection_method,
+                        total_fields_available=total_fields,
+                        note=f"Limited fields returned for performance. Use fields=['__all__'] for all fields or see odoo://{model}/fields for available fields.",
+                    )
 
-                return record
+                return RecordResult(record=record, metadata=metadata)
 
-        except ToolError:
-            # Re-raise ToolError without modification to preserve specific error messages
+        except ValidationError:
             raise
         except NotFoundError as e:
-            raise ToolError(str(e)) from e
+            raise ValidationError(str(e)) from e
         except AccessControlError as e:
-            raise ToolError(f"Access denied: {e}") from e
+            raise ValidationError(f"Access denied: {e}") from e
         except OdooConnectionError as e:
-            raise ToolError(f"Connection error: {e}") from e
+            raise ValidationError(f"Connection error: {e}") from e
         except Exception as e:
             logger.error(f"Error in get_record tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
-            raise ToolError(f"Failed to get record: {sanitized_msg}") from e
+            raise ValidationError(f"Failed to get record: {sanitized_msg}") from e
 
     async def _handle_list_models_tool(self) -> Dict[str, Any]:
         """Handle list models tool request with permissions."""
@@ -949,13 +945,12 @@ class OdooToolHandler:
 
                 # Return proper JSON structure with enriched models array
                 return {"models": enriched_models}
-        except ToolError:
-            # Re-raise ToolError without modification to preserve specific error messages
+        except ValidationError:
             raise
         except Exception as e:
             logger.error(f"Error in list_models tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
-            raise ToolError(f"Failed to list models: {sanitized_msg}") from e
+            raise ValidationError(f"Failed to list models: {sanitized_msg}") from e
 
     async def _handle_list_resource_templates_tool(self) -> Dict[str, Any]:
         """Handle list resource templates tool request."""
@@ -1012,7 +1007,7 @@ class OdooToolHandler:
         except Exception as e:
             logger.error(f"Error in list_resource_templates tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
-            raise ToolError(f"Failed to list resource templates: {sanitized_msg}") from e
+            raise ValidationError(f"Failed to list resource templates: {sanitized_msg}") from e
 
     async def _handle_create_record_tool(
         self,
@@ -1043,7 +1038,9 @@ class OdooToolHandler:
                 # Read only the essential fields
                 records = self.connection.read(model, [record_id], essential_fields)
                 if not records:
-                    raise ToolError(f"Failed to read created record: {model} with ID {record_id}")
+                    raise ValidationError(
+                        f"Failed to read created record: {model} with ID {record_id}"
+                    )
 
                 # Process dates in the minimal record
                 record = self._process_record_dates(records[0], model)
@@ -1059,17 +1056,16 @@ class OdooToolHandler:
                     "message": f"Successfully created {model} record with ID {record_id}",
                 }
 
-        except ToolError:
-            # Re-raise ToolError without modification to preserve specific error messages
+        except ValidationError:
             raise
         except AccessControlError as e:
-            raise ToolError(f"Access denied: {e}") from e
+            raise ValidationError(f"Access denied: {e}") from e
         except OdooConnectionError as e:
-            raise ToolError(f"Connection error: {e}") from e
+            raise ValidationError(f"Connection error: {e}") from e
         except Exception as e:
             logger.error(f"Error in create_record tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
-            raise ToolError(f"Failed to create record: {sanitized_msg}") from e
+            raise ValidationError(f"Failed to create record: {sanitized_msg}") from e
 
     async def _handle_update_record_tool(
         self,
@@ -1106,7 +1102,9 @@ class OdooToolHandler:
                 # Read only the essential fields
                 records = self.connection.read(model, [record_id], essential_fields)
                 if not records:
-                    raise ToolError(f"Failed to read updated record: {model} with ID {record_id}")
+                    raise ValidationError(
+                        f"Failed to read updated record: {model} with ID {record_id}"
+                    )
 
                 # Process dates in the minimal record
                 record = self._process_record_dates(records[0], model)
@@ -1122,19 +1120,18 @@ class OdooToolHandler:
                     "message": f"Successfully updated {model} record with ID {record_id}",
                 }
 
-        except ToolError:
-            # Re-raise ToolError without modification to preserve specific error messages
+        except ValidationError:
             raise
         except NotFoundError as e:
-            raise ToolError(str(e)) from e
+            raise ValidationError(str(e)) from e
         except AccessControlError as e:
-            raise ToolError(f"Access denied: {e}") from e
+            raise ValidationError(f"Access denied: {e}") from e
         except OdooConnectionError as e:
-            raise ToolError(f"Connection error: {e}") from e
+            raise ValidationError(f"Connection error: {e}") from e
         except Exception as e:
             logger.error(f"Error in update_record tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
-            raise ToolError(f"Failed to update record: {sanitized_msg}") from e
+            raise ValidationError(f"Failed to update record: {sanitized_msg}") from e
 
     async def _handle_delete_record_tool(
         self,
@@ -1171,19 +1168,18 @@ class OdooToolHandler:
                     "message": f"Successfully deleted {model} record '{record_name}' (ID: {record_id})",
                 }
 
-        except ToolError:
-            # Re-raise ToolError without modification to preserve specific error messages
+        except ValidationError:
             raise
         except NotFoundError as e:
-            raise ToolError(str(e)) from e
+            raise ValidationError(str(e)) from e
         except AccessControlError as e:
-            raise ToolError(f"Access denied: {e}") from e
+            raise ValidationError(f"Access denied: {e}") from e
         except OdooConnectionError as e:
-            raise ToolError(f"Connection error: {e}") from e
+            raise ValidationError(f"Connection error: {e}") from e
         except Exception as e:
             logger.error(f"Error in delete_record tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
-            raise ToolError(f"Failed to delete record: {sanitized_msg}") from e
+            raise ValidationError(f"Failed to delete record: {sanitized_msg}") from e
 
 
 def register_tools(

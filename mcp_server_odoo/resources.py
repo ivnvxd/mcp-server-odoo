@@ -28,11 +28,6 @@ from .uri_schema import (
 
 logger = get_logger(__name__)
 
-# Legacy error type aliases for backward compatibility
-ResourceError = ValidationError
-ResourceNotFoundError = NotFoundError
-ResourcePermissionError = PermissionError
-
 
 class OdooResourceHandler:
     """Handles MCP resource requests for Odoo data."""
@@ -230,9 +225,7 @@ class OdooResourceHandler:
                 records = self.connection.read(model, record_ids)
 
             if not records:
-                raise ResourceNotFoundError(
-                    f"Record not found: {model} with ID {record_id} does not exist"
-                )
+                raise NotFoundError(f"Record not found: {model} with ID {record_id} does not exist")
 
             record = records[0]
 
@@ -242,15 +235,15 @@ class OdooResourceHandler:
             logger.info(f"Successfully retrieved record: {model}/{record_id}")
             return formatted_data
 
-        except (ResourceNotFoundError, ResourcePermissionError, ResourceError):
+        except (NotFoundError, PermissionError, ValidationError):
             # Re-raise our custom exceptions
             raise
         except OdooConnectionError as e:
             logger.error(f"Connection error retrieving {model}/{record_id}: {e}")
-            raise ResourceError(f"Connection error: {e}") from e
+            raise ValidationError(f"Connection error: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error retrieving {model}/{record_id}: {e}")
-            raise ResourceError(f"Failed to retrieve record: {e}") from e
+            raise ValidationError(f"Failed to retrieve record: {e}") from e
 
     async def _handle_search(
         self,
@@ -275,8 +268,8 @@ class OdooResourceHandler:
             Formatted search results with pagination
 
         Raises:
-            ResourcePermissionError: If access is denied
-            ResourceError: For other errors
+            PermissionError: If access is denied
+            ValidationError: For other errors
         """
         logger.info(f"Searching {model} with domain={domain}, limit={limit}, offset={offset}")
 
@@ -286,11 +279,11 @@ class OdooResourceHandler:
                 self.access_controller.validate_model_access(model, "read")
             except AccessControlError as e:
                 logger.warning(f"Access denied for {model}.read: {e}")
-                raise ResourcePermissionError(f"Access denied: {e}") from e
+                raise PermissionError(f"Access denied: {e}") from e
 
             # Ensure we're connected
             if not self.connection.is_authenticated:
-                raise ResourceError("Not authenticated with Odoo")
+                raise ValidationError("Not authenticated with Odoo")
 
             # Parse parameters
             parsed_domain = self._parse_domain(domain)
@@ -334,15 +327,15 @@ class OdooResourceHandler:
             logger.info(f"Search completed: found {len(records)} of {total_count} records")
             return formatted_results
 
-        except (ResourcePermissionError, ResourceError):
+        except (PermissionError, ValidationError):
             # Re-raise our custom exceptions
             raise
         except OdooConnectionError as e:
             logger.error(f"Connection error searching {model}: {e}")
-            raise ResourceError(f"Connection error: {e}") from e
+            raise ValidationError(f"Connection error: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error searching {model}: {e}")
-            raise ResourceError(f"Failed to search records: {e}") from e
+            raise ValidationError(f"Failed to search records: {e}") from e
 
     def _parse_domain(self, domain: Optional[str]) -> List[Any]:
         """Parse domain parameter from URL-encoded string.
@@ -515,8 +508,8 @@ class OdooResourceHandler:
             Formatted multiple record data
 
         Raises:
-            ResourcePermissionError: If access is denied
-            ResourceError: For other errors
+            PermissionError: If access is denied
+            ValidationError: For other errors
         """
         logger.info(f"Browsing {model} records with IDs: {ids}")
 
@@ -526,16 +519,16 @@ class OdooResourceHandler:
                 self.access_controller.validate_model_access(model, "read")
             except AccessControlError as e:
                 logger.warning(f"Access denied for {model}.read: {e}")
-                raise ResourcePermissionError(f"Access denied: {e}") from e
+                raise PermissionError(f"Access denied: {e}") from e
 
             # Ensure we're connected
             if not self.connection.is_authenticated:
-                raise ResourceError("Not authenticated with Odoo")
+                raise ValidationError("Not authenticated with Odoo")
 
             # Parse IDs
             id_list = self._parse_ids(ids)
             if not id_list:
-                raise ResourceError("No valid IDs provided")
+                raise ValidationError("No valid IDs provided")
 
             # Read records in batch with smart field selection to avoid serialization issues
             # Get field metadata to determine which fields to fetch
@@ -580,15 +573,15 @@ class OdooResourceHandler:
             logger.info(f"Browse completed: found {len(records)} of {len(id_list)} records")
             return formatted_results
 
-        except (ResourcePermissionError, ResourceError):
+        except (PermissionError, ValidationError):
             # Re-raise our custom exceptions
             raise
         except OdooConnectionError as e:
             logger.error(f"Connection error browsing {model}: {e}")
-            raise ResourceError(f"Connection error: {e}") from e
+            raise ValidationError(f"Connection error: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error browsing {model}: {e}")
-            raise ResourceError(f"Failed to browse records: {e}") from e
+            raise ValidationError(f"Failed to browse records: {e}") from e
 
     async def _handle_count(self, model: str, domain: Optional[str]) -> str:
         """Handle count request with domain filtering.
@@ -601,8 +594,8 @@ class OdooResourceHandler:
             Formatted count result
 
         Raises:
-            ResourcePermissionError: If access is denied
-            ResourceError: For other errors
+            PermissionError: If access is denied
+            ValidationError: For other errors
         """
         logger.info(f"Counting {model} records with domain: {domain}")
 
@@ -612,11 +605,11 @@ class OdooResourceHandler:
                 self.access_controller.validate_model_access(model, "read")
             except AccessControlError as e:
                 logger.warning(f"Access denied for {model}.read: {e}")
-                raise ResourcePermissionError(f"Access denied: {e}") from e
+                raise PermissionError(f"Access denied: {e}") from e
 
             # Ensure we're connected
             if not self.connection.is_authenticated:
-                raise ResourceError("Not authenticated with Odoo")
+                raise ValidationError("Not authenticated with Odoo")
 
             # Parse domain
             parsed_domain = self._parse_domain(domain)
@@ -630,15 +623,15 @@ class OdooResourceHandler:
             logger.info(f"Count completed: {count} records match criteria")
             return formatted_result
 
-        except (ResourcePermissionError, ResourceError):
+        except (PermissionError, ValidationError):
             # Re-raise our custom exceptions
             raise
         except OdooConnectionError as e:
             logger.error(f"Connection error counting {model}: {e}")
-            raise ResourceError(f"Connection error: {e}") from e
+            raise ValidationError(f"Connection error: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error counting {model}: {e}")
-            raise ResourceError(f"Failed to count records: {e}") from e
+            raise ValidationError(f"Failed to count records: {e}") from e
 
     async def _handle_fields(self, model: str) -> str:
         """Handle fields request for model introspection.
@@ -650,8 +643,8 @@ class OdooResourceHandler:
             Formatted field definitions
 
         Raises:
-            ResourcePermissionError: If access is denied
-            ResourceError: For other errors
+            PermissionError: If access is denied
+            ValidationError: For other errors
         """
         logger.info(f"Getting field definitions for {model}")
 
@@ -661,11 +654,11 @@ class OdooResourceHandler:
                 self.access_controller.validate_model_access(model, "read")
             except AccessControlError as e:
                 logger.warning(f"Access denied for {model}.read: {e}")
-                raise ResourcePermissionError(f"Access denied: {e}") from e
+                raise PermissionError(f"Access denied: {e}") from e
 
             # Ensure we're connected
             if not self.connection.is_authenticated:
-                raise ResourceError("Not authenticated with Odoo")
+                raise ValidationError("Not authenticated with Odoo")
 
             # Get field definitions
             fields = self.connection.fields_get(model)
@@ -676,15 +669,15 @@ class OdooResourceHandler:
             logger.info(f"Fields retrieved: {len(fields)} fields found")
             return formatted_result
 
-        except (ResourcePermissionError, ResourceError):
+        except (PermissionError, ValidationError):
             # Re-raise our custom exceptions
             raise
         except OdooConnectionError as e:
             logger.error(f"Connection error getting fields for {model}: {e}")
-            raise ResourceError(f"Connection error: {e}") from e
+            raise ValidationError(f"Connection error: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error getting fields for {model}: {e}")
-            raise ResourceError(f"Failed to get field definitions: {e}") from e
+            raise ValidationError(f"Failed to get field definitions: {e}") from e
 
     def _parse_ids(self, ids: str) -> List[int]:
         """Parse comma-separated IDs string.

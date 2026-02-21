@@ -77,22 +77,22 @@ class TestFixesIntegration:
         record_result = await tool_handler._handle_get_record_tool("res.partner", 1, None)
 
         # Should have smart field selection
-        assert "id" in record_result
-        assert "name" in record_result
-        assert "email" in record_result
-        assert "create_date" in record_result
+        assert "id" in record_result.record
+        assert "name" in record_result.record
+        assert "email" in record_result.record
+        assert "create_date" in record_result.record
 
         # Should NOT have excluded fields
-        assert "write_date" not in record_result
-        assert "image_1920" not in record_result
-        assert "message_ids" not in record_result
+        assert "write_date" not in record_result.record
+        assert "image_1920" not in record_result.record
+        assert "message_ids" not in record_result.record
 
         # Should have metadata
-        assert "_metadata" in record_result
-        assert record_result["_metadata"]["field_selection_method"] == "smart_defaults"
+        assert record_result.metadata is not None
+        assert record_result.metadata.field_selection_method == "smart_defaults"
 
         # Should have formatted datetime
-        assert record_result["create_date"] == "2025-06-06T13:50:23+00:00"
+        assert record_result.record["create_date"] == "2025-06-06T13:50:23+00:00"
 
         # Test 3: search_records with datetime formatting
         tool_handler.connection.search_count.return_value = 2
@@ -147,15 +147,15 @@ class TestFixesIntegration:
         result = await tool_handler._handle_get_record_tool("res.partner", 1, ["__all__"])
 
         # Should return all fields
-        assert "image_1920" in result
-        assert "message_ids" in result
-        assert "write_date" in result
+        assert "image_1920" in result.record
+        assert "message_ids" in result.record
+        assert "write_date" in result.record
 
-        # Should NOT have metadata
-        assert "_metadata" not in result
+        # Should NOT have metadata (not using smart defaults)
+        assert result.metadata is None
 
         # Should still format datetime
-        assert result["write_date"] == "2025-06-06T13:50:23+00:00"
+        assert result.record["write_date"] == "2025-06-06T13:50:23+00:00"
 
     @pytest.mark.asyncio
     async def test_get_record_with_specific_fields(self, tool_handler):
@@ -171,12 +171,12 @@ class TestFixesIntegration:
         )
 
         # Should have only requested fields
-        assert "name" in result
-        assert "vat" in result
-        assert "create_date" in result
+        assert "name" in result.record
+        assert "vat" in result.record
+        assert "create_date" in result.record
 
-        # Should NOT have metadata
-        assert "_metadata" not in result
+        # Should NOT have metadata (explicit field selection)
+        assert result.metadata is None
 
         # Should still format datetime
-        assert result["create_date"] == "2025-06-06T13:50:23+00:00"
+        assert result.record["create_date"] == "2025-06-06T13:50:23+00:00"

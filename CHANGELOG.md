@@ -8,14 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - Unreleased
 
 ### Added
-- **Structured output**: Tools return typed Pydantic models with auto-generated JSON schemas for MCP clients (`SearchResult`, `ModelsResult`, `CreateResult`, `UpdateResult`, `DeleteResult`)
+- **Structured output**: All tools return typed Pydantic models with auto-generated JSON schemas for MCP clients (`SearchResult`, `RecordResult`, `ModelsResult`, `CreateResult`, `UpdateResult`, `DeleteResult`)
 - **Tool annotations**: All tools declare `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` via MCP `ToolAnnotations`
 - **Resource annotations**: All resources declare `audience` and `priority` via MCP `Annotations`
 - **Human-readable titles**: All tools and resources include `title` for better display in MCP clients
 
 ### Changed
 - **MCP SDK**: Upgraded from `>=1.9.4` to `>=1.26.0,<2`
+- **`get_record` structured output**: Returns `RecordResult` with separate `record` and `metadata` fields instead of injecting `_metadata` into record data
 - **Tooling**: Replace black/mypy with ruff format/ty for formatting and type checking
+
+### Removed
+- Legacy error type aliases (`ToolError`, `ResourceError`, `ResourceNotFoundError`, `ResourcePermissionError`) — use `ValidationError`, `NotFoundError`, `PermissionError` directly
+- Unused `_setup_handlers()` method from `OdooMCPServer`
 
 ## [0.3.1] - 2026-02-21
 

@@ -382,10 +382,10 @@ class TestOdooToolHandler:
         # Call the tool
         result = await get_record(model="res.partner", record_id=123, fields=["name", "email"])
 
-        # Verify result
-        assert result["id"] == 123
-        assert result["name"] == "Test Partner"
-        assert result["email"] == "test@example.com"
+        # Verify result — get_record returns RecordResult
+        assert result.record["id"] == 123
+        assert result.record["name"] == "Test Partner"
+        assert result.record["email"] == "test@example.com"
 
         # Verify calls
         mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "read")

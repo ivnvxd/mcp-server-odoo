@@ -5,8 +5,9 @@ from unittest.mock import Mock, call
 import pytest
 
 from mcp_server_odoo.access_control import AccessControlError
+from mcp_server_odoo.error_handling import ValidationError
 from mcp_server_odoo.odoo_connection import OdooConnectionError
-from mcp_server_odoo.tools import OdooToolHandler, ToolError, register_tools
+from mcp_server_odoo.tools import OdooToolHandler, register_tools
 
 
 class TestWriteTools:
@@ -82,7 +83,7 @@ class TestWriteTools:
     @pytest.mark.asyncio
     async def test_create_record_no_values(self, tool_handler):
         """Test create record with no values."""
-        with pytest.raises(ToolError, match="No values provided"):
+        with pytest.raises(ValidationError, match="No values provided"):
             await tool_handler._handle_create_record_tool("res.partner", {})
 
     @pytest.mark.asyncio
@@ -92,7 +93,7 @@ class TestWriteTools:
             "Access denied"
         )
 
-        with pytest.raises(ToolError, match="Access denied"):
+        with pytest.raises(ValidationError, match="Access denied"):
             await tool_handler._handle_create_record_tool("res.partner", {"name": "Test"})
 
     @pytest.mark.asyncio
@@ -134,13 +135,13 @@ class TestWriteTools:
         """Test update record that doesn't exist."""
         mock_connection.read.return_value = []
 
-        with pytest.raises(ToolError, match="Record not found"):
+        with pytest.raises(ValidationError, match="Record not found"):
             await tool_handler._handle_update_record_tool("res.partner", 999, {"name": "Test"})
 
     @pytest.mark.asyncio
     async def test_update_record_no_values(self, tool_handler):
         """Test update record with no values."""
-        with pytest.raises(ToolError, match="No values provided"):
+        with pytest.raises(ValidationError, match="No values provided"):
             await tool_handler._handle_update_record_tool("res.partner", 123, {})
 
     @pytest.mark.asyncio
@@ -169,7 +170,7 @@ class TestWriteTools:
         """Test delete record that doesn't exist."""
         mock_connection.read.return_value = []
 
-        with pytest.raises(ToolError, match="Record not found"):
+        with pytest.raises(ValidationError, match="Record not found"):
             await tool_handler._handle_delete_record_tool("res.partner", 999)
 
     @pytest.mark.asyncio
@@ -179,7 +180,7 @@ class TestWriteTools:
             "Access denied"
         )
 
-        with pytest.raises(ToolError, match="Access denied"):
+        with pytest.raises(ValidationError, match="Access denied"):
             await tool_handler._handle_delete_record_tool("res.partner", 123)
 
     @pytest.mark.asyncio
@@ -187,7 +188,7 @@ class TestWriteTools:
         """Test create record when not authenticated."""
         mock_connection.is_authenticated = False
 
-        with pytest.raises(ToolError, match="Not authenticated"):
+        with pytest.raises(ValidationError, match="Not authenticated"):
             await tool_handler._handle_create_record_tool("res.partner", {"name": "Test"})
 
     @pytest.mark.asyncio
@@ -195,7 +196,7 @@ class TestWriteTools:
         """Test update record with connection error."""
         mock_connection.read.side_effect = OdooConnectionError("Connection failed")
 
-        with pytest.raises(ToolError, match="Connection error"):
+        with pytest.raises(ValidationError, match="Connection error"):
             await tool_handler._handle_update_record_tool("res.partner", 123, {"name": "Test"})
 
     def test_tools_registered(self, mock_app, mock_connection, mock_access_controller, mock_config):
@@ -299,9 +300,9 @@ class TestWriteToolsIntegration:
             assert delete_result["deleted_id"] == record_id
 
             # Verify deletion
-            from mcp_server_odoo.tools import ToolError
+            from mcp_server_odoo.tools import ValidationError
 
-            with pytest.raises(ToolError, match="Record not found"):
+            with pytest.raises(ValidationError, match="Record not found"):
                 await handler._handle_get_record_tool("res.partner", record_id)
 
         except Exception:

@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from mcp_server_odoo.access_control import AccessControlError
-from mcp_server_odoo.error_handling import ValidationError as ToolError
+from mcp_server_odoo.error_handling import ValidationError
 from mcp_server_odoo.odoo_connection import OdooConnectionError
 from mcp_server_odoo.resources import OdooResourceHandler
 from mcp_server_odoo.tools import OdooToolHandler
@@ -55,7 +55,7 @@ class TestErrorSanitizationIntegration:
             "Operation failed: Invalid field 'bogus_field' in search criteria"
         )
 
-        with pytest.raises(ToolError) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await tool_handler._handle_search_tool(
                 "res.partner", [["bogus_field", "=", True]], None, 10, 0, None
             )
@@ -74,7 +74,7 @@ class TestErrorSanitizationIntegration:
             "Model 'sale.order' is not enabled for MCP access"
         )
 
-        with pytest.raises(ToolError) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await tool_handler._handle_get_record_tool("sale.order", 1, None)
 
         error_msg = str(exc_info.value)
@@ -89,7 +89,7 @@ class TestErrorSanitizationIntegration:
             "Operation failed: Cannot connect to Odoo server"
         )
 
-        with pytest.raises(ToolError) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await tool_handler._handle_get_record_tool("res.partner", 1, None)
 
         error_msg = str(exc_info.value)
@@ -107,7 +107,7 @@ class TestErrorSanitizationIntegration:
             "ValueError: Test error"
         )
 
-        with pytest.raises(ToolError) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await tool_handler._handle_search_tool("res.partner", [], None, 10, 0, None)
 
         error_msg = str(exc_info.value)

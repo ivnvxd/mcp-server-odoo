@@ -40,6 +40,16 @@ class FieldSelectionMetadata(BaseModel):
     )
 
 
+class RecordResult(BaseModel):
+    """Result of retrieving a single record by ID."""
+
+    record: Dict[str, Any] = Field(description="Record data with requested fields")
+    metadata: Optional[FieldSelectionMetadata] = Field(
+        default=None,
+        description="Field selection metadata (present when using smart defaults)",
+    )
+
+
 # --- List Models ---
 
 
