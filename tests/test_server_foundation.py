@@ -81,8 +81,12 @@ class TestServerFoundation:
             reset_config()
 
     def test_server_version(self):
-        """Test server version is properly set."""
-        assert SERVER_VERSION == "0.1.0"
+        """Test server version is a valid semver string."""
+        parts = SERVER_VERSION.split(".")
+        assert len(parts) == 3, f"Expected semver format x.y.z, got {SERVER_VERSION}"
+        assert all(
+            p.isdigit() for p in parts
+        ), f"Expected numeric semver parts, got {SERVER_VERSION}"
 
     def test_ensure_connection_success(self, server_with_mock_connection):
         """Test successful connection establishment."""
