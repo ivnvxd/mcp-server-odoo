@@ -293,14 +293,12 @@ class TestServerIntegration:
 
         # Create a test .env file in tmp directory
         env_file = tmp_path / ".env"
-        env_file.write_text(
-            """
+        env_file.write_text("""
 ODOO_URL=http://localhost:8069
 ODOO_API_KEY=test_integration_key
 ODOO_DB=test_integration_db
 ODOO_MCP_LOG_LEVEL=DEBUG
-"""
-        )
+""")
 
         try:
             # Change to temp directory to isolate from project .env
