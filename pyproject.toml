@@ -49,8 +49,8 @@ dev = [
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
     "pytest-cov>=6.1.1",
-    "ty>=0.0.1",
-    "ruff>=0.11.12",
+    "ty>=0.0.18",
+    "ruff>=0.15.2",
     "requests>=2.32.3",
 ]
 
@@ -113,5 +113,5 @@ quote-style = "double"
 
 [dependency-groups]
 dev = [
-    "ty>=0.0.1",
+    "ty>=0.0.18",
 ]
