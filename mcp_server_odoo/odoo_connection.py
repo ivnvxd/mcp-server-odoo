@@ -888,41 +888,14 @@ class OdooConnection:
         Returns:
             List of dictionaries containing record data
         """
-        # Try to get cached records
-        cached_records = []
-        uncached_ids = []
-
-        for record_id in ids:
-            cached = self._performance_manager.get_cached_record(model, record_id, fields)
-            if cached:
-                cached_records.append(cached)
-            else:
-                uncached_ids.append(record_id)
-
-        # If all records are cached, return them
-        if not uncached_ids:
-            logger.debug(f"All {len(ids)} records retrieved from cache")
-            return cached_records
-
-        # Read uncached records
         kwargs = {}
         if fields:
             kwargs["fields"] = fields
 
         with self._performance_manager.monitor.track_operation(f"read_{model}"):
-            new_records = self.execute_kw(model, "read", [uncached_ids], kwargs)
+            records = self.execute_kw(model, "read", [ids], kwargs)
 
-        # Cache the new records
-        for record in new_records:
-            self._performance_manager.cache_record(model, record, fields)
-
-        # Combine cached and new records in original order
-        all_records = cached_records + new_records
-        # Sort by the original ID order
-        id_order = {id_val: idx for idx, id_val in enumerate(ids)}
-        all_records.sort(key=lambda r: id_order.get(r.get("id", 0), len(ids)))
-
-        return all_records
+        return records
 
     def search_read(
         self,
