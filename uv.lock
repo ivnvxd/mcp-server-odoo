@@ -504,12 +504,12 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "requests", marker = "extra == 'dev'", specifier = ">=2.32.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.2" },
-    { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.1" },
+    { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.18" },
 ]
 provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "ty", specifier = ">=0.0.1" }]
+dev = [{ name = "ty", specifier = ">=0.0.18" }]
 
 [[package]]
 name = "packaging"
