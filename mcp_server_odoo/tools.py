@@ -1033,7 +1033,8 @@ class OdooToolHandler:
 
                 # Return only essential fields to minimize context usage
                 # Users can use get_record if they need more fields
-                essential_fields = ["id", "name", "display_name"]
+                # Only use universally available fields (not all models have 'name')
+                essential_fields = ["id", "display_name"]
 
                 # Read only the essential fields
                 records = self.connection.read(model, [record_id], essential_fields)
@@ -1097,7 +1098,8 @@ class OdooToolHandler:
 
                 # Return only essential fields to minimize context usage
                 # Users can use get_record if they need more fields
-                essential_fields = ["id", "name", "display_name"]
+                # Only use universally available fields (not all models have 'name')
+                essential_fields = ["id", "display_name"]
 
                 # Read only the essential fields
                 records = self.connection.read(model, [record_id], essential_fields)
@@ -1148,15 +1150,13 @@ class OdooToolHandler:
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
-                # Check if record exists
-                existing = self.connection.read(model, [record_id])
+                # Check if record exists and get display info
+                existing = self.connection.read(model, [record_id], ["id", "display_name"])
                 if not existing:
                     raise NotFoundError(f"Record not found: {model} with ID {record_id}")
 
                 # Store some info about the record before deletion
-                record_name = existing[0].get(
-                    "name", existing[0].get("display_name", f"ID {record_id}")
-                )
+                record_name = existing[0].get("display_name", f"ID {record_id}")
 
                 # Delete the record
                 success = self.connection.unlink(model, [record_id])

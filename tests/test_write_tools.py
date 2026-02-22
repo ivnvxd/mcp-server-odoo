@@ -57,7 +57,6 @@ class TestWriteTools:
         created_id = 123
         essential_record = {
             "id": created_id,
-            "name": "Test Partner",
             "display_name": "Test Partner",
         }
 
@@ -76,9 +75,25 @@ class TestWriteTools:
         )
         assert "Successfully created" in result["message"]
         mock_connection.create.assert_called_once_with(model, values)
-        mock_connection.read.assert_called_once_with(
-            model, [created_id], ["id", "name", "display_name"]
-        )
+        mock_connection.read.assert_called_once_with(model, [created_id], ["id", "display_name"])
+
+    @pytest.mark.asyncio
+    async def test_create_record_model_without_name_field(self, tool_handler, mock_connection):
+        """Test creating a record on a model that lacks the 'name' field (e.g. mail.activity)."""
+        model = "mail.activity"
+        values = {"res_model_id": 448, "res_id": 2887, "activity_type_id": 4}
+        created_id = 42
+        essential_record = {"id": created_id, "display_name": "Activity #42"}
+
+        mock_connection.create.return_value = created_id
+        mock_connection.read.return_value = [essential_record]
+
+        result = await tool_handler._handle_create_record_tool(model, values)
+
+        assert result["success"] is True
+        assert result["record"] == essential_record
+        # Only universally available fields requested — no 'name'
+        mock_connection.read.assert_called_once_with(model, [created_id], ["id", "display_name"])
 
     @pytest.mark.asyncio
     async def test_create_record_no_values(self, tool_handler):
@@ -106,7 +121,7 @@ class TestWriteTools:
         # First read call (existence check) returns just ID
         existing_record = {"id": record_id}
         # Second read call returns essential fields
-        updated_record = {"id": record_id, "name": "Test Partner", "display_name": "Test Partner"}
+        updated_record = {"id": record_id, "display_name": "Test Partner"}
 
         mock_connection.read.side_effect = [[existing_record], [updated_record]]
         mock_connection.write.return_value = True
@@ -126,7 +141,29 @@ class TestWriteTools:
         # Verify both read calls with correct parameters
         expected_calls = [
             call(model, [record_id], ["id"]),  # Existence check
-            call(model, [record_id], ["id", "name", "display_name"]),  # Essential fields
+            call(model, [record_id], ["id", "display_name"]),  # Essential fields
+        ]
+        mock_connection.read.assert_has_calls(expected_calls)
+
+    @pytest.mark.asyncio
+    async def test_update_record_model_without_name_field(self, tool_handler, mock_connection):
+        """Test updating a record on a model that lacks the 'name' field."""
+        model = "mail.activity"
+        record_id = 42
+        values = {"summary": "Updated summary"}
+        existing_record = {"id": record_id}
+        updated_record = {"id": record_id, "display_name": "Activity #42"}
+
+        mock_connection.read.side_effect = [[existing_record], [updated_record]]
+        mock_connection.write.return_value = True
+
+        result = await tool_handler._handle_update_record_tool(model, record_id, values)
+
+        assert result["success"] is True
+        # Only universally available fields requested — no 'name'
+        expected_calls = [
+            call(model, [record_id], ["id"]),
+            call(model, [record_id], ["id", "display_name"]),
         ]
         mock_connection.read.assert_has_calls(expected_calls)
 
@@ -150,7 +187,7 @@ class TestWriteTools:
         # Setup
         model = "res.partner"
         record_id = 123
-        existing_record = {"id": record_id, "name": "Test Partner"}
+        existing_record = {"id": record_id, "display_name": "Test Partner"}
 
         mock_connection.read.return_value = [existing_record]
         mock_connection.unlink.return_value = True
@@ -164,6 +201,7 @@ class TestWriteTools:
         assert result["deleted_name"] == "Test Partner"
         assert "Successfully deleted" in result["message"]
         mock_connection.unlink.assert_called_once_with(model, [record_id])
+        mock_connection.read.assert_called_once_with(model, [record_id], ["id", "display_name"])
 
     @pytest.mark.asyncio
     async def test_delete_record_not_found(self, tool_handler, mock_connection):
@@ -280,7 +318,7 @@ class TestWriteToolsIntegration:
         create_result = await handler._handle_create_record_tool("res.partner", create_values)
         assert create_result["success"] is True
         record_id = create_result["record"]["id"]
-        assert create_result["record"]["name"] == "MCP Test Partner"
+        assert "MCP Test Partner" in create_result["record"]["display_name"]
 
         try:
             # Update
