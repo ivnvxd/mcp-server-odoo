@@ -688,21 +688,3 @@ class TestRegisterTools:
         assert handler.config == config
 
 
-class TestToolIntegration:
-    """Integration tests for tools with real server components."""
-
-    @pytest.mark.integration
-    @pytest.mark.asyncio
-    async def test_search_tool_with_real_server(self):
-        """Test search tool with real server components."""
-        # This test would require a running Odoo instance
-        # Skipping for unit tests
-        pytest.skip("Integration test requires running Odoo instance")
-
-    @pytest.mark.integration
-    @pytest.mark.asyncio
-    async def test_tools_in_mcp_context(self):
-        """Test tools in full MCP context."""
-        # This test would validate tools work correctly in MCP protocol
-        # Skipping for unit tests
-        pytest.skip("Integration test requires MCP setup")

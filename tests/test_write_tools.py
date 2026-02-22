@@ -263,9 +263,10 @@ class TestWriteToolsIntegration:
 
     @pytest.mark.integration
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Requires specific MCP permissions for res.partner model")
-    async def test_create_update_delete_cycle(self, real_tool_handler):
+    async def test_create_update_delete_cycle(self, real_config, real_tool_handler):
         """Test full create, update, delete cycle with real Odoo."""
+        if real_config.yolo_mode != "true":
+            pytest.skip("Write integration test requires ODOO_YOLO=true")
         handler = real_tool_handler
 
         # Create a test partner
@@ -291,8 +292,13 @@ class TestWriteToolsIntegration:
                 "res.partner", record_id, update_values
             )
             assert update_result["success"] is True
-            assert update_result["record"]["email"] == "mcp.updated@example.com"
-            assert update_result["record"]["phone"] == "+1234567890"
+
+            # Verify updated values via get_record (update result only has essential fields)
+            get_result = await handler._handle_get_record_tool(
+                "res.partner", record_id, fields=["email", "phone"]
+            )
+            assert get_result.record["email"] == "mcp.updated@example.com"
+            assert get_result.record["phone"] == "+1234567890"
 
             # Delete
             delete_result = await handler._handle_delete_record_tool("res.partner", record_id)
@@ -303,7 +309,7 @@ class TestWriteToolsIntegration:
             from mcp_server_odoo.tools import ValidationError
 
             with pytest.raises(ValidationError, match="Record not found"):
-                await handler._handle_get_record_tool("res.partner", record_id)
+                await handler._handle_get_record_tool("res.partner", record_id, fields=None)
 
         except Exception:
             # Clean up if test fails

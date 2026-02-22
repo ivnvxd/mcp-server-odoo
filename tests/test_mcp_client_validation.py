@@ -193,24 +193,6 @@ class TestMCPProtocolCompliance:
             )
 
     @pytest.mark.asyncio
-    async def test_call_tool_search_records(self, test_env):
-        """Test search_records tool through MCP."""
-        # Skip this test as tools are not implemented yet
-        pytest.skip("Tools not implemented in current server version")
-
-    @pytest.mark.asyncio
-    async def test_call_tool_list_models(self, test_env):
-        """Test list_models tool through MCP."""
-        # Skip this test as tools are not implemented yet
-        pytest.skip("Tools not implemented in current server version")
-
-    @pytest.mark.asyncio
-    async def test_call_tool_invalid_arguments(self, test_env):
-        """Test tool call with invalid arguments."""
-        # Skip this test as tools are not implemented yet
-        pytest.skip("Tools not implemented in current server version")
-
-    @pytest.mark.asyncio
     async def test_server_capabilities_check(self, test_env):
         """Test comprehensive server capabilities."""
         client = MCPTestClient()

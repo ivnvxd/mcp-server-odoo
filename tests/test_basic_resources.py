@@ -303,9 +303,10 @@ class TestResourceIntegration:
         handler = register_resources(app, connection, access_controller, test_config)
 
         try:
-            # Test with non-enabled model
-            with pytest.raises(MCPPermissionError):
-                await handler._handle_record_retrieval("account.invoice", "1")
+            # Use a fake model that fails in both modes: permission denied
+            # in standard mode, connection error in YOLO mode
+            with pytest.raises((MCPPermissionError, ValidationError)):
+                await handler._handle_record_retrieval("nonexistent.model.xyz", "1")
 
         finally:
             connection.disconnect()
