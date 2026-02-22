@@ -89,6 +89,7 @@ class OdooConnection:
         self._database: Optional[str] = None
         self._authenticated = False
         self._auth_method: Optional[str] = None  # 'api_key' or 'password'
+        self._server_version: Optional[str] = None
 
         mode_info = f" (YOLO mode: {config.yolo_mode})" if config.is_yolo_enabled else ""
         logger.info(f"Initialized OdooConnection for {self._url_components['host']}{mode_info}")
@@ -210,6 +211,7 @@ class OdooConnection:
         try:
             # Try to get server version via common endpoint
             version = self._common_proxy.version()
+            self._server_version = version.get("server_version", "") if version else None
             logger.debug(f"Server version: {version}")
         except Exception as e:
             raise OdooConnectionError(f"Connection test failed: {e}") from e
@@ -1038,6 +1040,11 @@ class OdooConnection:
             logger.error(f"Failed to delete {model} records: {e}")
             raise
 
+    @property
+    def server_version(self) -> Optional[str]:
+        """Cached Odoo server version string (e.g. '17.0', '18.0')."""
+        return self._server_version
+
     def get_server_version(self) -> Optional[Dict[str, Any]]:
         """Get Odoo server version information.
 
@@ -1052,6 +1059,34 @@ class OdooConnection:
         except Exception as e:
             logger.error(f"Failed to get server version: {e}")
             return None
+
+    def _get_major_version(self) -> Optional[int]:
+        """Extract the major version number from the server version string.
+
+        Handles standard versions (e.g. '18.0') and SaaS versions (e.g. 'saas~18.1').
+        """
+        if not self._server_version:
+            return None
+        try:
+            version = self._server_version
+            # SaaS versions: 'saas~18.1' → strip prefix to get '18.1'
+            if "~" in version:
+                version = version.split("~", 1)[1]
+            return int(version.split(".")[0])
+        except (ValueError, IndexError):
+            return None
+
+    def build_record_url(self, model: str, record_id: int) -> str:
+        """Build a direct URL to a record in the Odoo web interface.
+
+        Uses the modern /odoo/ path for Odoo 18+, falls back to legacy
+        /web# hash format for older versions.
+        """
+        base_url = self._url_components["base_url"]
+        major = self._get_major_version()
+        if major is not None and major >= 18:
+            return f"{base_url}/odoo/{model}/{record_id}"
+        return f"{base_url}/web#id={record_id}&model={model}&view_type=form"
 
 
 @contextmanager

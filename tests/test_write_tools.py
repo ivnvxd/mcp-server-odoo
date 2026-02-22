@@ -25,6 +25,10 @@ class TestWriteTools:
         """Create mock OdooConnection."""
         conn = Mock()
         conn.is_authenticated = True
+        conn.build_record_url.side_effect = (
+            lambda model,
+            record_id: f"http://localhost:8069/web#id={record_id}&model={model}&view_type=form"
+        )
         return conn
 
     @pytest.fixture
