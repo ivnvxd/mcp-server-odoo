@@ -63,7 +63,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "odoo_required: mark test as requiring a running Odoo server"
     )
-    config.addinivalue_line("markers", "e2e: mark test as end-to-end requiring a running Odoo server")
+    config.addinivalue_line(
+        "markers", "e2e: mark test as end-to-end requiring a running Odoo server"
+    )
 
 
 def pytest_collection_modifyitems(config, items):

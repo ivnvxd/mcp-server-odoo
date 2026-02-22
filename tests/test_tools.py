@@ -686,5 +686,3 @@ class TestRegisterTools:
         assert handler.connection == mock_connection
         assert handler.access_controller == mock_access_controller
         assert handler.config == config
-
-

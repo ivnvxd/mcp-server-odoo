@@ -377,7 +377,7 @@ class OdooConnection:
             # Call list_db method on database proxy
             databases = self.db_proxy.list()
             logger.info(f"Found {len(databases)} databases: {databases}")
-            return databases
+            return databases  # type: ignore[invalid-return-type]  # XML-RPC proxy is untyped
         except xmlrpc.client.Fault as e:
             if self.config.is_yolo_enabled and "Access Denied" in str(e):
                 # Common error when database listing is restricted
@@ -537,7 +537,7 @@ class OdooConnection:
             )
 
             if uid:
-                self._uid = uid
+                self._uid = uid  # type: ignore[invalid-assignment]  # XML-RPC proxy is untyped
                 self._database = database
                 self._auth_method = "api_key"
                 self._authenticated = True
@@ -664,7 +664,7 @@ class OdooConnection:
             )
 
             if uid:
-                self._uid = uid
+                self._uid = uid  # type: ignore[invalid-assignment]  # XML-RPC proxy is untyped
                 self._database = database
                 self._auth_method = "password"
                 self._authenticated = True
@@ -1048,7 +1048,7 @@ class OdooConnection:
             return None
 
         try:
-            return self.common_proxy.version()
+            return self.common_proxy.version()  # type: ignore[invalid-return-type]  # XML-RPC proxy is untyped
         except Exception as e:
             logger.error(f"Failed to get server version: {e}")
             return None
