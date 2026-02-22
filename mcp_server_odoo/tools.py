@@ -7,7 +7,7 @@ actions like creating, updating, or deleting records.
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -400,8 +400,8 @@ class OdooToolHandler:
         )
         async def search_records(
             model: str,
-            domain: Optional[Union[str, List[Union[str, List[Any]]]]] = None,
-            fields: Optional[Union[str, List[str]]] = None,
+            domain: Optional[Any] = None,
+            fields: Optional[Any] = None,
             limit: int = 10,
             offset: int = 0,
             order: Optional[str] = None,
@@ -599,8 +599,8 @@ class OdooToolHandler:
     async def _handle_search_tool(
         self,
         model: str,
-        domain: Optional[Union[str, List[Union[str, List[Any]]]]],
-        fields: Optional[List[str]],
+        domain: Optional[Any],
+        fields: Optional[Any],
         limit: int,
         offset: int,
         order: Optional[str],
