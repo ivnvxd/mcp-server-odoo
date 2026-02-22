@@ -5,7 +5,6 @@ Tests are marked with @pytest.mark.e2e and require a running Odoo instance.
 """
 
 import os
-import socket
 import time
 from unittest.mock import MagicMock
 
@@ -16,23 +15,10 @@ from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.odoo_connection import OdooConnection
 from mcp_server_odoo.tools import OdooToolHandler
 
-
-def is_odoo_server_running(host="localhost", port=8069):
-    """Check if Odoo server is running."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1)
-    try:
-        result = sock.connect_ex((host, port))
-        return result == 0
-    except Exception:
-        return False
-    finally:
-        sock.close()
+from .conftest import ODOO_SERVER_AVAILABLE
 
 
-@pytest.mark.skipif(
-    not is_odoo_server_running(), reason="Odoo server not running at localhost:8069"
-)
+@pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 @pytest.mark.e2e
 class TestYoloModeE2E:
     """End-to-end tests for YOLO mode with real Odoo."""
@@ -41,8 +27,8 @@ class TestYoloModeE2E:
     def config_read_only(self):
         """Create configuration for read-only YOLO mode."""
         return OdooConfig(
-            url="http://localhost:8069",
-            database=os.getenv("ODOO_DB", "mcp-18"),
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            database=os.getenv("ODOO_DB"),
             username=os.getenv("ODOO_USER", "admin"),
             password=os.getenv("ODOO_PASSWORD", "admin"),
             yolo_mode="read",
@@ -52,8 +38,8 @@ class TestYoloModeE2E:
     def config_full_access(self):
         """Create configuration for full access YOLO mode."""
         return OdooConfig(
-            url="http://localhost:8069",
-            database=os.getenv("ODOO_DB", "mcp-18"),
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            database=os.getenv("ODOO_DB"),
             username=os.getenv("ODOO_USER", "admin"),
             password=os.getenv("ODOO_PASSWORD", "admin"),
             yolo_mode="true",
@@ -63,8 +49,8 @@ class TestYoloModeE2E:
     def config_standard(self):
         """Create configuration for standard mode."""
         return OdooConfig(
-            url="http://localhost:8069",
-            database=os.getenv("ODOO_DB", "mcp-18"),
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            database=os.getenv("ODOO_DB"),
             api_key=os.getenv("ODOO_API_KEY"),
         )
 
@@ -84,6 +70,7 @@ class TestYoloModeE2E:
         handler = OdooToolHandler(app, connection, access_controller, config_read_only)
 
         # 2. List models - should work and show indicator
+        # YOLO mode returns raw dict, not ModelsResult
         models_result = await handler._handle_list_models_tool()
         assert "models" in models_result
         assert "yolo_mode" in models_result
@@ -106,7 +93,6 @@ class TestYoloModeE2E:
         )
 
         assert "records" in search_result
-        assert "total" in search_result
         assert search_result["total"] >= 0
 
         # 4. Get a specific record - should work
@@ -117,8 +103,8 @@ class TestYoloModeE2E:
                 record_id=first_record["id"],
                 fields=None,
             )
-            assert "id" in get_result
-            assert get_result["id"] == first_record["id"]
+            assert "id" in get_result.record
+            assert get_result.record["id"] == first_record["id"]
 
         # 5. Attempt to create record - should fail
         with pytest.raises(Exception) as exc_info:
@@ -165,6 +151,7 @@ class TestYoloModeE2E:
         handler = OdooToolHandler(app, connection, access_controller, config_full_access)
 
         # 2. List models - should work and show warning
+        # YOLO mode returns raw dict, not ModelsResult
         models_result = await handler._handle_list_models_tool()
         assert "models" in models_result
         assert "yolo_mode" in models_result
@@ -185,9 +172,7 @@ class TestYoloModeE2E:
             },
         )
 
-        # The result has a different structure
         assert create_result["success"] is True
-        assert "record" in create_result
         created_id = create_result["record"]["id"]
         assert created_id > 0
 
@@ -220,8 +205,8 @@ class TestYoloModeE2E:
             fields=["id", "name", "email", "phone"],
         )
 
-        assert get_result["email"] == "updated.yolo@test.com"
-        assert get_result["phone"] == "+1234567890"
+        assert get_result.record["email"] == "updated.yolo@test.com"
+        assert get_result.record["phone"] == "+1234567890"
 
         # 7. Delete the record - should work
         delete_result = await handler._handle_delete_record_tool(
@@ -462,8 +447,8 @@ class TestYoloModeE2E:
 
         for value, should_allow_write in valid_cases:
             config = OdooConfig(
-                url="http://localhost:8069",
-                database=os.getenv("ODOO_DB", "mcp-18"),
+                url=os.getenv("ODOO_URL", "http://localhost:8069"),
+                database=os.getenv("ODOO_DB"),
                 username=os.getenv("ODOO_USER", "admin"),
                 password=os.getenv("ODOO_PASSWORD", "admin"),
                 yolo_mode=value,
@@ -478,9 +463,9 @@ class TestYoloModeE2E:
                     # Check permissions allow write
                     access_controller = AccessController(config)
                     allowed, _ = access_controller.check_operation_allowed("res.partner", "write")
-                    assert (
-                        allowed == should_allow_write
-                    ), f"Value '{value}' should {'allow' if should_allow_write else 'not allow'} write"
+                    assert allowed == should_allow_write, (
+                        f"Value '{value}' should {'allow' if should_allow_write else 'not allow'} write"
+                    )
                 else:
                     assert config.yolo_mode == "read"
                     # Check permissions block write

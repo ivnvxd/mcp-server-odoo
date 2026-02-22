@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-server-odoo"
-version = "0.3.1"
+version = "0.4.0"
 description = "A Model Context Protocol server for Odoo ERP systems"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,7 +30,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "mcp>=1.9.4",
+    "mcp>=1.26.0,<2",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
@@ -49,10 +49,8 @@ dev = [
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
     "pytest-cov>=6.1.1",
-    "mypy>=1.16.0",
+    "ty>=0.0.1",
     "ruff>=0.11.12",
-    "black>=25.1.0",
-    "types-requests>=2.32.0",
     "requests>=2.32.3",
 ]
 
@@ -87,39 +85,20 @@ exclude_lines = [
     "if TYPE_CHECKING:",
 ]
 
-[tool.mypy]
-python_version = "3.10"
-warn_return_any = false
-warn_unused_configs = true
-disallow_untyped_defs = false
-disallow_any_unimported = false
-ignore_missing_imports = true
-no_implicit_optional = false
-check_untyped_defs = false
-strict_optional = false
-allow_untyped_calls = true
-allow_incomplete_defs = true
-allow_untyped_globals = true
-allow_redefinition = true
-no_warn_no_return = true
-warn_unreachable = false
-# Disable specific error codes that are problematic
-disable_error_code = ["str-bytes-safe", "union-attr", "arg-type", "return-value", "assignment", "list-item", "var-annotated"]
-exclude = [
-    "venv/",
-    ".venv/",
-    "build/",
-    "dist/",
-]
+[tool.ty.environment]
+python-version = "3.10"
 
-[[tool.mypy.overrides]]
-module = "mcp.*"
-ignore_errors = true
+[tool.ty.src]
+include = ["mcp_server_odoo/"]
+exclude = ["venv/", ".venv/", "build/", "dist/"]
 
-[[tool.mypy.overrides]]
-module = "tests.*"
-disallow_untyped_defs = false
-ignore_errors = true
+[tool.ty.rules]
+possibly-unresolved-reference = "warn"
+invalid-argument-type = "ignore"
+invalid-parameter-default = "error"
+invalid-return-type = "warn"
+invalid-assignment = "warn"
+unresolved-attribute = "ignore"
 
 [tool.ruff]
 line-length = 100
@@ -129,11 +108,10 @@ target-version = "py310"
 select = ["E", "F", "I", "N", "W", "B", "Q"]
 ignore = ["E501"]
 
-[tool.black]
-line-length = 100
-target-version = ["py310"]
+[tool.ruff.format]
+quote-style = "double"
 
 [dependency-groups]
 dev = [
-    "mypy>=1.16.0",
+    "ty>=0.0.1",
 ]

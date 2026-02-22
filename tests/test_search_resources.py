@@ -52,7 +52,7 @@ def mock_app():
     # Store registered handlers
     app._handlers = {}
 
-    def resource_decorator(uri_pattern):
+    def resource_decorator(uri_pattern, **kwargs):
         def decorator(func):
             app._handlers[uri_pattern] = func
             return func
@@ -380,7 +380,7 @@ class TestSearchResourceIntegration:
         app.resource = Mock()
         app._handlers = {}
 
-        def resource_decorator(uri_pattern):
+        def resource_decorator(uri_pattern, **kwargs):
             def decorator(func):
                 app._handlers[uri_pattern] = func
                 return func

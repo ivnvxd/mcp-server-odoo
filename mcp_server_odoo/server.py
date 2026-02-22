@@ -25,7 +25,7 @@ from .tools import register_tools
 logger = get_logger(__name__)
 
 # Server version
-SERVER_VERSION = "0.3.1"
+SERVER_VERSION = "0.4.0"
 
 
 class OdooMCPServer:
@@ -113,18 +113,6 @@ class OdooMCPServer:
                 self.access_controller = None
                 self.resource_handler = None
                 self.tool_handler = None
-
-    def _setup_handlers(self):
-        """Set up MCP handlers for resources, tools, and prompts.
-
-        This method will be extended in later phases to add:
-        - Resource handlers for Odoo data access
-        - Tool handlers for Odoo operations
-        - Prompt handlers for guided workflows
-        """
-        # TODO: Tools will be added in Phase 3
-        # TODO: Prompts will be added in Phase 4
-        pass
 
     def _register_resources(self):
         """Register resource handlers after connection is established."""

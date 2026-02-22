@@ -5,8 +5,9 @@ from unittest.mock import Mock, call
 import pytest
 
 from mcp_server_odoo.access_control import AccessControlError
+from mcp_server_odoo.error_handling import ValidationError
 from mcp_server_odoo.odoo_connection import OdooConnectionError
-from mcp_server_odoo.tools import OdooToolHandler, ToolError, register_tools
+from mcp_server_odoo.tools import OdooToolHandler, register_tools
 
 
 class TestWriteTools:
@@ -16,7 +17,7 @@ class TestWriteTools:
     def mock_app(self):
         """Create mock FastMCP app."""
         app = Mock()
-        app.tool = Mock(side_effect=lambda: lambda func: func)
+        app.tool = Mock(side_effect=lambda **kwargs: lambda func: func)
         return app
 
     @pytest.fixture
@@ -82,7 +83,7 @@ class TestWriteTools:
     @pytest.mark.asyncio
     async def test_create_record_no_values(self, tool_handler):
         """Test create record with no values."""
-        with pytest.raises(ToolError, match="No values provided"):
+        with pytest.raises(ValidationError, match="No values provided"):
             await tool_handler._handle_create_record_tool("res.partner", {})
 
     @pytest.mark.asyncio
@@ -92,7 +93,7 @@ class TestWriteTools:
             "Access denied"
         )
 
-        with pytest.raises(ToolError, match="Access denied"):
+        with pytest.raises(ValidationError, match="Access denied"):
             await tool_handler._handle_create_record_tool("res.partner", {"name": "Test"})
 
     @pytest.mark.asyncio
@@ -134,13 +135,13 @@ class TestWriteTools:
         """Test update record that doesn't exist."""
         mock_connection.read.return_value = []
 
-        with pytest.raises(ToolError, match="Record not found"):
+        with pytest.raises(ValidationError, match="Record not found"):
             await tool_handler._handle_update_record_tool("res.partner", 999, {"name": "Test"})
 
     @pytest.mark.asyncio
     async def test_update_record_no_values(self, tool_handler):
         """Test update record with no values."""
-        with pytest.raises(ToolError, match="No values provided"):
+        with pytest.raises(ValidationError, match="No values provided"):
             await tool_handler._handle_update_record_tool("res.partner", 123, {})
 
     @pytest.mark.asyncio
@@ -169,7 +170,7 @@ class TestWriteTools:
         """Test delete record that doesn't exist."""
         mock_connection.read.return_value = []
 
-        with pytest.raises(ToolError, match="Record not found"):
+        with pytest.raises(ValidationError, match="Record not found"):
             await tool_handler._handle_delete_record_tool("res.partner", 999)
 
     @pytest.mark.asyncio
@@ -179,7 +180,7 @@ class TestWriteTools:
             "Access denied"
         )
 
-        with pytest.raises(ToolError, match="Access denied"):
+        with pytest.raises(ValidationError, match="Access denied"):
             await tool_handler._handle_delete_record_tool("res.partner", 123)
 
     @pytest.mark.asyncio
@@ -187,7 +188,7 @@ class TestWriteTools:
         """Test create record when not authenticated."""
         mock_connection.is_authenticated = False
 
-        with pytest.raises(ToolError, match="Not authenticated"):
+        with pytest.raises(ValidationError, match="Not authenticated"):
             await tool_handler._handle_create_record_tool("res.partner", {"name": "Test"})
 
     @pytest.mark.asyncio
@@ -195,7 +196,7 @@ class TestWriteTools:
         """Test update record with connection error."""
         mock_connection.read.side_effect = OdooConnectionError("Connection failed")
 
-        with pytest.raises(ToolError, match="Connection error"):
+        with pytest.raises(ValidationError, match="Connection error"):
             await tool_handler._handle_update_record_tool("res.partner", 123, {"name": "Test"})
 
     def test_tools_registered(self, mock_app, mock_connection, mock_access_controller, mock_config):
@@ -203,7 +204,7 @@ class TestWriteTools:
         # Track functions that were decorated
         decorated_functions = []
 
-        def mock_tool_decorator():
+        def mock_tool_decorator(**kwargs):
             def decorator(func):
                 decorated_functions.append(func.__name__)
                 return func
@@ -262,9 +263,10 @@ class TestWriteToolsIntegration:
 
     @pytest.mark.integration
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Requires specific MCP permissions for res.partner model")
-    async def test_create_update_delete_cycle(self, real_tool_handler):
+    async def test_create_update_delete_cycle(self, real_config, real_tool_handler):
         """Test full create, update, delete cycle with real Odoo."""
+        if real_config.yolo_mode != "true":
+            pytest.skip("Write integration test requires ODOO_YOLO=true")
         handler = real_tool_handler
 
         # Create a test partner
@@ -290,8 +292,13 @@ class TestWriteToolsIntegration:
                 "res.partner", record_id, update_values
             )
             assert update_result["success"] is True
-            assert update_result["record"]["email"] == "mcp.updated@example.com"
-            assert update_result["record"]["phone"] == "+1234567890"
+
+            # Verify updated values via get_record (update result only has essential fields)
+            get_result = await handler._handle_get_record_tool(
+                "res.partner", record_id, fields=["email", "phone"]
+            )
+            assert get_result.record["email"] == "mcp.updated@example.com"
+            assert get_result.record["phone"] == "+1234567890"
 
             # Delete
             delete_result = await handler._handle_delete_record_tool("res.partner", record_id)
@@ -299,10 +306,10 @@ class TestWriteToolsIntegration:
             assert delete_result["deleted_id"] == record_id
 
             # Verify deletion
-            from mcp_server_odoo.tools import ToolError
+            from mcp_server_odoo.tools import ValidationError
 
-            with pytest.raises(ToolError, match="Record not found"):
-                await handler._handle_get_record_tool("res.partner", record_id)
+            with pytest.raises(ValidationError, match="Record not found"):
+                await handler._handle_get_record_tool("res.partner", record_id, fields=None)
 
         except Exception:
             # Clean up if test fails

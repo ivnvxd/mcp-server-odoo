@@ -14,7 +14,7 @@ import os
 import sys
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 # Default log format
@@ -29,7 +29,7 @@ class StructuredFormatter(logging.Formatter):
         """Format log record as JSON."""
         # Base log data
         log_data = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "logger": record.name,
             "level": record.levelname,
             "message": record.getMessage(),
@@ -64,7 +64,7 @@ class StructuredFormatter(logging.Formatter):
 class RequestLoggingAdapter(logging.LoggerAdapter):
     """Logging adapter that adds request context to log records."""
 
-    def __init__(self, logger: logging.Logger, request_id: str = None):
+    def __init__(self, logger: logging.Logger, request_id: str | None = None):
         """Initialize adapter with request ID."""
         self.request_id = request_id or self._generate_request_id()
         super().__init__(logger, {"request_id": self.request_id})
@@ -199,7 +199,9 @@ def setup_logging(
     logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
-def get_logger(name: str, request_id: Optional[str] = None) -> logging.Logger:
+def get_logger(
+    name: str, request_id: Optional[str] = None
+) -> logging.Logger | logging.LoggerAdapter:
     """Get a logger instance with optional request context.
 
     Args:

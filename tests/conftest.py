@@ -45,14 +45,26 @@ def is_odoo_server_available(host: str = "localhost", port: int = 8069) -> bool:
         return False
 
 
-# Global flag for Odoo server availability
-ODOO_SERVER_AVAILABLE = is_odoo_server_available()
+# Global flag for Odoo server availability — derive host/port from ODOO_URL
+def _parse_odoo_host_port() -> tuple[str, int]:
+    from urllib.parse import urlparse
+
+    url = os.getenv("ODOO_URL", "http://localhost:8069")
+    parsed = urlparse(url)
+    return parsed.hostname or "localhost", parsed.port or 8069
+
+
+_host, _port = _parse_odoo_host_port()
+ODOO_SERVER_AVAILABLE = is_odoo_server_available(_host, _port)
 
 
 def pytest_configure(config):
     """Configure pytest with custom markers."""
     config.addinivalue_line(
         "markers", "odoo_required: mark test as requiring a running Odoo server"
+    )
+    config.addinivalue_line(
+        "markers", "e2e: mark test as end-to-end requiring a running Odoo server"
     )
 
 
@@ -62,11 +74,11 @@ def pytest_collection_modifyitems(config, items):
         # Server is available, don't skip anything
         return
 
-    skip_odoo = pytest.mark.skip(reason="Odoo server not available at localhost:8069")
+    skip_odoo = pytest.mark.skip(reason=f"Odoo server not available at {_host}:{_port}")
 
     for item in items:
-        # Skip tests marked with 'integration' when server is not available
-        if "integration" in item.keywords:
+        # Skip tests marked with 'integration' or 'e2e' when server is not available
+        if "integration" in item.keywords or "e2e" in item.keywords:
             item.add_marker(skip_odoo)
 
         # Skip tests marked with 'odoo_required' when server is not available
@@ -89,13 +101,15 @@ def rate_limit_delay(request):
     # Check if this is an integration test that needs rate limit protection
     if (
         "integration" in request.keywords
+        or "e2e" in request.keywords
         or "Integration" in class_name
+        or "E2E" in class_name
         or "integration" in test_name
         or "real_" in test_name
     ):
         import time
 
-        time.sleep(2.0)  # 2 second delay BEFORE integration tests to avoid rate limiting
+        time.sleep(0.5)  # Brief delay before integration tests to avoid rate limiting
 
     yield
 
@@ -104,7 +118,7 @@ def rate_limit_delay(request):
 def odoo_server_required():
     """Fixture that skips test if Odoo server is not available."""
     if not ODOO_SERVER_AVAILABLE:
-        pytest.skip("Odoo server not available at localhost:8069")
+        pytest.skip(f"Odoo server not available at {_host}:{_port}")
 
 
 @pytest.fixture

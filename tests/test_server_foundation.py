@@ -84,9 +84,9 @@ class TestServerFoundation:
         """Test server version is a valid semver string."""
         parts = SERVER_VERSION.split(".")
         assert len(parts) == 3, f"Expected semver format x.y.z, got {SERVER_VERSION}"
-        assert all(
-            p.isdigit() for p in parts
-        ), f"Expected numeric semver parts, got {SERVER_VERSION}"
+        assert all(p.isdigit() for p in parts), (
+            f"Expected numeric semver parts, got {SERVER_VERSION}"
+        )
 
     def test_ensure_connection_success(self, server_with_mock_connection):
         """Test successful connection establishment."""
@@ -316,6 +316,7 @@ ODOO_MCP_LOG_LEVEL=DEBUG
                 "ODOO_MCP_LOG_LEVEL",
                 "ODOO_USER",
                 "ODOO_PASSWORD",
+                "ODOO_YOLO",
             ]:
                 monkeypatch.delenv(key, raising=False)
 

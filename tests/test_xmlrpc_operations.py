@@ -15,9 +15,25 @@ import pytest
 from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.odoo_connection import OdooConnection, OdooConnectionError
 
+from .conftest import ODOO_SERVER_AVAILABLE
+
 
 def skip_on_rate_limit(func):
-    """Decorator to skip test if rate limited."""
+    """Decorator to skip test if rate limited. Works with both sync and async tests."""
+    import asyncio
+
+    if asyncio.iscoroutinefunction(func):
+
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except (OdooConnectionError, Fault) as e:
+                if "429" in str(e) or "too many requests" in str(e).lower():
+                    pytest.skip("Rate limited by server")
+                raise
+
+        return async_wrapper
 
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -29,19 +45,6 @@ def skip_on_rate_limit(func):
             raise
 
     return wrapper
-
-
-def is_odoo_server_running(host="localhost", port=8069):
-    """Check if Odoo server is running."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1)
-    try:
-        result = sock.connect_ex((host, port))
-        return result == 0
-    except Exception:
-        return False
-    finally:
-        sock.close()
 
 
 class TestXMLRPCOperations:
@@ -305,9 +308,7 @@ class TestXMLRPCOperations:
         )
 
 
-@pytest.mark.skipif(
-    not is_odoo_server_running(), reason="Odoo server not running at localhost:8069"
-)
+@pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 class TestXMLRPCOperationsIntegration:
     """Integration tests with real Odoo server."""
 

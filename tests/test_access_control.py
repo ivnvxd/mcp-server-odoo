@@ -6,7 +6,6 @@ the Odoo MCP module's REST API endpoints.
 
 import json
 import os
-import socket
 import urllib.error
 from unittest.mock import MagicMock, patch
 
@@ -18,18 +17,7 @@ from mcp_server_odoo.access_control import (
 )
 from mcp_server_odoo.config import OdooConfig
 
-
-def is_odoo_server_running(host="localhost", port=8069):
-    """Check if Odoo server is running."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1)
-    try:
-        result = sock.connect_ex((host, port))
-        return result == 0
-    except Exception:
-        return False
-    finally:
-        sock.close()
+from .conftest import ODOO_SERVER_AVAILABLE
 
 
 class TestAccessControl:
@@ -368,9 +356,7 @@ class TestAccessControl:
         assert all_perms["res.users"].can_write is False
 
 
-@pytest.mark.skipif(
-    not is_odoo_server_running(), reason="Odoo server not running at localhost:8069"
-)
+@pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 class TestAccessControlIntegration:
     """Integration tests with real Odoo server."""
 

@@ -24,7 +24,7 @@ class TestOdooToolHandler:
         # Store registered tools
         app._tools = {}
 
-        def tool_decorator():
+        def tool_decorator(**kwargs):
             def decorator(func):
                 # Store the function in our tools dict
                 app._tools[func.__name__] = func
@@ -106,12 +106,12 @@ class TestOdooToolHandler:
             order="name asc",
         )
 
-        # Verify result
-        assert result["model"] == "res.partner"
-        assert result["total"] == 5
-        assert result["limit"] == 3
-        assert result["offset"] == 0
-        assert len(result["records"]) == 3
+        # Verify result (SearchResult is a Pydantic model)
+        assert result.model == "res.partner"
+        assert result.total == 5
+        assert result.limit == 3
+        assert result.offset == 0
+        assert len(result.records) == 3
 
         # Verify calls
         mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "read")
@@ -205,10 +205,10 @@ class TestOdooToolHandler:
             model="res.partner", domain=domain_with_or, fields=["name", "state_id"], limit=10
         )
 
-        # Verify result
-        assert result["model"] == "res.partner"
-        assert result["total"] == 10
-        assert len(result["records"]) == 3
+        # Verify result (SearchResult is a Pydantic model)
+        assert result.model == "res.partner"
+        assert result.total == 10
+        assert len(result.records) == 3
 
         # Verify the domain was passed correctly
         mock_connection.search_count.assert_called_with("res.partner", domain_with_or)
@@ -237,11 +237,11 @@ class TestOdooToolHandler:
 
         result = await search_records(model="res.partner", domain=domain_string, limit=5)
 
-        # Verify result
-        assert result["model"] == "res.partner"
-        assert result["total"] == 1
-        assert len(result["records"]) == 1
-        assert result["records"][0]["name"] == "Azure Interior"
+        # Verify result (SearchResult is a Pydantic model)
+        assert result.model == "res.partner"
+        assert result.total == 1
+        assert len(result.records) == 1
+        assert result.records[0]["name"] == "Azure Interior"
 
         # Verify the domain was parsed and passed correctly as a list
         expected_domain = [["is_company", "=", True], ["name", "ilike", "azure interior"]]
@@ -271,11 +271,11 @@ class TestOdooToolHandler:
 
         result = await search_records(model="res.partner", domain=domain_string, limit=5)
 
-        # Verify result
-        assert result["model"] == "res.partner"
-        assert result["total"] == 1
-        assert len(result["records"]) == 1
-        assert result["records"][0]["name"] == "Azure Interior"
+        # Verify result (SearchResult is a Pydantic model)
+        assert result.model == "res.partner"
+        assert result.total == 1
+        assert len(result.records) == 1
+        assert result.records[0]["name"] == "Azure Interior"
 
         # Verify the domain was parsed correctly
         expected_domain = [["name", "ilike", "azure interior"], ["is_company", "=", True]]
@@ -324,9 +324,9 @@ class TestOdooToolHandler:
             model="res.partner", domain=[["is_company", "=", True]], fields=fields_string, limit=5
         )
 
-        # Verify result
-        assert result["model"] == "res.partner"
-        assert result["total"] == 1
+        # Verify result (SearchResult is a Pydantic model)
+        assert result.model == "res.partner"
+        assert result.total == 1
 
         # Verify fields were parsed correctly
         mock_connection.read.assert_called_with("res.partner", [15], ["name", "is_company", "id"])
@@ -382,10 +382,10 @@ class TestOdooToolHandler:
         # Call the tool
         result = await get_record(model="res.partner", record_id=123, fields=["name", "email"])
 
-        # Verify result
-        assert result["id"] == 123
-        assert result["name"] == "Test Partner"
-        assert result["email"] == "test@example.com"
+        # Verify result — get_record returns RecordResult
+        assert result.record["id"] == 123
+        assert result.record["name"] == "Test Partner"
+        assert result.record["email"] == "test@example.com"
 
         # Verify calls
         mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "read")
@@ -510,29 +510,28 @@ class TestOdooToolHandler:
         # Call the tool
         result = await list_models()
 
-        # Verify result structure
-        assert "models" in result
-        assert len(result["models"]) == 2
+        # Verify result structure (ModelsResult is a Pydantic model)
+        assert len(result.models) == 2
 
         # Verify first model (res.partner)
-        partner = result["models"][0]
-        assert partner["model"] == "res.partner"
-        assert partner["name"] == "Contact"
-        assert "operations" in partner
-        assert partner["operations"]["read"] is True
-        assert partner["operations"]["write"] is True
-        assert partner["operations"]["create"] is True
-        assert partner["operations"]["unlink"] is False
+        partner = result.models[0]
+        assert partner.model == "res.partner"
+        assert partner.name == "Contact"
+        assert partner.operations is not None
+        assert partner.operations.read is True
+        assert partner.operations.write is True
+        assert partner.operations.create is True
+        assert partner.operations.unlink is False
 
         # Verify second model (sale.order)
-        order = result["models"][1]
-        assert order["model"] == "sale.order"
-        assert order["name"] == "Sales Order"
-        assert "operations" in order
-        assert order["operations"]["read"] is True
-        assert order["operations"]["write"] is False
-        assert order["operations"]["create"] is False
-        assert order["operations"]["unlink"] is False
+        order = result.models[1]
+        assert order.model == "sale.order"
+        assert order.name == "Sales Order"
+        assert order.operations is not None
+        assert order.operations.read is True
+        assert order.operations.write is False
+        assert order.operations.create is False
+        assert order.operations.unlink is False
 
         # Verify calls
         mock_access_controller.get_enabled_models.assert_called_once()
@@ -576,25 +575,24 @@ class TestOdooToolHandler:
         # Call the tool - should not fail even if some models can't get permissions
         result = await list_models()
 
-        # Verify result structure
-        assert "models" in result
-        assert len(result["models"]) == 2
+        # Verify result structure (ModelsResult is a Pydantic model)
+        assert len(result.models) == 2
 
         # Verify first model (res.partner) - should have correct permissions
-        partner = result["models"][0]
-        assert partner["model"] == "res.partner"
-        assert partner["operations"]["read"] is True
-        assert partner["operations"]["write"] is True
-        assert partner["operations"]["create"] is False
-        assert partner["operations"]["unlink"] is False
+        partner = result.models[0]
+        assert partner.model == "res.partner"
+        assert partner.operations.read is True
+        assert partner.operations.write is True
+        assert partner.operations.create is False
+        assert partner.operations.unlink is False
 
         # Verify second model (unknown.model) - should have all operations as False
-        unknown = result["models"][1]
-        assert unknown["model"] == "unknown.model"
-        assert unknown["operations"]["read"] is False
-        assert unknown["operations"]["write"] is False
-        assert unknown["operations"]["create"] is False
-        assert unknown["operations"]["unlink"] is False
+        unknown = result.models[1]
+        assert unknown.model == "unknown.model"
+        assert unknown.operations.read is False
+        assert unknown.operations.write is False
+        assert unknown.operations.create is False
+        assert unknown.operations.unlink is False
 
     @pytest.mark.asyncio
     async def test_list_models_error(
@@ -629,11 +627,11 @@ class TestOdooToolHandler:
         # Call with minimal params
         result = await search_records(model="res.partner")
 
-        # Verify defaults were applied
-        assert result["limit"] == valid_config.default_limit
-        assert result["offset"] == 0
-        assert result["total"] == 0
-        assert result["records"] == []
+        # Verify defaults were applied (SearchResult is a Pydantic model)
+        assert result.limit == valid_config.default_limit
+        assert result.offset == 0
+        assert result.total == 0
+        assert result.records == []
 
         # Verify domain default
         mock_connection.search_count.assert_called_with("res.partner", [])
@@ -654,14 +652,14 @@ class TestOdooToolHandler:
         # Test with limit exceeding max
         result = await search_records(model="res.partner", limit=500)
 
-        # Should use default limit since 500 > max_limit
-        assert result["limit"] == valid_config.default_limit
+        # Should use default limit since 500 > max_limit (SearchResult is a Pydantic model)
+        assert result.limit == valid_config.default_limit
 
         # Test with negative limit
         result = await search_records(model="res.partner", limit=-1)
 
         # Should use default limit
-        assert result["limit"] == valid_config.default_limit
+        assert result.limit == valid_config.default_limit
 
 
 class TestRegisterTools:
@@ -688,23 +686,3 @@ class TestRegisterTools:
         assert handler.connection == mock_connection
         assert handler.access_controller == mock_access_controller
         assert handler.config == config
-
-
-class TestToolIntegration:
-    """Integration tests for tools with real server components."""
-
-    @pytest.mark.integration
-    @pytest.mark.asyncio
-    async def test_search_tool_with_real_server(self):
-        """Test search tool with real server components."""
-        # This test would require a running Odoo instance
-        # Skipping for unit tests
-        pytest.skip("Integration test requires running Odoo instance")
-
-    @pytest.mark.integration
-    @pytest.mark.asyncio
-    async def test_tools_in_mcp_context(self):
-        """Test tools in full MCP context."""
-        # This test would validate tools work correctly in MCP protocol
-        # Skipping for unit tests
-        pytest.skip("Integration test requires MCP setup")

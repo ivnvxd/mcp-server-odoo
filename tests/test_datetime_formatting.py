@@ -147,5 +147,5 @@ class TestDateTimeFormatting:
 
         result = await handler("res.partner", 1, None)
 
-        assert result["create_date"] == "2025-06-06T13:50:23+00:00"
-        assert result["write_date"] == "2025-06-06T14:30:00+00:00"
+        assert result.record["create_date"] == "2025-06-06T13:50:23+00:00"
+        assert result.record["write_date"] == "2025-06-06T14:30:00+00:00"
