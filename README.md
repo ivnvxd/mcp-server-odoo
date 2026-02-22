@@ -204,6 +204,7 @@ The server requires the following environment variables:
 | `ODOO_USER` | Yes* | Username (if not using API key) | `admin` |
 | `ODOO_PASSWORD` | Yes* | Password (if not using API key) | `admin` |
 | `ODOO_DB` | No | Database name (auto-detected if not set) | `mycompany` |
+| `ODOO_LOCALE` | No | Language/locale for Odoo responses | `es_ES`, `fr_FR`, `de_DE` |
 | `ODOO_YOLO` | No | YOLO mode - bypasses MCP security (⚠️ DEV ONLY) | `off`, `read`, `true` |
 
 *Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required.

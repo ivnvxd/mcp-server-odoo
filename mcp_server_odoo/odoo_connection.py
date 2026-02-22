@@ -838,6 +838,12 @@ class OdooConnection:
             self.config.api_key if self._auth_method == "api_key" else self.config.password
         )
 
+        # Inject locale into context as default (caller-provided lang takes precedence)
+        if self.config.locale:
+            if "context" not in kwargs:
+                kwargs["context"] = {}
+            kwargs["context"].setdefault("lang", self.config.locale)
+
         try:
             # Log the operation
             logger.debug(f"Executing {method} on {model} with args={args}, kwargs={kwargs}")
@@ -851,6 +857,16 @@ class OdooConnection:
             return result
 
         except xmlrpc.client.Fault as e:
+            # Handle invalid locale — disable and retry without lang
+            if "Invalid language code" in e.faultString and self.config.locale:
+                logger.warning(
+                    f"Locale '{self.config.locale}' is not installed in Odoo. "
+                    "Falling back to default language."
+                )
+                self.config.locale = None
+                kwargs.get("context", {}).pop("lang", None)
+                return self.execute_kw(model, method, args, kwargs)
+
             logger.error(f"XML-RPC fault during {method} on {model}: {e}")
             # Sanitize the fault string before exposing to user
             sanitized_message = ErrorSanitizer.sanitize_xmlrpc_fault(e.faultString)

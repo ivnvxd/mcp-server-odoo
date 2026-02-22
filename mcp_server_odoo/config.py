@@ -30,6 +30,7 @@ class OdooConfig:
     default_limit: int = 10
     max_limit: int = 100
     max_smart_fields: int = 15
+    locale: Optional[str] = None
 
     # MCP transport configuration
     transport: Literal["stdio", "streamable-http"] = "stdio"
@@ -227,6 +228,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         transport=os.getenv("ODOO_MCP_TRANSPORT", "stdio").strip(),
         host=os.getenv("ODOO_MCP_HOST", "localhost").strip(),
         port=get_int_env("ODOO_MCP_PORT", 8000),
+        locale=os.getenv("ODOO_LOCALE", "").strip() or None,
         yolo_mode=get_yolo_mode(),
     )
 
