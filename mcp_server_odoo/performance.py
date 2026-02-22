@@ -407,7 +407,8 @@ class RequestOptimizer:
             usage = self._field_usage.get(model, {})
             if not usage:
                 # Return common fields if no usage data
-                return ["id", "name", "display_name"]
+                # Use only universally available fields (not all models have 'name')
+                return ["id", "display_name"]
 
             # Get top 20 most used fields
             sorted_fields = sorted(usage.items(), key=lambda x: x[1], reverse=True)

@@ -120,6 +120,74 @@ class TestOdooConnectionInit:
         assert object_url == expected_object_url
 
 
+class TestBuildRecordUrl:
+    """Test version-aware record URL generation."""
+
+    def test_legacy_url_for_odoo_17(self, test_config):
+        """Odoo <= 17 should use /web# hash format."""
+        conn = OdooConnection(test_config)
+        conn._server_version = "17.0"
+        url = conn.build_record_url("res.partner", 42)
+        base = test_config.url.rstrip("/")
+        assert url == f"{base}/web#id=42&model=res.partner&view_type=form"
+
+    def test_legacy_url_for_odoo_16(self, test_config):
+        """Odoo 16 should use /web# hash format."""
+        conn = OdooConnection(test_config)
+        conn._server_version = "16.0"
+        url = conn.build_record_url("res.partner", 42)
+        base = test_config.url.rstrip("/")
+        assert url == f"{base}/web#id=42&model=res.partner&view_type=form"
+
+    def test_modern_url_for_odoo_18(self, test_config):
+        """Odoo 18+ should use /odoo/ path format."""
+        conn = OdooConnection(test_config)
+        conn._server_version = "18.0"
+        url = conn.build_record_url("res.partner", 42)
+        base = test_config.url.rstrip("/")
+        assert url == f"{base}/odoo/res.partner/42"
+
+    def test_modern_url_for_odoo_19(self, test_config):
+        """Odoo 19 should use /odoo/ path format."""
+        conn = OdooConnection(test_config)
+        conn._server_version = "19.0"
+        url = conn.build_record_url("sale.order", 7)
+        base = test_config.url.rstrip("/")
+        assert url == f"{base}/odoo/sale.order/7"
+
+    def test_fallback_when_version_unknown(self, test_config):
+        """Unknown version should fall back to legacy format."""
+        conn = OdooConnection(test_config)
+        conn._server_version = None
+        url = conn.build_record_url("res.partner", 42)
+        base = test_config.url.rstrip("/")
+        assert url == f"{base}/web#id=42&model=res.partner&view_type=form"
+
+    def test_saas_version_18(self, test_config):
+        """SaaS version based on Odoo 18 should use modern format."""
+        conn = OdooConnection(test_config)
+        conn._server_version = "saas~18.1"
+        url = conn.build_record_url("res.partner", 42)
+        base = test_config.url.rstrip("/")
+        assert url == f"{base}/odoo/res.partner/42"
+
+    def test_saas_version_17(self, test_config):
+        """SaaS version based on Odoo 17 should use legacy format."""
+        conn = OdooConnection(test_config)
+        conn._server_version = "saas~17.4"
+        url = conn.build_record_url("res.partner", 42)
+        base = test_config.url.rstrip("/")
+        assert url == f"{base}/web#id=42&model=res.partner&view_type=form"
+
+    def test_fallback_when_version_malformed(self, test_config):
+        """Completely malformed version string should fall back to legacy format."""
+        conn = OdooConnection(test_config)
+        conn._server_version = "unknown"
+        url = conn.build_record_url("res.partner", 42)
+        base = test_config.url.rstrip("/")
+        assert url == f"{base}/web#id=42&model=res.partner&view_type=form"
+
+
 class TestOdooConnectionConnect:
     """Test connection establishment."""
 
