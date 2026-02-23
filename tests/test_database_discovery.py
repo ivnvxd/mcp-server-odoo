@@ -230,6 +230,7 @@ class TestDatabaseDiscovery:
         assert connection.validate_database_access(os.getenv("ODOO_DB", "db")) is False
 
 
+@pytest.mark.yolo
 @pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 class TestDatabaseDiscoveryIntegration:
     """Integration tests with real Odoo server."""

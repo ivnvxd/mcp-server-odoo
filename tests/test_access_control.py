@@ -357,6 +357,7 @@ class TestAccessControl:
         assert all_perms["res.users"].can_write is False
 
 
+@pytest.mark.mcp
 @pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 class TestAccessControlIntegration:
     """Integration tests with real Odoo server."""

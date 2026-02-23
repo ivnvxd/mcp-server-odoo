@@ -308,6 +308,7 @@ class TestXMLRPCOperations:
         )
 
 
+@pytest.mark.yolo
 @pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 class TestXMLRPCOperationsIntegration:
     """Integration tests with real Odoo server."""

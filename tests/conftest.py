@@ -60,12 +60,8 @@ ODOO_SERVER_AVAILABLE = is_odoo_server_available(_host, _port)
 
 def pytest_configure(config):
     """Configure pytest with custom markers."""
-    config.addinivalue_line(
-        "markers", "odoo_required: mark test as requiring a running Odoo server"
-    )
-    config.addinivalue_line(
-        "markers", "e2e: mark test as end-to-end requiring a running Odoo server"
-    )
+    config.addinivalue_line("markers", "yolo: needs running Odoo instance (vanilla XML-RPC)")
+    config.addinivalue_line("markers", "mcp: needs running Odoo with MCP module installed")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -77,36 +73,14 @@ def pytest_collection_modifyitems(config, items):
     skip_odoo = pytest.mark.skip(reason=f"Odoo server not available at {_host}:{_port}")
 
     for item in items:
-        # Skip tests marked with 'integration' or 'e2e' when server is not available
-        if "integration" in item.keywords or "e2e" in item.keywords:
-            item.add_marker(skip_odoo)
-
-        # Skip tests marked with 'odoo_required' when server is not available
-        if "odoo_required" in item.keywords:
-            item.add_marker(skip_odoo)
-
-        # Also check for specific test names that indicate they need a real server
-        test_name = item.name.lower()
-        if any(keyword in test_name for keyword in ["real_server", "integration"]):
+        if "yolo" in item.keywords or "mcp" in item.keywords:
             item.add_marker(skip_odoo)
 
 
 @pytest.fixture(autouse=True)
 def rate_limit_delay(request):
     """Add a delay between tests to avoid rate limiting (only when needed)."""
-    # Add delay BEFORE integration tests that hit the real server
-    test_name = request.node.name.lower() if hasattr(request.node, "name") else ""
-    class_name = request.cls.__name__ if request.cls else ""
-
-    # Check if this is an integration test that needs rate limit protection
-    if (
-        "integration" in request.keywords
-        or "e2e" in request.keywords
-        or "Integration" in class_name
-        or "E2E" in class_name
-        or "integration" in test_name
-        or "real_" in test_name
-    ):
+    if "yolo" in request.keywords or "mcp" in request.keywords:
         import time
 
         time.sleep(0.5)  # Brief delay before integration tests to avoid rate limiting

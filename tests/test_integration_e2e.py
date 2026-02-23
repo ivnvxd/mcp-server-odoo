@@ -30,8 +30,8 @@ from tests.helpers.server_testing import (
     validate_resource_operation,
 )
 
-# Mark all tests in this module as integration tests requiring Odoo
-pytestmark = [pytest.mark.integration, pytest.mark.odoo_required]
+# Mark all tests in this module as requiring Odoo with MCP module
+pytestmark = [pytest.mark.mcp]
 
 
 class TestServerLifecycle:
@@ -179,8 +179,13 @@ class TestAuthenticationFlows:
         # Test with invalid API key
         headers = {"X-API-Key": "invalid_key"}
         response = requests.get(f"{config.url}/mcp/system/info", headers=headers)
-        # When use_api_keys=False on Odoo side, invalid keys get 200 (public user)
-        assert response.status_code in (200, 401)
+
+        if config.api_key:
+            # With API key auth enabled, invalid key should be rejected
+            assert response.status_code == 401
+        else:
+            # Without API key auth, endpoint uses public user (use_api_keys=False)
+            assert response.status_code == 200
 
 
 class TestResourceOperations:

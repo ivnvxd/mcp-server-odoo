@@ -224,7 +224,7 @@ class TestRegisterResources:
 class TestResourceIntegration:
     """Integration tests with real Odoo server."""
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     @pytest.mark.asyncio
     async def test_real_record_retrieval(self, test_config):
         """Test record retrieval with real server."""
@@ -258,7 +258,7 @@ class TestResourceIntegration:
         finally:
             connection.disconnect()
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     @pytest.mark.asyncio
     async def test_real_record_not_found(self, test_config):
         """Test record not found with real server."""
@@ -284,7 +284,7 @@ class TestResourceIntegration:
         finally:
             connection.disconnect()
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     @pytest.mark.asyncio
     async def test_real_permission_denied(self, test_config):
         """Test permission denied with real server."""

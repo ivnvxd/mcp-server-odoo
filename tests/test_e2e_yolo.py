@@ -1,7 +1,7 @@
 """End-to-end tests for YOLO mode functionality.
 
 This module tests complete YOLO mode workflows with real Odoo instances.
-Tests are marked with @pytest.mark.e2e and require a running Odoo instance.
+Tests are marked with @pytest.mark.yolo and require a running Odoo instance.
 """
 
 import os
@@ -19,7 +19,7 @@ from .conftest import ODOO_SERVER_AVAILABLE
 
 
 @pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
-@pytest.mark.e2e
+@pytest.mark.yolo
 class TestYoloModeE2E:
     """End-to-end tests for YOLO mode with real Odoo."""
 

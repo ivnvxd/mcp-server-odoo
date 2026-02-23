@@ -67,7 +67,7 @@ jobs:
 
     - name: Run unit tests with coverage
       run: |
-        pytest -m "not integration" --cov=mcp_server_odoo --cov-report=xml --cov-report=term
+        pytest -m "not yolo and not mcp" --cov=mcp_server_odoo --cov-report=xml --cov-report=term
       env:
         ODOO_URL: ${{ vars.ODOO_URL || 'http://localhost:8069' }}
         ODOO_DB: ${{ vars.ODOO_DB || 'test' }}
@@ -152,7 +152,7 @@ jobs:
 
     - name: Run YOLO integration tests
       run: |
-        pytest -m "e2e" -v
+        pytest -m "yolo" -v
       env:
         ODOO_URL: http://localhost:8069
         ODOO_DB: test
@@ -277,7 +277,7 @@ jobs:
 
     - name: Run MCP integration tests
       run: |
-        pytest -m "integration" -v
+        pytest -m "mcp" -v
       env:
         ODOO_URL: http://localhost:8069
         ODOO_DB: test

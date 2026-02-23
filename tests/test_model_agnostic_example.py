@@ -9,7 +9,7 @@ import pytest
 from mcp_server_odoo.odoo_connection import OdooConnection
 
 
-@pytest.mark.integration
+@pytest.mark.mcp
 class TestModelAgnosticApproach:
     """Examples of model-agnostic test patterns."""
 

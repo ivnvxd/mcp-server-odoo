@@ -236,6 +236,7 @@ class TestAuthenticationIntegration:
             database=None,  # Let it auto-select
         )
 
+    @pytest.mark.mcp
     def test_real_api_key_authentication(self, real_config_api_key):
         """Test API key authentication with real server."""
         with OdooConnection(real_config_api_key) as conn:
@@ -250,6 +251,7 @@ class TestAuthenticationIntegration:
 
             print(f"Authenticated with API key: uid={conn.uid}, db={conn.database}")
 
+    @pytest.mark.yolo
     def test_real_password_authentication(self, real_config_password):
         """Test username/password authentication with real server."""
         with OdooConnection(real_config_password) as conn:
@@ -264,6 +266,7 @@ class TestAuthenticationIntegration:
 
             print(f"Authenticated with password: uid={conn.uid}, db={conn.database}")
 
+    @pytest.mark.mcp
     def test_real_invalid_api_key(self):
         """Test authentication with invalid API key."""
         config = OdooConfig(
@@ -276,6 +279,7 @@ class TestAuthenticationIntegration:
             with pytest.raises(OdooConnectionError, match="Authentication failed"):
                 conn.authenticate()
 
+    @pytest.mark.yolo
     def test_real_invalid_password(self):
         """Test authentication with invalid password."""
         config = OdooConfig(
