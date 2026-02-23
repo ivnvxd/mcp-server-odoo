@@ -145,12 +145,14 @@ def test_config_with_server_check(odoo_server_required) -> OdooConfig:
     if not os.getenv("ODOO_URL"):
         pytest.skip("ODOO_URL environment variable not set. Please configure .env file.")
 
-    if not os.getenv("ODOO_API_KEY"):
-        pytest.skip("ODOO_API_KEY environment variable not set. Please configure .env file.")
+    if not os.getenv("ODOO_API_KEY") and not os.getenv("ODOO_PASSWORD"):
+        pytest.skip("Neither ODOO_API_KEY nor ODOO_PASSWORD set. Please configure .env file.")
 
     return OdooConfig(
         url=os.getenv("ODOO_URL"),
-        api_key=os.getenv("ODOO_API_KEY"),
+        api_key=os.getenv("ODOO_API_KEY") or None,
+        username=os.getenv("ODOO_USER") or None,
+        password=os.getenv("ODOO_PASSWORD") or None,
         database=os.getenv("ODOO_DB"),  # DB can be auto-detected
         log_level=os.getenv("ODOO_MCP_LOG_LEVEL", "INFO"),
         default_limit=int(os.getenv("ODOO_MCP_DEFAULT_LIMIT", "10")),
@@ -178,7 +180,9 @@ def model_discovery():
     # Create config for discovery
     config = OdooConfig(
         url=os.getenv("ODOO_URL"),
-        api_key=os.getenv("ODOO_API_KEY"),
+        api_key=os.getenv("ODOO_API_KEY") or None,
+        username=os.getenv("ODOO_USER") or None,
+        password=os.getenv("ODOO_PASSWORD") or None,
         database=os.getenv("ODOO_DB"),
     )
 

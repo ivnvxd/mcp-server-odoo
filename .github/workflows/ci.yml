@@ -281,7 +281,6 @@ jobs:
       env:
         ODOO_URL: http://localhost:8069
         ODOO_DB: test
-        ODOO_API_KEY: ci_test_key
         ODOO_USER: admin
         ODOO_PASSWORD: admin
 

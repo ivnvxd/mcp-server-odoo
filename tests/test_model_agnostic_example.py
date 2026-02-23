@@ -110,4 +110,6 @@ def real_config():
         url=os.getenv("ODOO_URL"),
         api_key=os.getenv("ODOO_API_KEY"),
         database=os.getenv("ODOO_DB"),
+        username=os.getenv("ODOO_USER"),
+        password=os.getenv("ODOO_PASSWORD"),
     )
