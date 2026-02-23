@@ -37,8 +37,8 @@ class TestAccessControl:
         """Create AccessController instance."""
         return AccessController(config, cache_ttl=60)
 
-    def test_init_without_api_key(self):
-        """Test initialization fails without API key."""
+    def test_init_without_api_key(self, caplog):
+        """Test initialization succeeds without API key (warns instead of crashing)."""
         config = OdooConfig(
             url=os.getenv("ODOO_URL", "http://localhost:8069"),
             username=os.getenv("ODOO_USER", "admin"),
@@ -46,8 +46,9 @@ class TestAccessControl:
             database=os.getenv("ODOO_DB"),
         )
 
-        with pytest.raises(AccessControlError, match="API key required"):
-            AccessController(config)
+        controller = AccessController(config)
+        assert controller.config == config
+        assert "No API key configured" in caplog.text
 
     @patch("urllib.request.urlopen")
     def test_make_request_success(self, mock_urlopen, controller):

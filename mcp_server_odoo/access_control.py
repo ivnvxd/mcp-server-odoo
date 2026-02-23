@@ -91,10 +91,12 @@ class AccessController:
             )
             return  # Skip API validation
 
-        # Validate API key is available for standard mode
+        # Warn if no API key in standard mode (REST calls may fail)
         if not config.api_key:
-            raise AccessControlError(
-                "API key required for access control. Please configure ODOO_API_KEY."
+            logger.warning(
+                "No API key configured. MCP access control requests will be made "
+                "without API key authentication. Configure ODOO_API_KEY if the "
+                "MCP module requires it."
             )
 
         logger.info(f"Initialized AccessController for {self.base_url}")
@@ -114,9 +116,10 @@ class AccessController:
         """
         url = f"{self.base_url}{endpoint}"
 
-        # Create request with API key header
+        # Create request with optional API key header
         req = urllib.request.Request(url)
-        req.add_header("X-API-Key", self.config.api_key)
+        if self.config.api_key:
+            req.add_header("X-API-Key", self.config.api_key)
         req.add_header("Accept", "application/json")
 
         try:
@@ -134,7 +137,13 @@ class AccessController:
 
         except urllib.error.HTTPError as e:
             if e.code == 401:
-                raise AccessControlError("Invalid API key for access control") from e
+                if self.config.api_key:
+                    raise AccessControlError("Invalid API key for access control") from e
+                else:
+                    raise AccessControlError(
+                        "MCP REST API requires authentication. "
+                        "Configure ODOO_API_KEY or use YOLO mode (ODOO_YOLO=read)."
+                    ) from e
             elif e.code == 403:
                 raise AccessControlError("Access denied to MCP endpoints") from e
             elif e.code == 404:

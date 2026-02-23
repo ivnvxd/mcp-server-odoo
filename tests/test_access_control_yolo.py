@@ -66,8 +66,8 @@ class TestYoloModeAccessControl:
         assert "FULL ACCESS" in caplog.text
         assert "MCP security disabled" in caplog.text
 
-    def test_init_standard_mode_requires_api_key(self):
-        """Test that standard mode requires API key."""
+    def test_init_standard_mode_without_api_key(self, caplog):
+        """Test that standard mode initializes without API key (warns instead of crashing)."""
         config = OdooConfig(
             url=os.getenv("ODOO_URL", "http://localhost:8069"),
             username=os.getenv("ODOO_USER", "admin"),
@@ -76,8 +76,9 @@ class TestYoloModeAccessControl:
             yolo_mode="off",
         )
 
-        with pytest.raises(AccessControlError, match="API key required"):
-            AccessController(config)
+        controller = AccessController(config)
+        assert controller.config == config
+        assert "No API key configured" in caplog.text
 
     def test_is_model_enabled_yolo_mode(self, config_yolo_read):
         """Test that all models are enabled in YOLO mode."""
@@ -207,9 +208,9 @@ class TestYoloModeAccessControl:
             yolo_mode="off",  # Standard mode
         )
 
-        # Standard mode should fail without API key
-        with pytest.raises(AccessControlError, match="API key required"):
-            AccessController(config_no_api)
+        # Standard mode initializes without API key (warns but doesn't crash)
+        controller_standard = AccessController(config_no_api)
+        assert controller_standard.config == config_no_api
 
         # Switch to YOLO mode (new controller)
         controller_yolo = AccessController(config_yolo_read)
