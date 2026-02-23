@@ -89,7 +89,7 @@ class TestServerLifecycle:
             # Load config from .env
             config = OdooConfig.from_env()
             assert config.url == os.getenv("ODOO_URL", "http://localhost:8069")
-            assert config.api_key == os.getenv("ODOO_API_KEY")
+            assert config.api_key == (os.getenv("ODOO_API_KEY") or None)
             assert config.database == os.getenv("ODOO_DB")
 
         finally:
@@ -115,6 +115,9 @@ class TestAuthenticationFlows:
     def test_api_key_authentication_from_env(self):
         """Test API key authentication using .env configuration."""
         config = OdooConfig.from_env()
+
+        if not config.api_key:
+            pytest.skip("ODOO_API_KEY not configured")
 
         # Verify API key is loaded
         assert config.api_key is not None
