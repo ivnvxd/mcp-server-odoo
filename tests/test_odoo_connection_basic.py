@@ -19,11 +19,14 @@ def test_config():
     """Create test configuration."""
     return OdooConfig(
         url=os.getenv("ODOO_URL", "http://localhost:8069"),
-        api_key="test_api_key",
+        api_key=os.getenv("ODOO_API_KEY") or None,
+        username=os.getenv("ODOO_USER") or None,
+        password=os.getenv("ODOO_PASSWORD") or None,
         database=os.getenv("ODOO_DB"),
         log_level="INFO",
         default_limit=10,
         max_limit=100,
+        yolo_mode=os.getenv("ODOO_YOLO", "off"),
     )
 
 
