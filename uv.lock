@@ -467,7 +467,7 @@ wheels = [
 
 [[package]]
 name = "mcp-server-odoo"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

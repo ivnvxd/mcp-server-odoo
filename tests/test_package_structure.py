@@ -35,7 +35,7 @@ class TestPackageStructure:
 
         # Check version
         assert hasattr(mcp_server_odoo, "__version__")
-        assert mcp_server_odoo.__version__ == "0.4.1"
+        assert mcp_server_odoo.__version__ == "0.4.2"
 
         # Check main class
         assert hasattr(mcp_server_odoo, "OdooMCPServer")
