@@ -20,9 +20,9 @@ def test_config():
     return OdooConfig(
         url=os.getenv("ODOO_URL", "http://localhost:8069"),
         api_key=os.getenv("ODOO_API_KEY") or None,
-        username=os.getenv("ODOO_USER") or None,
-        password=os.getenv("ODOO_PASSWORD") or None,
-        database=os.getenv("ODOO_DB"),
+        username=os.getenv("ODOO_USER", "admin"),
+        password=os.getenv("ODOO_PASSWORD", "admin"),
+        database=os.getenv("ODOO_DB") or "odoo",
         log_level="INFO",
         default_limit=10,
         max_limit=100,
@@ -36,7 +36,7 @@ def invalid_config():
     return OdooConfig(
         url="http://invalid.host.nowhere:9999",
         api_key="test_api_key",
-        database=os.getenv("ODOO_DB"),
+        database=os.getenv("ODOO_DB") or "odoo",
         log_level="INFO",
         default_limit=10,
         max_limit=100,
