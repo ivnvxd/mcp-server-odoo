@@ -157,7 +157,7 @@ class TestCachingIntegration:
         """Create performance manager with real config."""
         return PerformanceManager(real_config)
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     def test_real_fields_caching(self, real_config, performance_manager):
         """Test field caching with real Odoo connection."""
         conn = OdooConnection(real_config, performance_manager=performance_manager)
@@ -189,7 +189,7 @@ class TestCachingIntegration:
         finally:
             conn.disconnect()
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     def test_real_read_returns_fresh_data(self, real_config, performance_manager):
         """Test read always returns fresh data from Odoo (no record caching)."""
         conn = OdooConnection(real_config, performance_manager=performance_manager)
@@ -213,7 +213,7 @@ class TestCachingIntegration:
         finally:
             conn.disconnect()
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     @skip_on_rate_limit
     def test_connection_pool_reuse(self, real_config, performance_manager):
         """Test connection pooling improves performance."""

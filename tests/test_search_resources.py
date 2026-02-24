@@ -371,7 +371,7 @@ class TestSearchResource:
 class TestSearchResourceIntegration:
     """Integration tests for search resource with real Odoo."""
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     @pytest.mark.asyncio
     async def test_search_real_partners(self, real_config, real_connection):
         """Test search with real Odoo connection."""

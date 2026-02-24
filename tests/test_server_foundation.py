@@ -286,7 +286,7 @@ class TestServerFoundation:
 class TestServerIntegration:
     """Integration tests with real .env configuration."""
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     def test_server_with_env_file(self, tmp_path, monkeypatch):
         """Test server initialization with .env file in isolated environment."""
         # Import modules we need
@@ -339,7 +339,7 @@ ODOO_MCP_LOG_LEVEL=DEBUG
             os.chdir(original_cwd)
             reset_config()  # Reset again for other tests
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     @pytest.mark.asyncio
     async def test_real_odoo_connection(self):
         """Test with real Odoo connection using .env credentials.

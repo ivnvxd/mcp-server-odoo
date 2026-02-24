@@ -9,7 +9,7 @@ import pytest
 from mcp_server_odoo.odoo_connection import OdooConnection
 
 
-@pytest.mark.integration
+@pytest.mark.mcp
 class TestModelAgnosticApproach:
     """Examples of model-agnostic test patterns."""
 
@@ -110,4 +110,6 @@ def real_config():
         url=os.getenv("ODOO_URL"),
         api_key=os.getenv("ODOO_API_KEY"),
         database=os.getenv("ODOO_DB"),
+        username=os.getenv("ODOO_USER"),
+        password=os.getenv("ODOO_PASSWORD"),
     )

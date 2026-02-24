@@ -218,15 +218,6 @@ class TestAuthenticationIntegration:
     """Integration tests with real Odoo server."""
 
     @pytest.fixture
-    def real_config_api_key(self):
-        """Create configuration with real API key."""
-        return OdooConfig(
-            url=os.getenv("ODOO_URL", "http://localhost:8069"),
-            api_key=os.getenv("ODOO_API_KEY"),
-            database=None,  # Let it auto-select
-        )
-
-    @pytest.fixture
     def real_config_password(self):
         """Create configuration with username/password."""
         return OdooConfig(
@@ -234,10 +225,19 @@ class TestAuthenticationIntegration:
             username=os.getenv("ODOO_USER", "admin"),
             password=os.getenv("ODOO_PASSWORD", "admin"),
             database=None,  # Let it auto-select
+            yolo_mode=os.getenv("ODOO_YOLO", "off"),
         )
 
-    def test_real_api_key_authentication(self, real_config_api_key):
+    @pytest.mark.mcp
+    def test_real_api_key_authentication(self):
         """Test API key authentication with real server."""
+        if not os.getenv("ODOO_API_KEY"):
+            pytest.skip("ODOO_API_KEY not set — API key auth not configured")
+        real_config_api_key = OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            api_key=os.getenv("ODOO_API_KEY"),
+            database=None,
+        )
         with OdooConnection(real_config_api_key) as conn:
             # Authenticate
             conn.authenticate()
@@ -250,6 +250,7 @@ class TestAuthenticationIntegration:
 
             print(f"Authenticated with API key: uid={conn.uid}, db={conn.database}")
 
+    @pytest.mark.yolo
     def test_real_password_authentication(self, real_config_password):
         """Test username/password authentication with real server."""
         with OdooConnection(real_config_password) as conn:
@@ -264,8 +265,11 @@ class TestAuthenticationIntegration:
 
             print(f"Authenticated with password: uid={conn.uid}, db={conn.database}")
 
+    @pytest.mark.mcp
     def test_real_invalid_api_key(self):
         """Test authentication with invalid API key."""
+        if not os.getenv("ODOO_API_KEY"):
+            pytest.skip("ODOO_API_KEY not set — API key auth not configured")
         config = OdooConfig(
             url=os.getenv("ODOO_URL", "http://localhost:8069"),
             api_key="invalid_key_12345",
@@ -276,6 +280,7 @@ class TestAuthenticationIntegration:
             with pytest.raises(OdooConnectionError, match="Authentication failed"):
                 conn.authenticate()
 
+    @pytest.mark.yolo
     def test_real_invalid_password(self):
         """Test authentication with invalid password."""
         config = OdooConfig(
@@ -283,6 +288,7 @@ class TestAuthenticationIntegration:
             username=os.getenv("ODOO_USER", "admin"),
             password="wrong_password",
             database=os.getenv("ODOO_DB"),
+            yolo_mode=os.getenv("ODOO_YOLO", "off"),
         )
 
         with OdooConnection(config) as conn:

@@ -363,15 +363,21 @@ def create_test_env_file(test_dir: Path) -> Path:
     if not os.getenv("ODOO_URL"):
         raise ValueError("ODOO_URL environment variable not set. Please configure .env file.")
 
-    if not os.getenv("ODOO_API_KEY"):
-        raise ValueError("ODOO_API_KEY environment variable not set. Please configure .env file.")
+    if not os.getenv("ODOO_API_KEY") and not os.getenv("ODOO_PASSWORD"):
+        raise ValueError("Neither ODOO_API_KEY nor ODOO_PASSWORD set. Please configure .env file.")
 
-    env_content = f"""
-ODOO_URL={os.getenv("ODOO_URL")}
-ODOO_API_KEY={os.getenv("ODOO_API_KEY")}
-ODOO_DATABASE={os.getenv("ODOO_DB")}
-ODOO_MCP_LOG_LEVEL={os.getenv("ODOO_MCP_LOG_LEVEL", "INFO")}
-"""
+    lines = [
+        f"ODOO_URL={os.getenv('ODOO_URL')}",
+        f"ODOO_DATABASE={os.getenv('ODOO_DB', '')}",
+        f"ODOO_MCP_LOG_LEVEL={os.getenv('ODOO_MCP_LOG_LEVEL', 'INFO')}",
+    ]
+    if os.getenv("ODOO_API_KEY"):
+        lines.append(f"ODOO_API_KEY={os.getenv('ODOO_API_KEY')}")
+    if os.getenv("ODOO_USER"):
+        lines.append(f"ODOO_USER={os.getenv('ODOO_USER')}")
+    if os.getenv("ODOO_PASSWORD"):
+        lines.append(f"ODOO_PASSWORD={os.getenv('ODOO_PASSWORD')}")
+    env_content = "\n".join(lines)
 
     env_file.write_text(env_content.strip())
     return env_file

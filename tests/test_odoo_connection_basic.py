@@ -19,11 +19,14 @@ def test_config():
     """Create test configuration."""
     return OdooConfig(
         url=os.getenv("ODOO_URL", "http://localhost:8069"),
-        api_key="test_api_key",
+        api_key=os.getenv("ODOO_API_KEY") or None,
+        username=os.getenv("ODOO_USER") or None,
+        password=os.getenv("ODOO_PASSWORD") or None,
         database=os.getenv("ODOO_DB"),
         log_level="INFO",
         default_limit=10,
         max_limit=100,
+        yolo_mode=os.getenv("ODOO_YOLO", "off"),
     )
 
 
@@ -191,7 +194,7 @@ class TestBuildRecordUrl:
 class TestOdooConnectionConnect:
     """Test connection establishment."""
 
-    @pytest.mark.odoo_required
+    @pytest.mark.yolo
     def test_connect_success(self, test_config):
         """Test successful connection to real Odoo server."""
         conn = OdooConnection(test_config)
@@ -205,7 +208,7 @@ class TestOdooConnectionConnect:
         finally:
             conn.disconnect()
 
-    @pytest.mark.odoo_required
+    @pytest.mark.yolo
     def test_connect_already_connected(self, test_config, caplog):
         """Test connecting when already connected."""
         conn = OdooConnection(test_config)
@@ -247,7 +250,7 @@ class TestOdooConnectionConnect:
 class TestOdooConnectionDisconnect:
     """Test connection cleanup."""
 
-    @pytest.mark.odoo_required
+    @pytest.mark.yolo
     def test_disconnect_when_connected(self, test_config):
         """Test normal disconnect."""
         conn = OdooConnection(test_config)
@@ -268,7 +271,7 @@ class TestOdooConnectionDisconnect:
         conn.disconnect()
         assert "Not connected to Odoo" in caplog.text
 
-    @pytest.mark.odoo_required
+    @pytest.mark.yolo
     def test_disconnect_cleanup_on_del(self, test_config):
         """Test cleanup on object deletion."""
         conn = OdooConnection(test_config)
@@ -281,7 +284,7 @@ class TestOdooConnectionDisconnect:
 class TestOdooConnectionHealth:
     """Test health checking."""
 
-    @pytest.mark.odoo_required
+    @pytest.mark.yolo
     def test_check_health_connected(self, test_config):
         """Test health check when connected."""
         conn = OdooConnection(test_config)
@@ -304,7 +307,7 @@ class TestOdooConnectionHealth:
         assert not is_healthy
         assert message == "Not connected"
 
-    @pytest.mark.odoo_required
+    @pytest.mark.yolo
     def test_check_health_error(self, test_config):
         """Test health check with connection error."""
         conn = OdooConnection(test_config)
@@ -325,7 +328,7 @@ class TestOdooConnectionHealth:
 class TestOdooConnectionProxies:
     """Test proxy access."""
 
-    @pytest.mark.odoo_required
+    @pytest.mark.yolo
     def test_proxy_access_when_connected(self, test_config):
         """Test accessing proxies when connected."""
         conn = OdooConnection(test_config)
@@ -361,7 +364,7 @@ class TestOdooConnectionProxies:
 class TestOdooConnectionContext:
     """Test context manager functionality."""
 
-    @pytest.mark.odoo_required
+    @pytest.mark.yolo
     def test_context_manager_success(self, test_config):
         """Test using connection as context manager."""
         with OdooConnection(test_config) as conn:
@@ -374,7 +377,7 @@ class TestOdooConnectionContext:
         # Should be disconnected after context
         assert not conn.is_connected
 
-    @pytest.mark.odoo_required
+    @pytest.mark.yolo
     def test_context_manager_with_error(self, test_config):
         """Test context manager with error in context."""
         conn = OdooConnection(test_config)
@@ -389,7 +392,7 @@ class TestOdooConnectionContext:
         # Should still be disconnected
         assert not conn.is_connected
 
-    @pytest.mark.odoo_required
+    @pytest.mark.yolo
     def test_create_connection_helper(self, test_config):
         """Test create_connection helper function."""
         with create_connection(test_config) as conn:
@@ -402,7 +405,7 @@ class TestOdooConnectionContext:
 class TestOdooConnectionIntegration:
     """Integration tests with real Odoo server."""
 
-    @pytest.mark.integration
+    @pytest.mark.yolo
     def test_real_server_version(self, test_config):
         """Test getting version from real server."""
         with create_connection(test_config) as conn:
@@ -412,7 +415,7 @@ class TestOdooConnectionIntegration:
             assert "server_version" in version
             assert "protocol_version" in version
 
-    @pytest.mark.integration
+    @pytest.mark.yolo
     def test_real_server_db_list(self, test_config):
         """Test listing databases from real server."""
         with create_connection(test_config) as conn:

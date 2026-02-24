@@ -230,6 +230,7 @@ class TestDatabaseDiscovery:
         assert connection.validate_database_access(os.getenv("ODOO_DB", "db")) is False
 
 
+@pytest.mark.yolo
 @pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 class TestDatabaseDiscoveryIntegration:
     """Integration tests with real Odoo server."""
@@ -241,8 +242,11 @@ class TestDatabaseDiscoveryIntegration:
         # Don't load from environment to avoid conflicts
         return OdooConfig(
             url=os.getenv("ODOO_URL", "http://localhost:8069"),
-            api_key=os.getenv("ODOO_API_KEY"),
+            api_key=os.getenv("ODOO_API_KEY") or None,
+            username=os.getenv("ODOO_USER") or None,
+            password=os.getenv("ODOO_PASSWORD") or None,
             database=None,  # Let it auto-select
+            yolo_mode=os.getenv("ODOO_YOLO", "off"),
         )
 
     def test_real_list_databases(self, real_config):

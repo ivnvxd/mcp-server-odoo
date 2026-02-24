@@ -308,6 +308,7 @@ class TestXMLRPCOperations:
         )
 
 
+@pytest.mark.yolo
 @pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 class TestXMLRPCOperationsIntegration:
     """Integration tests with real Odoo server."""
@@ -317,8 +318,11 @@ class TestXMLRPCOperationsIntegration:
         """Create configuration with real credentials."""
         return OdooConfig(
             url=os.getenv("ODOO_URL", "http://localhost:8069"),
-            api_key=os.getenv("ODOO_API_KEY"),
+            api_key=os.getenv("ODOO_API_KEY") or None,
+            username=os.getenv("ODOO_USER") or None,
+            password=os.getenv("ODOO_PASSWORD") or None,
             database=None,  # Auto-select
+            yolo_mode=os.getenv("ODOO_YOLO", "off"),
         )
 
     @skip_on_rate_limit

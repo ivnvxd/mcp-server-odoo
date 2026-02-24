@@ -302,12 +302,12 @@ class TestWriteToolsIntegration:
         """Create real tool handler."""
         return register_tools(real_app, real_connection, real_access_controller, real_config)
 
-    @pytest.mark.integration
+    @pytest.mark.yolo
     @pytest.mark.asyncio
     async def test_create_update_delete_cycle(self, real_config, real_tool_handler):
         """Test full create, update, delete cycle with real Odoo."""
         if real_config.yolo_mode != "true":
-            pytest.skip("Write integration test requires ODOO_YOLO=true")
+            pytest.skip("Write test requires ODOO_YOLO=true (not read-only)")
         handler = real_tool_handler
 
         # Create a test partner

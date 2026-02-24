@@ -15,8 +15,8 @@ import requests
 
 from tests.helpers.mcp_test_client import MCPTestClient
 
-# Mark all tests in this module as integration tests requiring Odoo
-pytestmark = [pytest.mark.integration, pytest.mark.odoo_required]
+# Mark all tests in this module as requiring Odoo with MCP module
+pytestmark = [pytest.mark.mcp]
 
 
 class HttpTransportTester:
@@ -310,7 +310,7 @@ class TestTransportIntegration:
             tester.stop_server()
 
 
-@pytest.mark.integration
+@pytest.mark.mcp
 class TestTransportCompatibility:
     """Test transport compatibility and edge cases."""
 

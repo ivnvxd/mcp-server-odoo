@@ -44,7 +44,7 @@ class MCPTestClient:
             server_params = StdioServerParameters(
                 command=self.server_command[0],
                 args=self.server_command[1:] if len(self.server_command) > 1 else [],
-                env=None,  # Will inherit current environment
+                env=dict(os.environ),  # Pass full environment (MCP default strips ODOO_* vars)
             )
 
             # Connect to server
@@ -250,7 +250,7 @@ if __name__ == "__main__":
 
     async def main():
         # Check that required environment variables are set
-        required_vars = ["ODOO_URL", "ODOO_API_KEY"]
+        required_vars = ["ODOO_URL"]
         missing_vars = [var for var in required_vars if not os.getenv(var)]
 
         if missing_vars:

@@ -395,7 +395,7 @@ class TestAdvancedResourceIntegration:
     """Integration tests for advanced resources with real Odoo."""
 
     @pytest.mark.asyncio
-    @pytest.mark.integration
+    @pytest.mark.mcp
     @skip_on_rate_limit
     async def test_browse_real_records(self, real_config, real_connection):
         """Test browse with real Odoo connection."""
@@ -435,7 +435,7 @@ class TestAdvancedResourceIntegration:
                 assert str(pid) in result
 
     @pytest.mark.asyncio
-    @pytest.mark.integration
+    @pytest.mark.mcp
     @skip_on_rate_limit
     async def test_count_real_records(self, real_config, real_connection):
         """Test count with real Odoo connection."""
@@ -472,7 +472,7 @@ class TestAdvancedResourceIntegration:
         assert "Total count:" in result_companies
 
     @pytest.mark.asyncio
-    @pytest.mark.integration
+    @pytest.mark.mcp
     @skip_on_rate_limit
     async def test_fields_real_model(self, real_config, real_connection):
         """Test fields with real Odoo model."""

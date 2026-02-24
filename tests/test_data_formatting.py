@@ -317,7 +317,7 @@ class TestDatasetFormatter:
 class TestFormattingIntegration:
     """Integration tests with real Odoo data."""
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     def test_format_real_partner_record(self):
         """Test formatting real partner records from Odoo."""
         config = get_config()
@@ -368,7 +368,7 @@ class TestFormattingIntegration:
         finally:
             connection.disconnect()
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     def test_format_real_search_results(self):
         """Test formatting real search results from Odoo."""
         config = get_config()
@@ -420,7 +420,7 @@ class TestFormattingIntegration:
         finally:
             connection.disconnect()
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     def test_format_record_with_relationships(self):
         """Test formatting records with relationship fields."""
         config = get_config()
@@ -473,7 +473,7 @@ class TestFormattingIntegration:
         finally:
             connection.disconnect()
 
-    @pytest.mark.integration
+    @pytest.mark.mcp
     def test_format_various_field_types(self):
         """Test formatting various Odoo field types."""
         config = get_config()

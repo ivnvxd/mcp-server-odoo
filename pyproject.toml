@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-server-odoo"
-version = "0.4.2"
+version = "0.4.3"
 description = "A Model Context Protocol server for Odoo ERP systems"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -67,7 +67,11 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]
 markers = [
-    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+    "yolo: needs running Odoo instance (vanilla XML-RPC, no MCP module)",
+    "mcp: needs running Odoo with MCP module installed",
+]
+filterwarnings = [
+    "ignore:coroutine .* was never awaited:RuntimeWarning",
 ]
 
 [tool.coverage.run]

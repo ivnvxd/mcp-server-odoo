@@ -3,8 +3,7 @@
 Tests the MCP server through actual MCP protocol communication,
 validating protocol compliance and response formats.
 
-NOTE: These tests require a running MCP server and are meant for manual testing.
-They are skipped by default in automated test runs.
+All tests are marked @pytest.mark.mcp — they need Odoo with MCP module installed.
 """
 
 import asyncio
@@ -15,14 +14,6 @@ import pytest
 from mcp.types import Resource, TextContent, Tool
 
 logger = logging.getLogger(__name__)
-
-# Skip the entire module if running in automated tests
-# Set RUN_MCP_TESTS=1 environment variable to run these tests
-if not os.environ.get("RUN_MCP_TESTS"):
-    pytest.skip(
-        "MCP client validation tests require running server - set RUN_MCP_TESTS=1 to enable",
-        allow_module_level=True,
-    )
 
 # Try to import test helpers
 try:
@@ -61,6 +52,7 @@ async def mcp_client():
     return client
 
 
+@pytest.mark.mcp
 class TestMCPProtocolCompliance:
     """Test MCP protocol compliance."""
 
@@ -282,6 +274,7 @@ class TestMCPProtocolCompliance:
             assert isinstance(results[1], list)  # Tools
 
 
+@pytest.mark.mcp
 class TestMCPIntegration:
     """Test MCP integration scenarios."""
 
@@ -326,6 +319,7 @@ class TestMCPIntegration:
                 await connected_client.read_resource("odoo://res.partner/record/999999999")
 
 
+@pytest.mark.mcp
 class TestMCPInspectorCompatibility:
     """Test compatibility with MCP Inspector."""
 
@@ -361,7 +355,7 @@ class TestMCPInspectorCompatibility:
 
 
 # Test with real Odoo server if available
-@pytest.mark.integration
+@pytest.mark.mcp
 class TestRealOdooServer:
     """Test with real Odoo server."""
 

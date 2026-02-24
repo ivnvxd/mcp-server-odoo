@@ -37,8 +37,8 @@ class TestAccessControl:
         """Create AccessController instance."""
         return AccessController(config, cache_ttl=60)
 
-    def test_init_without_api_key(self):
-        """Test initialization fails without API key."""
+    def test_init_without_api_key(self, caplog):
+        """Test initialization succeeds without API key (warns instead of crashing)."""
         config = OdooConfig(
             url=os.getenv("ODOO_URL", "http://localhost:8069"),
             username=os.getenv("ODOO_USER", "admin"),
@@ -46,8 +46,9 @@ class TestAccessControl:
             database=os.getenv("ODOO_DB"),
         )
 
-        with pytest.raises(AccessControlError, match="API key required"):
-            AccessController(config)
+        controller = AccessController(config)
+        assert controller.config == config
+        assert "No API key configured" in caplog.text
 
     @patch("urllib.request.urlopen")
     def test_make_request_success(self, mock_urlopen, controller):
@@ -356,6 +357,7 @@ class TestAccessControl:
         assert all_perms["res.users"].can_write is False
 
 
+@pytest.mark.mcp
 @pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 class TestAccessControlIntegration:
     """Integration tests with real Odoo server."""
@@ -365,8 +367,11 @@ class TestAccessControlIntegration:
         """Create configuration with real credentials."""
         return OdooConfig(
             url=os.getenv("ODOO_URL", "http://localhost:8069"),
-            api_key=os.getenv("ODOO_API_KEY"),
+            api_key=os.getenv("ODOO_API_KEY") or None,
+            username=os.getenv("ODOO_USER") or None,
+            password=os.getenv("ODOO_PASSWORD") or None,
             database=os.getenv("ODOO_DB"),
+            yolo_mode=os.getenv("ODOO_YOLO", "off"),
         )
 
     def test_real_get_enabled_models(self, real_config):
