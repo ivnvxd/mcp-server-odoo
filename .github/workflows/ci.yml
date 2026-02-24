@@ -198,8 +198,6 @@ jobs:
     name: MCP Integration Tests
     runs-on: ubuntu-latest
     needs: test
-    continue-on-error: true
-
     services:
       postgres:
         image: postgres:17
@@ -292,21 +290,27 @@ jobs:
             models.execute_kw(db, uid, 'admin', 'ir.config_parameter', 'set_param', [param, value])
         print('MCP enabled, API keys enabled')
 
-        # Enable common models for MCP access
-        for model_name in ['res.partner', 'res.users', 'res.company']:
+        # Enable models with permissions matching auth-test-matrix.md:
+        # - res.partner: read+write+unlink only (create=False for restricted ops test)
+        # - res.company: full CRUD (used by write cycle tests)
+        # - res.country: read only (unlink=False for restricted ops test)
+        # - res.users: NOT enabled (read denied for restricted ops test)
+        model_permissions = {
+            'res.partner': {'allow_read': True, 'allow_create': False, 'allow_write': True, 'allow_unlink': True},
+            'res.company': {'allow_read': True, 'allow_create': True, 'allow_write': True, 'allow_unlink': True},
+            'res.country': {'allow_read': True, 'allow_create': False, 'allow_write': False, 'allow_unlink': False},
+        }
+        for model_name, perms in model_permissions.items():
             model_ids = models.execute_kw(db, uid, 'admin', 'ir.model', 'search', [
                 [('model', '=', model_name)]
             ])
             if model_ids:
                 models.execute_kw(db, uid, 'admin', 'mcp.enabled.model', 'create', [{
                     'model_id': model_ids[0],
-                    'allow_read': True,
-                    'allow_create': True,
-                    'allow_write': True,
-                    'allow_unlink': True,
+                    **perms,
                 }])
-                print(f'Enabled model: {model_name}')
-        print('MCP setup complete')
+                print(f'Enabled model: {model_name} {perms}')
+        print('MCP setup complete (res.users intentionally NOT enabled)')
         "
 
     - name: Generate API key for admin user
