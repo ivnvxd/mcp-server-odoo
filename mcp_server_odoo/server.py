@@ -25,7 +25,7 @@ from .tools import register_tools
 logger = get_logger(__name__)
 
 # Server version
-SERVER_VERSION = "0.4.3"
+SERVER_VERSION = "0.4.4"
 
 
 class OdooMCPServer:
@@ -89,8 +89,10 @@ class OdooMCPServer:
 
                 logger.info(f"Successfully connected to Odoo at {self.config.url}")
 
-                # Initialize access controller
-                self.access_controller = AccessController(self.config)
+                # Initialize access controller (pass resolved DB for session auth)
+                self.access_controller = AccessController(
+                    self.config, database=self.connection.database
+                )
             except Exception as e:
                 context = ErrorContext(operation="connection_setup")
                 # Let specific errors propagate as-is

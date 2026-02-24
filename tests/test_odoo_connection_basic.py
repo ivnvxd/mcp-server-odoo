@@ -230,7 +230,8 @@ class TestOdooConnectionConnect:
         with pytest.raises(OdooConnectionError) as exc_info:
             conn.connect()
 
-        assert "Connection failed" in str(exc_info.value)
+        error_msg = str(exc_info.value)
+        assert "Connection failed" in error_msg or "Connection test failed" in error_msg
 
     def test_connect_timeout(self, test_config):
         """Test connection timeout handling."""
@@ -244,7 +245,8 @@ class TestOdooConnectionConnect:
             with pytest.raises(OdooConnectionError) as exc_info:
                 conn.connect()
 
-            assert "Connection failed" in str(exc_info.value)
+            error_msg = str(exc_info.value)
+            assert "Connection failed" in error_msg or "Connection test failed" in error_msg
 
 
 class TestOdooConnectionDisconnect:

@@ -173,16 +173,26 @@ def validate_mcp_response(response: Dict[str, Any]) -> bool:
     return False
 
 
-def check_odoo_health(base_url: str, api_key: str) -> bool:
-    """Check if Odoo MCP endpoints are healthy."""
+def check_odoo_health(base_url: str, api_key: str, database: str | None = None) -> bool:
+    """Check if Odoo MCP endpoints are healthy.
+
+    Args:
+        base_url: Odoo server URL
+        api_key: API key to validate
+        database: Database name for X-Odoo-Database header (needed for multi-DB)
+    """
     try:
+        db_headers: dict[str, str] = {}
+        if database:
+            db_headers["X-Odoo-Database"] = database
+
         # Check health endpoint
-        response = requests.get(f"{base_url}/mcp/health", timeout=5)
+        response = requests.get(f"{base_url}/mcp/health", headers=db_headers, timeout=5)
         if response.status_code != 200:
             return False
 
         # Check auth endpoint (it's a GET endpoint)
-        headers = {"X-API-Key": api_key}
+        headers = {"X-API-Key": api_key, **db_headers}
         response = requests.get(f"{base_url}/mcp/auth/validate", headers=headers, timeout=5)
 
         if response.status_code == 200:

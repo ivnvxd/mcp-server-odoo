@@ -37,8 +37,8 @@ class TestAccessControl:
         """Create AccessController instance."""
         return AccessController(config, cache_ttl=60)
 
-    def test_init_without_api_key(self, caplog):
-        """Test initialization succeeds without API key (warns instead of crashing)."""
+    def test_init_without_api_key_with_credentials(self):
+        """Test initialization with credentials (no API key) prepares for session auth."""
         config = OdooConfig(
             url=os.getenv("ODOO_URL", "http://localhost:8069"),
             username=os.getenv("ODOO_USER", "admin"),
@@ -46,9 +46,25 @@ class TestAccessControl:
             database=os.getenv("ODOO_DB"),
         )
 
-        controller = AccessController(config)
+        controller = AccessController(config, database="testdb")
         assert controller.config == config
-        assert "No API key configured" in caplog.text
+        assert controller._session_id is None
+        assert controller.database == "testdb"
+
+    def test_init_without_any_auth(self, caplog):
+        """Test initialization without any auth logs a warning."""
+        config = OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            api_key="dummy",  # Need some auth to pass config validation
+            database=os.getenv("ODOO_DB"),
+        )
+        # Simulate no auth by clearing after construction
+        config.api_key = None
+        config.username = None
+        config.password = None
+
+        AccessController(config)
+        assert "No authentication configured" in caplog.text
 
     @patch("urllib.request.urlopen")
     def test_make_request_success(self, mock_urlopen, controller):
@@ -85,7 +101,7 @@ class TestAccessControl:
         """Test REST API request with 401 error."""
         mock_urlopen.side_effect = urllib.error.HTTPError(None, 401, "Unauthorized", {}, None)
 
-        with pytest.raises(AccessControlError, match="Invalid API key"):
+        with pytest.raises(AccessControlError, match="API key rejected"):
             controller._make_request("/test/endpoint")
 
     @patch("urllib.request.urlopen")
@@ -355,6 +371,144 @@ class TestAccessControl:
         assert len(all_perms) == 2
         assert all_perms["res.partner"].can_write is True
         assert all_perms["res.users"].can_write is False
+
+
+class TestSessionAuth:
+    """Test session-based authentication for access control."""
+
+    @pytest.fixture
+    def cred_config(self):
+        """Create config with only username/password (no API key)."""
+        return OdooConfig(
+            url="http://localhost:8069",
+            username="admin",
+            password="admin",
+            database="testdb",
+        )
+
+    @pytest.fixture
+    def cred_controller(self, cred_config):
+        """Create AccessController with credentials-only config."""
+        return AccessController(cred_config, database="testdb")
+
+    @patch("urllib.request.urlopen")
+    def test_session_auth_on_first_request(self, mock_urlopen, cred_controller):
+        """Test that session auth happens lazily on first REST request."""
+        # First call: session authenticate
+        session_response = MagicMock()
+        session_response.headers = {"Set-Cookie": "session_id=abc123; Path=/"}
+        session_response.read.return_value = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "result": {"uid": 2}}
+        ).encode()
+
+        # Second call: actual REST request
+        rest_response = MagicMock()
+        rest_response.read.return_value = json.dumps(
+            {"success": True, "data": {"models": []}}
+        ).encode()
+
+        mock_urlopen.return_value.__enter__.side_effect = [session_response, rest_response]
+
+        cred_controller._make_request("/mcp/models")
+
+        assert cred_controller._session_id == "abc123"
+        assert mock_urlopen.call_count == 2
+
+    @patch("urllib.request.urlopen")
+    def test_session_reuses_cookie(self, mock_urlopen, cred_controller):
+        """Test that subsequent requests reuse the session cookie."""
+        cred_controller._session_id = "existing_session"
+
+        rest_response = MagicMock()
+        rest_response.read.return_value = json.dumps(
+            {"success": True, "data": {"models": []}}
+        ).encode()
+        mock_urlopen.return_value.__enter__.return_value = rest_response
+
+        cred_controller._make_request("/mcp/models")
+
+        # Should only make one call (no session auth needed)
+        mock_urlopen.assert_called_once()
+        # Verify cookie was sent
+        call_args = mock_urlopen.call_args
+        req = call_args[0][0]
+        assert req.get_header("Cookie") == "session_id=existing_session"
+
+    @patch("urllib.request.urlopen")
+    def test_session_retry_on_401(self, mock_urlopen, cred_controller):
+        """Test that expired session triggers re-auth and retry."""
+        cred_controller._session_id = "expired_session"
+
+        # First call: 401 (expired session)
+        # Second call: session authenticate
+        session_response = MagicMock()
+        session_response.headers = {"Set-Cookie": "session_id=new_session; Path=/"}
+        session_response.read.return_value = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "result": {"uid": 2}}
+        ).encode()
+
+        # Third call: retry REST request
+        rest_response = MagicMock()
+        rest_response.read.return_value = json.dumps(
+            {"success": True, "data": {"models": []}}
+        ).encode()
+
+        mock_urlopen.return_value.__enter__.side_effect = [
+            urllib.error.HTTPError(None, 401, "Unauthorized", {}, None),
+            session_response,
+            rest_response,
+        ]
+        # The first call raises, so side_effect on __enter__ won't work for HTTPError.
+        # Instead, configure side_effect on urlopen itself for the first call.
+        call_count = 0
+
+        def urlopen_side_effect(req, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise urllib.error.HTTPError(None, 401, "Unauthorized", {}, None)
+            return mock_urlopen.return_value
+
+        mock_urlopen.side_effect = urlopen_side_effect
+        mock_urlopen.return_value.__enter__.side_effect = [session_response, rest_response]
+
+        cred_controller._make_request("/mcp/models")
+
+        assert cred_controller._session_id == "new_session"
+
+    @patch("urllib.request.urlopen")
+    def test_session_auth_failure(self, mock_urlopen, cred_controller):
+        """Test session auth with invalid credentials."""
+        mock_urlopen.side_effect = urllib.error.HTTPError(None, 401, "Unauthorized", {}, None)
+
+        with pytest.raises(AccessControlError, match="Session authentication failed"):
+            cred_controller._authenticate_session()
+
+    @patch("urllib.request.urlopen")
+    def test_session_auth_no_cookie(self, mock_urlopen, cred_controller):
+        """Test session auth when server returns no session cookie."""
+        response = MagicMock()
+        response.headers = {"Set-Cookie": ""}
+        response.read.return_value = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "result": {"uid": 2}}
+        ).encode()
+        mock_urlopen.return_value.__enter__.return_value = response
+
+        with pytest.raises(AccessControlError, match="no session cookie"):
+            cred_controller._authenticate_session()
+
+    @patch("urllib.request.urlopen")
+    def test_session_auth_json_error(self, mock_urlopen, cred_controller):
+        """Test session auth when server returns JSON-RPC error."""
+        response = MagicMock()
+        response.headers = {"Set-Cookie": "session_id=abc; Path=/"}
+        response.read.return_value = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "error": {"message": "Access denied"}}
+        ).encode()
+        mock_urlopen.return_value.__enter__.return_value = response
+
+        with pytest.raises(AccessControlError, match="invalid credentials"):
+            cred_controller._authenticate_session()
 
 
 @pytest.mark.mcp

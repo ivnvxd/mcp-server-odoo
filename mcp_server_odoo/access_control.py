@@ -6,6 +6,7 @@ system via REST API endpoints.
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -68,16 +69,21 @@ class AccessController:
     MODELS_ENDPOINT = "/mcp/models"
     MODEL_ACCESS_ENDPOINT = "/mcp/models/{model}/access"
 
-    def __init__(self, config: OdooConfig, cache_ttl: int = CACHE_TTL):
+    def __init__(
+        self, config: OdooConfig, database: Optional[str] = None, cache_ttl: int = CACHE_TTL
+    ):
         """Initialize access controller.
 
         Args:
             config: OdooConfig with connection details and API key
+            database: Resolved database name (needed for session auth when config.database is None)
             cache_ttl: Cache time-to-live in seconds
         """
         self.config = config
+        self.database = database or config.database
         self.cache_ttl = cache_ttl
         self._cache: Dict[str, CacheEntry] = {}
+        self._session_id: Optional[str] = None
 
         # Parse base URL
         self.base_url = config.url.rstrip("/")
@@ -91,18 +97,76 @@ class AccessController:
             )
             return  # Skip API validation
 
-        # Warn if no API key in standard mode (REST calls may fail)
-        if not config.api_key:
+        if config.api_key:
+            logger.info(f"Initialized AccessController for {self.base_url} (API key auth)")
+        elif config.uses_credentials:
+            logger.info(f"Initialized AccessController for {self.base_url} (session auth)")
+        else:
             logger.warning(
-                "No API key configured. MCP access control requests will be made "
-                "without API key authentication. Configure ODOO_API_KEY if the "
-                "MCP module requires it."
+                "No authentication configured for MCP access control. "
+                "Set ODOO_API_KEY or provide ODOO_USER/ODOO_PASSWORD."
             )
 
-        logger.info(f"Initialized AccessController for {self.base_url}")
+    def _authenticate_session(self) -> None:
+        """Authenticate via Odoo web session to get a session cookie.
+
+        Used as fallback when no API key is configured.
+
+        Raises:
+            AccessControlError: If session authentication fails
+        """
+        url = f"{self.base_url}/web/session/authenticate"
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "call",
+                "params": {
+                    "login": self.config.username,
+                    "password": self.config.password,
+                    "db": self.database,
+                },
+                "id": 1,
+            }
+        ).encode()
+
+        req = urllib.request.Request(url, data=body)
+        req.add_header("Content-Type", "application/json")
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                # Extract session_id from Set-Cookie header
+                cookie_header = response.headers.get("Set-Cookie", "")
+                match = re.search(r"session_id=([^;]+)", cookie_header)
+                if not match:
+                    raise AccessControlError(
+                        "Session authentication failed: no session cookie returned"
+                    )
+
+                self._session_id = match.group(1)
+
+                # Verify the response indicates success (no JSON-RPC error)
+                data = json.loads(response.read().decode("utf-8"))
+                if "error" in data:
+                    self._session_id = None
+                    raise AccessControlError("Session authentication failed: invalid credentials")
+
+                logger.info("Session authentication successful")
+
+        except urllib.error.HTTPError as e:
+            raise AccessControlError(f"Session authentication failed: HTTP {e.code}") from e
+        except urllib.error.URLError as e:
+            raise AccessControlError(f"Session authentication failed: {e.reason}") from e
+
+    def _ensure_session(self) -> None:
+        """Ensure a valid session exists for REST requests."""
+        if not self._session_id:
+            self._authenticate_session()
 
     def _make_request(self, endpoint: str, timeout: int = 30) -> Dict[str, Any]:
         """Make authenticated request to MCP REST API.
+
+        Uses API key if available, otherwise falls back to session cookie auth.
+        On session 401, retries once after re-authenticating.
 
         Args:
             endpoint: API endpoint path
@@ -114,13 +178,35 @@ class AccessController:
         Raises:
             AccessControlError: If request fails
         """
-        url = f"{self.base_url}{endpoint}"
+        return self._do_request(endpoint, timeout, allow_session_retry=True)
 
-        # Create request with optional API key header
+    def _do_request(self, endpoint: str, timeout: int, allow_session_retry: bool) -> Dict[str, Any]:
+        """Internal request method with optional session retry.
+
+        Args:
+            endpoint: API endpoint path
+            timeout: Request timeout in seconds
+            allow_session_retry: Whether to retry with a fresh session on 401
+
+        Returns:
+            Parsed JSON response
+
+        Raises:
+            AccessControlError: If request fails
+        """
+        url = f"{self.base_url}{endpoint}"
+        uses_session = False
+
         req = urllib.request.Request(url)
         if self.config.api_key:
             req.add_header("X-API-Key", self.config.api_key)
+        elif self.config.uses_credentials:
+            self._ensure_session()
+            req.add_header("Cookie", f"session_id={self._session_id}")
+            uses_session = True
         req.add_header("Accept", "application/json")
+        if self.database:
+            req.add_header("X-Odoo-Database", self.database)
 
         try:
             logger.debug(f"Making request to {url}")
@@ -137,13 +223,21 @@ class AccessController:
 
         except urllib.error.HTTPError as e:
             if e.code == 401:
+                # Session expired — retry once with a fresh session
+                if uses_session and allow_session_retry:
+                    logger.info("Session expired, re-authenticating...")
+                    self._session_id = None
+                    return self._do_request(endpoint, timeout, allow_session_retry=False)
+
                 if self.config.api_key:
-                    raise AccessControlError("Invalid API key for access control") from e
-                else:
                     raise AccessControlError(
-                        "MCP REST API requires authentication. "
-                        "Configure ODOO_API_KEY or use YOLO mode (ODOO_YOLO=read)."
+                        "API key rejected by MCP module. "
+                        "Verify ODOO_API_KEY is valid and the MCP module is installed."
                     ) from e
+                raise AccessControlError(
+                    "MCP REST API authentication failed. "
+                    "Configure ODOO_API_KEY or use YOLO mode (ODOO_YOLO=read)."
+                ) from e
             elif e.code == 403:
                 raise AccessControlError("Access denied to MCP endpoints") from e
             elif e.code == 404:
@@ -154,6 +248,8 @@ class AccessController:
             raise AccessControlError(f"Connection error: {e.reason}") from e
         except json.JSONDecodeError as e:
             raise AccessControlError(f"Invalid JSON response: {e}") from e
+        except AccessControlError:
+            raise
         except Exception as e:
             raise AccessControlError(f"Request failed: {e}") from e
 

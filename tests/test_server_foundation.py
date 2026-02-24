@@ -229,8 +229,10 @@ class TestServerFoundation:
                 server._mock_connection.connect.assert_called_once()
                 server._mock_connection.authenticate.assert_called_once()
 
-                # Verify access controller was created
-                mock_access_ctrl.assert_called_once_with(server.config)
+                # Verify access controller was created with resolved database
+                mock_access_ctrl.assert_called_once_with(
+                    server.config, database=server._mock_connection.database
+                )
 
                 # Verify resources were registered
                 mock_register.assert_called_once()
