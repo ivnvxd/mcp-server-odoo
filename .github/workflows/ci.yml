@@ -167,10 +167,11 @@ jobs:
         INDEX=${API_KEY:0:8}
 
         # Insert into Odoo's API key table using dollar-quoting for the hash
-        # (passlib hashes contain $ characters that break normal SQL quoting)
+        # (passlib hashes contain $ characters that break normal SQL quoting).
+        # Note: res_users_apikeys has _log_access=False, so no create_uid/write_uid columns.
         PGPASSWORD=odoo psql -h localhost -U odoo -d test -c \
-          "INSERT INTO res_users_apikeys (name, user_id, scope, index, key, create_uid, create_date, write_uid, write_date)
-           VALUES ('CI Test Key', 2, NULL, '${INDEX}', \$hash\$${KEY_HASH}\$hash\$, 2, NOW() AT TIME ZONE 'UTC', 2, NOW() AT TIME ZONE 'UTC')"
+          "INSERT INTO res_users_apikeys (name, user_id, scope, index, key)
+           VALUES ('CI Test Key', 2, NULL, '${INDEX}', \$hash\$${KEY_HASH}\$hash\$)"
 
         echo "key=${API_KEY}" >> "$GITHUB_OUTPUT"
         echo "API key generated and inserted for admin user"
@@ -325,8 +326,8 @@ jobs:
         INDEX=${API_KEY:0:8}
 
         PGPASSWORD=odoo psql -h localhost -U odoo -d test -c \
-          "INSERT INTO res_users_apikeys (name, user_id, scope, index, key, create_uid, create_date, write_uid, write_date)
-           VALUES ('CI Test Key', 2, NULL, '${INDEX}', \$hash\$${KEY_HASH}\$hash\$, 2, NOW() AT TIME ZONE 'UTC', 2, NOW() AT TIME ZONE 'UTC')"
+          "INSERT INTO res_users_apikeys (name, user_id, scope, index, key)
+           VALUES ('CI Test Key', 2, NULL, '${INDEX}', \$hash\$${KEY_HASH}\$hash\$)"
 
         echo "key=${API_KEY}" >> "$GITHUB_OUTPUT"
         echo "API key generated and inserted for admin user"
