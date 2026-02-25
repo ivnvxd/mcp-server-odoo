@@ -34,6 +34,21 @@ from tests.helpers.server_testing import (
 pytestmark = [pytest.mark.mcp]
 
 
+def _resolve_db_header(config: OdooConfig) -> Dict[str, str]:
+    """Resolve target database and return X-Odoo-Database header dict.
+
+    MCP addon routes return 404 when multiple DBs exist and no DB context
+    is provided. This helper uses a temporary connection to resolve the DB.
+    """
+    conn = OdooConnection(config)
+    conn.connect()
+    try:
+        db = conn.auto_select_database()
+    finally:
+        conn.disconnect()
+    return {"X-Odoo-Database": db} if db else {}
+
+
 class TestServerLifecycle:
     """Test MCP server lifecycle management."""
 
@@ -159,13 +174,14 @@ class TestAuthenticationFlows:
     def test_rest_api_authentication(self):
         """Test REST API authentication with API key."""
         config = OdooConfig.from_env()
+        db_header = _resolve_db_header(config)
 
         # Test health check (no auth)
-        response = requests.get(f"{config.url}/mcp/health")
+        response = requests.get(f"{config.url}/mcp/health", headers=db_header)
         assert response.status_code == 200
 
         # Test authenticated endpoint
-        headers = {"X-API-Key": config.api_key}
+        headers = {"X-API-Key": config.api_key, **db_header}
         response = requests.get(f"{config.url}/mcp/system/info", headers=headers)
         assert response.status_code == 200
         data = response.json()
@@ -175,9 +191,10 @@ class TestAuthenticationFlows:
     def test_authentication_error_handling(self):
         """Test proper error handling for authentication failures."""
         config = OdooConfig.from_env()
+        db_header = _resolve_db_header(config)
 
         # Test with invalid API key
-        headers = {"X-API-Key": "invalid_key"}
+        headers = {"X-API-Key": "invalid_key", **db_header}
         response = requests.get(f"{config.url}/mcp/system/info", headers=headers)
 
         if config.api_key:
@@ -455,18 +472,20 @@ class TestPerformanceAndReliability:
     def test_server_health_monitoring(self):
         """Test server health check functionality."""
         config = OdooConfig.from_env()
+        db_header = _resolve_db_header(config)
+        db_name = db_header.get("X-Odoo-Database")
 
         # Check Odoo health — without API key, use password to verify endpoint is up
         if config.api_key:
-            is_healthy = check_odoo_health(config.url, config.api_key)
+            is_healthy = check_odoo_health(config.url, config.api_key, database=db_name)
             assert is_healthy
 
             # Test with invalid credentials (only meaningful when API keys are enforced)
-            is_healthy = check_odoo_health(config.url, "invalid_key")
+            is_healthy = check_odoo_health(config.url, "invalid_key", database=db_name)
             assert not is_healthy
         else:
             # Without API key, just verify the health endpoint responds
-            response = requests.get(f"{config.url}/mcp/health", timeout=5)
+            response = requests.get(f"{config.url}/mcp/health", headers=db_header, timeout=5)
             assert response.status_code == 200
 
 

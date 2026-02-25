@@ -169,6 +169,12 @@ class OdooConnection:
         Creates XML-RPC proxies for MCP endpoints but doesn't
         authenticate yet. Uses connection pooling for better performance.
 
+        In standard mode, resolves the target database first using the
+        server-wide ``/xmlrpc/db`` endpoint, then sets the
+        ``X-Odoo-Database`` header on the transport so that subsequent
+        requests to MCP addon routes (``/mcp/xmlrpc/*``) are routed to
+        the correct database — required when multiple DBs exist.
+
         Raises:
             OdooConnectionError: If connection fails
         """
@@ -177,8 +183,15 @@ class OdooConnection:
             return
 
         try:
-            # Use connection pool for proxies with dynamic endpoints
+            # 1. Create DB proxy first (server-wide /xmlrpc/db — works without DB context)
             self._db_proxy = self._performance_manager.get_optimized_connection(self.DB_ENDPOINT)
+
+            # 2. In standard mode, resolve database and set header before creating
+            #    MCP proxies so multi-DB routing works.
+            if not self.config.is_yolo_enabled:
+                self._resolve_and_set_database()
+
+            # 3. Create common/object proxies (now with DB header in standard mode)
             self._common_proxy = self._performance_manager.get_optimized_connection(
                 self.COMMON_ENDPOINT
             )
@@ -186,7 +199,7 @@ class OdooConnection:
                 self.OBJECT_ENDPOINT
             )
 
-            # Test connection by calling server_version
+            # 4. Test connection by calling server_version
             self._test_connection()
 
             self._connected = True
@@ -200,7 +213,36 @@ class OdooConnection:
                 f"{self._url_components['port']}: {e}"
             ) from e
         except Exception as e:
+            if isinstance(e, OdooConnectionError):
+                raise
             raise OdooConnectionError(f"Connection failed: {e}") from e
+
+    def _resolve_and_set_database(self) -> None:
+        """Resolve the target database and set it on the transport header.
+
+        Uses the server-wide ``/xmlrpc/db`` proxy (already created) to
+        list databases and pick one, then tells the connection pool to
+        inject ``X-Odoo-Database`` on all subsequent requests.
+        """
+        # If database is explicitly configured, use it directly
+        if self.config.database:
+            db_name = self.config.database
+            logger.info(f"Using configured database for header: {db_name}")
+        else:
+            # Need to auto-detect — temporarily mark as connected so
+            # list_databases() / auto_select_database() can use db_proxy
+            self._connected = True
+            try:
+                db_name = self.auto_select_database()
+            except Exception:
+                self._connected = False
+                raise
+            self._connected = False
+
+        self._performance_manager.set_database(db_name)
+        # Re-create db_proxy with the new header
+        self._db_proxy = self._performance_manager.get_optimized_connection(self.DB_ENDPOINT)
+        logger.info(f"Set X-Odoo-Database header to '{db_name}'")
 
     def _test_connection(self) -> None:
         """Test connection by calling server_version.
@@ -584,6 +626,8 @@ class OdooConnection:
             # Create request with API key header
             req = urllib.request.Request(url)
             req.add_header("X-API-Key", self.config.api_key)
+            if database:
+                req.add_header("X-Odoo-Database", database)
 
             # Make the request
             with urllib.request.urlopen(req, timeout=self.timeout) as response:

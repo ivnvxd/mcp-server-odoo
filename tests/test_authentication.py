@@ -352,7 +352,7 @@ class TestYoloModeAuthentication:
         conn = OdooConnection(config)
 
         # Check that MCP endpoints are used
-        assert conn.DB_ENDPOINT == "/mcp/xmlrpc/db"
+        assert conn.DB_ENDPOINT == "/xmlrpc/db"
         assert conn.COMMON_ENDPOINT == "/mcp/xmlrpc/common"
         assert conn.OBJECT_ENDPOINT == "/mcp/xmlrpc/object"
 

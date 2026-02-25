@@ -286,7 +286,7 @@ class TestYoloMode:
         paths = config.get_endpoint_paths()
         assert paths["common"] == "/mcp/xmlrpc/common"
         assert paths["object"] == "/mcp/xmlrpc/object"
-        assert paths["db"] == "/mcp/xmlrpc/db"
+        assert paths["db"] == "/xmlrpc/db"
 
     def test_endpoint_paths_yolo_modes(self):
         """Test endpoint paths in YOLO modes."""

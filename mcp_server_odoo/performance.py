@@ -14,7 +14,7 @@ from collections import OrderedDict, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from xmlrpc.client import SafeTransport, ServerProxy, Transport
 
 from .config import OdooConfig
@@ -256,6 +256,32 @@ class Cache:
             self._remove(key, reason)
 
 
+class OdooTransport(Transport):
+    """HTTP transport that injects X-Odoo-Database header for multi-DB routing."""
+
+    def __init__(self, database: Optional[str] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.database = database
+
+    def send_headers(self, connection, headers):
+        super().send_headers(connection, headers)
+        if self.database:
+            connection.putheader("X-Odoo-Database", self.database)
+
+
+class OdooSafeTransport(SafeTransport):
+    """HTTPS transport that injects X-Odoo-Database header for multi-DB routing."""
+
+    def __init__(self, database: Optional[str] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.database = database
+
+    def send_headers(self, connection, headers):
+        super().send_headers(connection, headers)
+        if self.database:
+            connection.putheader("X-Odoo-Database", self.database)
+
+
 class ConnectionPool:
     """Thread-safe connection pool for XML-RPC connections."""
 
@@ -271,11 +297,11 @@ class ConnectionPool:
         self._connections: List[Tuple[ServerProxy, float]] = []
         self._endpoint_map: List[str] = []  # Track endpoints for each connection
         self._lock = threading.RLock()
-        # Use SafeTransport for HTTPS, regular Transport for HTTP
+        # Use OdooSafeTransport/OdooTransport to support X-Odoo-Database header
         if config.url.startswith("https://"):
-            self._transport = SafeTransport()
+            self._transport: Union[OdooTransport, OdooSafeTransport] = OdooSafeTransport()
         else:
-            self._transport = Transport()
+            self._transport = OdooTransport()
         self._last_cleanup = time.time()
         self._stats = {
             "connections_created": 0,
@@ -360,6 +386,21 @@ class ConnectionPool:
         """Get connection pool statistics."""
         with self._lock:
             return self._stats.copy()
+
+    def set_database(self, db_name: str) -> None:
+        """Set the database for X-Odoo-Database header and invalidate existing connections.
+
+        Args:
+            db_name: Database name to send in the header
+        """
+        with self._lock:
+            self._transport.database = db_name
+            # Invalidate existing connections — they were created without the header
+            self._stats["connections_closed"] += len(self._connections)
+            self._connections.clear()
+            self._endpoint_map.clear()
+            self._stats["active_connections"] = 0
+            logger.debug(f"Set database header to '{db_name}', cleared connection pool")
 
     def clear(self):
         """Clear all connections."""
@@ -693,6 +734,14 @@ class PerformanceManager:
             "connection_pool": self.connection_pool.get_stats(),
             "performance": self.monitor.get_stats(),
         }
+
+    def set_database(self, db_name: str) -> None:
+        """Set the database for X-Odoo-Database header on the connection pool.
+
+        Args:
+            db_name: Database name to send in the header
+        """
+        self.connection_pool.set_database(db_name)
 
     def clear_all_caches(self):
         """Clear all caches."""

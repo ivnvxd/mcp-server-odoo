@@ -147,6 +147,35 @@ jobs:
           sleep 5
         done
 
+    - name: Generate API key for admin user
+      id: yolo-apikey
+      run: |
+        # Generate a random API key and compute its passlib hash inside the
+        # Odoo container (which already has passlib installed).
+        KEY_AND_HASH=$(docker exec odoo python3 -c "
+        import secrets
+        from passlib.context import CryptContext
+        key = secrets.token_hex(20)
+        ctx = CryptContext(['pbkdf2_sha512'])
+        key_hash = ctx.hash(key)
+        # Use pipe separator — safe because neither key nor hash contains |
+        print(f'{key}|{key_hash}')
+        ")
+
+        API_KEY=$(echo "$KEY_AND_HASH" | cut -d'|' -f1)
+        KEY_HASH=$(echo "$KEY_AND_HASH" | cut -d'|' -f2)
+        INDEX=${API_KEY:0:8}
+
+        # Insert into Odoo's API key table using dollar-quoting for the hash
+        # (passlib hashes contain $ characters that break normal SQL quoting).
+        # Note: res_users_apikeys has _log_access=False, so no create_uid/write_uid columns.
+        PGPASSWORD=odoo psql -h localhost -U odoo -d test -c \
+          "INSERT INTO res_users_apikeys (name, user_id, scope, index, key)
+           VALUES ('CI Test Key', 2, NULL, '${INDEX}', \$hash\$${KEY_HASH}\$hash\$)"
+
+        echo "key=${API_KEY}" >> "$GITHUB_OUTPUT"
+        echo "API key generated and inserted for admin user"
+
     - name: Run YOLO integration tests
       run: |
         pytest -m "yolo" -v --cov=mcp_server_odoo --cov-report=xml:coverage-yolo.xml --cov-report=term
@@ -156,6 +185,7 @@ jobs:
         ODOO_USER: admin
         ODOO_PASSWORD: admin
         ODOO_YOLO: "true"
+        ODOO_API_KEY: ${{ steps.yolo-apikey.outputs.key }}
 
     - name: Upload coverage artifact
       if: always()
@@ -168,8 +198,6 @@ jobs:
     name: MCP Integration Tests
     runs-on: ubuntu-latest
     needs: test
-    continue-on-error: true
-
     services:
       postgres:
         image: postgres:17
@@ -254,30 +282,59 @@ jobs:
 
         models = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/object')
 
-        # Enable MCP, disable API key requirement for CI
+        # Enable MCP with API key validation
         for param, value in [
             ('mcp_server.enabled', 'True'),
-            ('mcp_server.use_api_keys', 'False'),
+            ('mcp_server.use_api_keys', 'True'),
         ]:
             models.execute_kw(db, uid, 'admin', 'ir.config_parameter', 'set_param', [param, value])
-        print('MCP enabled, API keys disabled')
+        print('MCP enabled, API keys enabled')
 
-        # Enable common models for MCP access
-        for model_name in ['res.partner', 'res.users', 'res.company']:
+        # Enable models with permissions matching auth-test-matrix.md:
+        # - res.partner: read+write+unlink only (create=False for restricted ops test)
+        # - res.company: full CRUD (used by write cycle tests)
+        # - res.country: read only (unlink=False for restricted ops test)
+        # - res.users: NOT enabled (read denied for restricted ops test)
+        model_permissions = {
+            'res.partner': {'allow_read': True, 'allow_create': False, 'allow_write': True, 'allow_unlink': True},
+            'res.company': {'allow_read': True, 'allow_create': True, 'allow_write': True, 'allow_unlink': True},
+            'res.country': {'allow_read': True, 'allow_create': False, 'allow_write': False, 'allow_unlink': False},
+        }
+        for model_name, perms in model_permissions.items():
             model_ids = models.execute_kw(db, uid, 'admin', 'ir.model', 'search', [
                 [('model', '=', model_name)]
             ])
             if model_ids:
                 models.execute_kw(db, uid, 'admin', 'mcp.enabled.model', 'create', [{
                     'model_id': model_ids[0],
-                    'allow_read': True,
-                    'allow_create': True,
-                    'allow_write': True,
-                    'allow_unlink': True,
+                    **perms,
                 }])
-                print(f'Enabled model: {model_name}')
-        print('MCP setup complete')
+                print(f'Enabled model: {model_name} {perms}')
+        print('MCP setup complete (res.users intentionally NOT enabled)')
         "
+
+    - name: Generate API key for admin user
+      id: mcp-apikey
+      run: |
+        KEY_AND_HASH=$(docker exec odoo-mcp python3 -c "
+        import secrets
+        from passlib.context import CryptContext
+        key = secrets.token_hex(20)
+        ctx = CryptContext(['pbkdf2_sha512'])
+        key_hash = ctx.hash(key)
+        print(f'{key}|{key_hash}')
+        ")
+
+        API_KEY=$(echo "$KEY_AND_HASH" | cut -d'|' -f1)
+        KEY_HASH=$(echo "$KEY_AND_HASH" | cut -d'|' -f2)
+        INDEX=${API_KEY:0:8}
+
+        PGPASSWORD=odoo psql -h localhost -U odoo -d test -c \
+          "INSERT INTO res_users_apikeys (name, user_id, scope, index, key)
+           VALUES ('CI Test Key', 2, NULL, '${INDEX}', \$hash\$${KEY_HASH}\$hash\$)"
+
+        echo "key=${API_KEY}" >> "$GITHUB_OUTPUT"
+        echo "API key generated and inserted for admin user"
 
     - name: Run MCP integration tests
       run: |
@@ -287,6 +344,7 @@ jobs:
         ODOO_DB: test
         ODOO_USER: admin
         ODOO_PASSWORD: admin
+        ODOO_API_KEY: ${{ steps.mcp-apikey.outputs.key }}
 
     - name: Upload coverage artifact
       if: always()
