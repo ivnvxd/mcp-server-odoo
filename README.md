@@ -376,7 +376,7 @@ The HTTP endpoint will be available at: `http://localhost:8000/mcp/`
 ### Setting up Odoo
 
 1. **Install the MCP module**:
-   - Download the [mcp_server](https://apps.odoo.com/apps/modules/18.0/mcp_server) module
+   - Download the [mcp_server](https://apps.odoo.com/apps/modules/19.0/mcp_server) module
    - Install it in your Odoo instance
    - Navigate to Settings > MCP Server
 
@@ -793,25 +793,19 @@ npx @modelcontextprotocol/inspector python -m mcp_server_odoo
 
 ## Testing
 
-### Transport Tests
-
-You can test both stdio and streamable-http transports to ensure they're working correctly:
+### Running Tests
 
 ```bash
-# Run comprehensive transport tests
-python tests/run_transport_tests.py
-```
+# Unit tests (no Odoo needed)
+uv run pytest -m "not yolo and not mcp" --cov
 
-This will test:
-- **stdio transport**: Basic initialization and communication
-- **streamable-http transport**: HTTP endpoint, session management, and tool calls
+# YOLO integration tests (vanilla Odoo, no MCP module)
+uv run pytest -m "yolo" -v
 
-### Unit Tests
+# MCP integration tests (Odoo + MCP module installed)
+uv run pytest -m "mcp" -v
 
-For complete testing including unit and integration tests:
-
-```bash
-# Run all tests
+# All tests
 uv run pytest --cov
 
 # Run specific test categories
