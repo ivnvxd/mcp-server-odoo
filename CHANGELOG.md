@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Documentation**: Synchronized `--help`, `.env.example`, and README with all current environment variables and test commands
+- **CI**: Run lint and unit tests in parallel; gate integration tests to PRs and main/dev branches; add concurrency groups and uv caching
 
 ## [0.4.4] - 2026-02-25
 
