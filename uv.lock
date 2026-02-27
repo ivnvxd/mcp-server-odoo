@@ -470,7 +470,6 @@ name = "mcp-server-odoo"
 version = "0.4.5"
 source = { editable = "." }
 dependencies = [
-    { name = "httpx" },
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -487,14 +486,8 @@ dev = [
     { name = "ty" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "ty" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = ">=0.27.0" },
     { name = "mcp", specifier = ">=1.26.0,<2" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
@@ -507,9 +500,6 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.18" },
 ]
 provides-extras = ["dev"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "ty", specifier = ">=0.0.18" }]
 
 [[package]]
 name = "packaging"
