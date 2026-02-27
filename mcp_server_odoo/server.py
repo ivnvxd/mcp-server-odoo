@@ -4,6 +4,7 @@ This module provides the FastMCP server that exposes Odoo data
 and functionality through the Model Context Protocol.
 """
 
+import contextlib
 from typing import Any, Dict, Optional
 
 from mcp.server import FastMCP
@@ -60,9 +61,26 @@ class OdooMCPServer:
         self.app = FastMCP(
             name="odoo-mcp-server",
             instructions="MCP server for accessing and managing Odoo ERP data through the Model Context Protocol",
+            lifespan=self._odoo_lifespan,
         )
 
         logger.info(f"Initialized Odoo MCP Server v{SERVER_VERSION}")
+
+    @contextlib.asynccontextmanager
+    async def _odoo_lifespan(self, app: FastMCP):
+        """Manage Odoo connection lifecycle for FastMCP.
+
+        Sets up connection, registers resources/tools before server starts.
+        Cleans up connection when server stops.
+        """
+        with perf_logger.track_operation("server_startup"):
+            self._ensure_connection()
+            self._register_resources()
+            self._register_tools()
+        try:
+            yield {}
+        finally:
+            self._cleanup_connection()
 
     def _ensure_connection(self):
         """Ensure connection to Odoo is established.
@@ -133,34 +151,17 @@ class OdooMCPServer:
             logger.info("Registered MCP tools")
 
     async def run_stdio(self):
-        """Run the server using stdio transport.
-
-        This is the main entry point for running the server
-        with standard input/output transport (used by uvx).
-        """
+        """Run the server using stdio transport."""
         try:
-            # Establish connection before starting server
-            with perf_logger.track_operation("server_startup"):
-                self._ensure_connection()
-
-                # Register resources after connection is established
-                self._register_resources()
-                self._register_tools()
-
             logger.info("Starting MCP server with stdio transport...")
             await self.app.run_stdio_async()
-
         except KeyboardInterrupt:
             logger.info("Server interrupted by user")
         except (OdooConnectionError, ConfigurationError):
-            # Let these specific errors propagate
             raise
         except Exception as e:
             context = ErrorContext(operation="server_run")
             error_handler.handle_error(e, context=context)
-        finally:
-            # Always cleanup connection
-            self._cleanup_connection()
 
     def run_stdio_sync(self):
         """Synchronous wrapper for run_stdio.
@@ -182,34 +183,17 @@ class OdooMCPServer:
             port: Port to bind to
         """
         try:
-            # Establish connection before starting server
-            with perf_logger.track_operation("server_startup"):
-                self._ensure_connection()
-
-                # Register resources after connection is established
-                self._register_resources()
-                self._register_tools()
-
             logger.info(f"Starting MCP server with HTTP transport on {host}:{port}...")
-
-            # Update FastMCP settings for host and port
             self.app.settings.host = host
             self.app.settings.port = port
-
-            # Use the specific streamable HTTP async method
             await self.app.run_streamable_http_async()
-
         except KeyboardInterrupt:
             logger.info("Server interrupted by user")
         except (OdooConnectionError, ConfigurationError):
-            # Let these specific errors propagate
             raise
         except Exception as e:
             context = ErrorContext(operation="server_run_http")
             error_handler.handle_error(e, context=context)
-        finally:
-            # Always cleanup connection
-            self._cleanup_connection()
 
     def get_capabilities(self) -> Dict[str, Dict[str, bool]]:
         """Get server capabilities.

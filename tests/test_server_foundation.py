@@ -212,36 +212,11 @@ class TestServerFoundation:
         mock_run = AsyncMock()
         server.app.run_stdio_async = mock_run
 
-        # Mock AccessController and register_resources
-        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
-            with patch("mcp_server_odoo.server.register_resources") as mock_register:
-                mock_handler = Mock()
-                mock_register.return_value = mock_handler
+        # Run the server — lifespan is now managed by FastMCP internally
+        await server.run_stdio()
 
-                # Run the server
-                await server.run_stdio()
-
-                # Verify connection was established with performance manager
-                assert server._mock_connection_class.call_count == 1
-                call_args = server._mock_connection_class.call_args
-                assert call_args[0][0] == server.config
-                assert "performance_manager" in call_args[1]
-                server._mock_connection.connect.assert_called_once()
-                server._mock_connection.authenticate.assert_called_once()
-
-                # Verify access controller was created with resolved database
-                mock_access_ctrl.assert_called_once_with(
-                    server.config, database=server._mock_connection.database
-                )
-
-                # Verify resources were registered
-                mock_register.assert_called_once()
-
-                # Verify FastMCP was started
-                mock_run.assert_called_once()
-
-                # Verify connection was cleaned up
-                server._mock_connection.disconnect.assert_called_once()
+        # Verify FastMCP was started
+        mock_run.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_run_stdio_connection_failure(self, server_with_mock_connection):
@@ -251,13 +226,16 @@ class TestServerFoundation:
         # Make connection fail
         server._mock_connection.connect.side_effect = OdooConnectionError("Failed to connect")
 
-        # Should raise an error
+        # Make run_stdio_async invoke the lifespan (which will fail on connect)
+        async def mock_run_that_invokes_lifespan():
+            async with server._odoo_lifespan(server.app):
+                pass
+
+        server.app.run_stdio_async = mock_run_that_invokes_lifespan
+
+        # Should raise since lifespan will fail on _ensure_connection
         with pytest.raises(OdooConnectionError, match="Failed to connect"):
             await server.run_stdio()
-
-        # Connection is created during _ensure_connection(), but cleanup is still called
-        # even when connect fails, so disconnect should be called once
-        server._mock_connection.disconnect.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_run_stdio_keyboard_interrupt(self, server_with_mock_connection):
@@ -270,8 +248,32 @@ class TestServerFoundation:
         # Should not raise (handled gracefully)
         await server.run_stdio()
 
-        # Verify cleanup was called
-        server._mock_connection.disconnect.assert_called_once()
+    @pytest.mark.asyncio
+    async def test_lifespan_setup_and_teardown(self, server_with_mock_connection):
+        """Test that lifespan context manager handles setup and teardown."""
+        server = server_with_mock_connection
+
+        # Mock AccessController
+        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
+            with patch("mcp_server_odoo.server.register_resources") as mock_register_res:
+                with patch("mcp_server_odoo.server.register_tools") as mock_register_tools:
+                    mock_register_res.return_value = Mock()
+                    mock_register_tools.return_value = Mock()
+
+                    # Use the lifespan context manager
+                    async with server._odoo_lifespan(server.app) as state:
+                        # Verify setup was called
+                        server._mock_connection.connect.assert_called_once()
+                        server._mock_connection.authenticate.assert_called_once()
+                        mock_access_ctrl.assert_called_once()
+                        mock_register_res.assert_called_once()
+                        mock_register_tools.assert_called_once()
+
+                        # State should be an empty dict
+                        assert state == {}
+
+                    # After exiting, verify cleanup was called
+                    server._mock_connection.disconnect.assert_called_once()
 
     def test_run_stdio_sync(self, server_with_mock_connection):
         """Test run_stdio_sync wrapper method."""
