@@ -64,6 +64,12 @@ class OdooMCPServer:
             lifespan=self._odoo_lifespan,
         )
 
+        @self.app.custom_route("/health", methods=["GET"])
+        async def health_check(request):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse(self.get_health_status())
+
         logger.info(f"Initialized Odoo MCP Server v{SERVER_VERSION}")
 
     @contextlib.asynccontextmanager

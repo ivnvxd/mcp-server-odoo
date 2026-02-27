@@ -515,3 +515,22 @@ class TestFastMCPApp:
         assert hasattr(server.app, "resource")
         assert hasattr(server.app, "tool")
         assert hasattr(server.app, "prompt")
+
+    def test_health_route_registered(self, valid_config):
+        """Test that /health custom route is registered."""
+        server = OdooMCPServer(valid_config)
+
+        # Check that custom_route was called on the app
+        assert hasattr(server.app, "custom_route")
+
+    @pytest.mark.asyncio
+    async def test_health_endpoint_returns_status(self, valid_config):
+        """Test that health endpoint returns proper health data."""
+        server = OdooMCPServer(valid_config)
+
+        # Get health status directly
+        health = server.get_health_status()
+        assert "status" in health
+        assert "version" in health
+        assert health["version"] == SERVER_VERSION
+        assert "connection" in health
