@@ -38,14 +38,22 @@ def main(argv: Optional[list[str]] = None) -> int:
   ODOO_USER          Odoo username (fallback if no API key)
   ODOO_PASSWORD      Odoo password (required with username)
   ODOO_DB            Odoo database name (auto-detected if not set)
+  ODOO_YOLO          YOLO mode: off, read, or true (default: off)
+                       off  — standard mode (requires Odoo MCP module)
+                       read — read-only via vanilla XML-RPC (no module needed)
+                       true — full read/write via vanilla XML-RPC
+  ODOO_LOCALE        Locale for formatting (e.g. en_US, de_DE)
 
 Optional environment variables:
-  ODOO_MCP_LOG_LEVEL    Log level (DEBUG, INFO, WARNING, ERROR)
-  ODOO_MCP_DEFAULT_LIMIT Default record limit (default: 10)
-  ODOO_MCP_MAX_LIMIT     Maximum record limit (default: 100)
-  ODOO_MCP_TRANSPORT     Transport type: stdio or streamable-http (default: stdio)
-  ODOO_MCP_HOST          Server host for HTTP transports (default: localhost)
-  ODOO_MCP_PORT          Server port for HTTP transports (default: 8000)
+  ODOO_MCP_LOG_LEVEL       Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)
+  ODOO_MCP_LOG_JSON        Enable structured JSON log output (default: false)
+  ODOO_MCP_LOG_FILE        Path for rotating log file (10 MB, 5 backups)
+  ODOO_MCP_DEFAULT_LIMIT   Default record limit (default: 10)
+  ODOO_MCP_MAX_LIMIT       Maximum record limit (default: 100)
+  ODOO_MCP_MAX_SMART_FIELDS Max fields in smart selection (default: 15)
+  ODOO_MCP_TRANSPORT       Transport type: stdio or streamable-http (default: stdio)
+  ODOO_MCP_HOST            Server host for HTTP transports (default: localhost)
+  ODOO_MCP_PORT            Server port for HTTP transports (default: 8000)
 
 For more information, visit: https://github.com/ivnvxd/mcp-server-odoo""",
     )

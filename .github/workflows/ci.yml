@@ -2,9 +2,13 @@ name: CI
 
 on:
   push:
-    branches: ['*']  # Run on all branches
+    branches: ['*']
   pull_request:
-    branches: ['*']  # Run on all PR branches
+    branches: ['*']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
@@ -23,6 +27,7 @@ jobs:
       uses: astral-sh/setup-uv@v7
       with:
         version: "latest"
+        enable-cache: true
 
     - name: Install dependencies
       run: |
@@ -43,7 +48,6 @@ jobs:
   test:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    needs: lint
     strategy:
       matrix:
         python-version: ['3.10', '3.13']
@@ -60,6 +64,7 @@ jobs:
       uses: astral-sh/setup-uv@v7
       with:
         version: "latest"
+        enable-cache: true
 
     - name: Install dependencies
       run: |
@@ -85,7 +90,8 @@ jobs:
   yolo-integration-test:
     name: YOLO Integration Tests
     runs-on: ubuntu-latest
-    needs: test
+    needs: [lint, test]
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
 
     services:
       postgres:
@@ -114,6 +120,7 @@ jobs:
       uses: astral-sh/setup-uv@v7
       with:
         version: "latest"
+        enable-cache: true
 
     - name: Install dependencies
       run: |
@@ -197,7 +204,9 @@ jobs:
   mcp-integration-test:
     name: MCP Integration Tests
     runs-on: ubuntu-latest
-    needs: test
+    needs: [lint, test]
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+
     services:
       postgres:
         image: postgres:17
@@ -233,6 +242,7 @@ jobs:
       uses: astral-sh/setup-uv@v7
       with:
         version: "latest"
+        enable-cache: true
 
     - name: Install dependencies
       run: |
@@ -385,7 +395,13 @@ jobs:
   build:
     name: Build Package
     runs-on: ubuntu-latest
-    needs: [yolo-integration-test, mcp-integration-test]
+    needs: [lint, test, yolo-integration-test, mcp-integration-test]
+    if: |
+      always()
+      && needs.lint.result == 'success'
+      && needs.test.result == 'success'
+      && (needs.yolo-integration-test.result == 'success' || needs.yolo-integration-test.result == 'skipped')
+      && (needs.mcp-integration-test.result == 'success' || needs.mcp-integration-test.result == 'skipped')
 
     steps:
     - uses: actions/checkout@v6
