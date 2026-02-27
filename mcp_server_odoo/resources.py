@@ -8,7 +8,7 @@ import json
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import Annotations
 
 from .access_control import AccessControlError, AccessController
@@ -55,6 +55,11 @@ class OdooResourceHandler:
         # Register resources
         self._register_resources()
 
+    async def _ctx_info(self, ctx, message: str):
+        """Send info to MCP client context if available."""
+        if ctx:
+            await ctx.info(message)
+
     def _register_resources(self):
         """Register all resource handlers with FastMCP."""
         # Note: FastMCP uses decorators to register resources.
@@ -73,7 +78,7 @@ class OdooResourceHandler:
             description="Retrieve a specific record from an Odoo model by ID",
             annotations=Annotations(audience=["assistant"], priority=0.5),
         )
-        async def get_record(model: str, record_id: str) -> str:
+        async def get_record(model: str, record_id: str, ctx: Context = None) -> str:
             """Retrieve a specific record from Odoo.
 
             Args:
@@ -83,7 +88,7 @@ class OdooResourceHandler:
             Returns:
                 Formatted record data as text
             """
-            return await self._handle_record_retrieval(model, record_id)
+            return await self._handle_record_retrieval(model, record_id, ctx)
 
         # Register search resource (no parameters due to FastMCP limitations)
         @self.app.resource(
@@ -92,12 +97,13 @@ class OdooResourceHandler:
             description="Search records with default settings (first 10 records)",
             annotations=Annotations(audience=["assistant"], priority=0.5),
         )
-        async def search_records(model: str) -> str:
+        async def search_records(model: str, ctx: Context = None) -> str:
             """Search records with default settings.
 
             Returns first 10 records with all fields.
             For more control, use the search_records tool instead.
             """
+            await self._ctx_info(ctx, f"Searching {model} (default: first 10 records)...")
             return await self._handle_search(model, None, None, None, None, None)
 
         # Note: Browse resource removed due to FastMCP query parameter limitations
@@ -110,11 +116,12 @@ class OdooResourceHandler:
             description="Count all records in an Odoo model",
             annotations=Annotations(audience=["assistant"], priority=0.3),
         )
-        async def count_records(model: str) -> str:
+        async def count_records(model: str, ctx: Context = None) -> str:
             """Count all records in the model.
 
             For filtered counts, use the search_records tool with limit=0.
             """
+            await self._ctx_info(ctx, f"Counting {model} records...")
             return await self._handle_count(model, None)
 
         # Register fields resource
@@ -124,7 +131,7 @@ class OdooResourceHandler:
             description="Get field definitions and metadata for an Odoo model",
             annotations=Annotations(audience=["assistant"], priority=0.4),
         )
-        async def get_fields(model: str) -> str:
+        async def get_fields(model: str, ctx: Context = None) -> str:
             """Get field definitions for a model.
 
             Args:
@@ -133,6 +140,7 @@ class OdooResourceHandler:
             Returns:
                 Formatted field definitions and metadata
             """
+            await self._ctx_info(ctx, f"Getting field definitions for {model}...")
             return await self._handle_fields(model)
 
     def _register_concrete_resources(self):
@@ -146,7 +154,7 @@ class OdooResourceHandler:
         # FastMCP will handle them properly as templates
         pass
 
-    async def _handle_record_retrieval(self, model: str, record_id: str) -> str:
+    async def _handle_record_retrieval(self, model: str, record_id: str, ctx=None) -> str:
         """Handle record retrieval request.
 
         Args:
@@ -162,6 +170,7 @@ class OdooResourceHandler:
             ValidationError: For invalid inputs
         """
         context = ErrorContext(model=model, operation="get_record", record_id=record_id)
+        await self._ctx_info(ctx, f"Retrieving {model}/{record_id}...")
 
         logger.info(f"Retrieving record: {model}/{record_id}")
 
