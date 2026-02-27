@@ -70,6 +70,18 @@ class OdooMCPServer:
 
             return JSONResponse(self.get_health_status())
 
+        @self.app.completion()
+        async def handle_completion(ref, argument, context):
+            if argument.name == "model":
+                model_names = self._get_model_names()
+                partial = argument.value or ""
+                if partial:
+                    matches = [m for m in model_names if partial.lower() in m.lower()]
+                else:
+                    matches = model_names
+                return matches[:20]
+            return None
+
         logger.info(f"Initialized Odoo MCP Server v{SERVER_VERSION}")
 
     @contextlib.asynccontextmanager
@@ -248,3 +260,13 @@ class OdooMCPServer:
             "recent_errors": error_handler.get_recent_errors(limit=5),
             "performance": performance_stats,
         }
+
+    def _get_model_names(self) -> list[str]:
+        """Get available model names for autocomplete."""
+        if not self.access_controller:
+            return []
+        try:
+            models = self.access_controller.get_enabled_models()
+            return [m["model"] for m in models]
+        except Exception:
+            return []

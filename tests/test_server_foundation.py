@@ -275,6 +275,33 @@ class TestServerFoundation:
                     # After exiting, verify cleanup was called
                     server._mock_connection.disconnect.assert_called_once()
 
+    def test_get_model_names_returns_list(self, server_with_mock_connection):
+        """Test _get_model_names returns model name strings."""
+        server = server_with_mock_connection
+
+        # Set up connection and access controller
+        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
+            mock_ac = Mock()
+            mock_ac.get_enabled_models.return_value = [
+                {"model": "res.partner", "name": "Contact"},
+                {"model": "sale.order", "name": "Sales Order"},
+            ]
+            mock_access_ctrl.return_value = mock_ac
+
+            server._ensure_connection()
+
+            # Get model names
+            names = server._get_model_names()
+            assert names == ["res.partner", "sale.order"]
+
+    def test_get_model_names_no_access_controller(self, valid_config):
+        """Test _get_model_names returns empty list when no access controller."""
+        server = OdooMCPServer(valid_config)
+
+        # No connection/access controller set up
+        names = server._get_model_names()
+        assert names == []
+
     def test_run_stdio_sync(self, server_with_mock_connection):
         """Test run_stdio_sync wrapper method."""
         server = server_with_mock_connection
