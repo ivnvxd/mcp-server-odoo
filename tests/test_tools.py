@@ -662,6 +662,40 @@ class TestOdooToolHandler:
         assert result.limit == valid_config.default_limit
 
 
+    @pytest.mark.asyncio
+    async def test_search_records_calls_context_info(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Test that search_records sends context logging."""
+        from unittest.mock import AsyncMock
+
+        # Setup mocks
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.search_count.return_value = 1
+        mock_connection.search.return_value = [1]
+        mock_connection.read.return_value = [{"id": 1, "name": "Test"}]
+
+        # Create mock context
+        ctx = AsyncMock()
+
+        # Get the registered search_records function
+        search_records = mock_app._tools["search_records"]
+
+        # Call with ctx parameter
+        result = await search_records(
+            model="res.partner",
+            fields=["name"],
+            limit=10,
+            ctx=ctx,
+        )
+
+        # Verify context.info was called
+        ctx.info.assert_called()
+        # First call should mention the model
+        first_call_msg = ctx.info.call_args_list[0][0][0]
+        assert "res.partner" in first_call_msg
+
+
 class TestRegisterTools:
     """Test cases for register_tools function."""
 

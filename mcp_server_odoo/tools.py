@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 from .access_control import AccessControlError, AccessController
@@ -386,6 +386,21 @@ class OdooToolHandler:
             # Return None to indicate we should get all fields
             return None
 
+    async def _ctx_info(self, ctx, message: str):
+        """Send info to MCP client context if available."""
+        if ctx:
+            await ctx.info(message)
+
+    async def _ctx_warning(self, ctx, message: str):
+        """Send warning to MCP client context if available."""
+        if ctx:
+            await ctx.warning(message)
+
+    async def _ctx_progress(self, ctx, progress: float, total: float, message: str = ""):
+        """Report progress to MCP client context if available."""
+        if ctx:
+            await ctx.report_progress(progress, total, message)
+
     def _register_tools(self):
         """Register all tool handlers with FastMCP."""
 
@@ -405,6 +420,7 @@ class OdooToolHandler:
             limit: int = 10,
             offset: int = 0,
             order: Optional[str] = None,
+            ctx: Context = None,
         ) -> SearchResult:
             """Search for records in an Odoo model.
 
@@ -426,7 +442,9 @@ class OdooToolHandler:
             Returns:
                 Search results with records, total count, and pagination info
             """
-            result = await self._handle_search_tool(model, domain, fields, limit, offset, order)
+            result = await self._handle_search_tool(
+                model, domain, fields, limit, offset, order, ctx
+            )
             return SearchResult(**result)
 
         @self.app.tool(
@@ -442,6 +460,7 @@ class OdooToolHandler:
             model: str,
             record_id: int,
             fields: Optional[List[str]] = None,
+            ctx: Context = None,
         ) -> RecordResult:
             """Get a specific record by ID with smart field selection.
 
@@ -476,7 +495,7 @@ class OdooToolHandler:
                 Record data with requested fields. When using smart defaults,
                 includes metadata with field statistics.
             """
-            return await self._handle_get_record_tool(model, record_id, fields)
+            return await self._handle_get_record_tool(model, record_id, fields, ctx)
 
         @self.app.tool(
             title="List Models",
@@ -487,14 +506,14 @@ class OdooToolHandler:
                 openWorldHint=False,
             ),
         )
-        async def list_models() -> ModelsResult:
+        async def list_models(ctx: Context = None) -> ModelsResult:
             """List all models enabled for MCP access with their allowed operations.
 
             Returns:
                 List of models with their technical names, display names,
                 and allowed operations (read, write, create, unlink).
             """
-            result = await self._handle_list_models_tool()
+            result = await self._handle_list_models_tool(ctx)
             return ModelsResult(**result)
 
         @self.app.tool(
@@ -506,7 +525,7 @@ class OdooToolHandler:
                 openWorldHint=False,
             ),
         )
-        async def list_resource_templates() -> ResourceTemplatesResult:
+        async def list_resource_templates(ctx: Context = None) -> ResourceTemplatesResult:
             """List available resource URI templates.
 
             Since MCP resources with parameters are registered as templates,
@@ -516,7 +535,7 @@ class OdooToolHandler:
             Returns:
                 Resource template definitions with examples and enabled models.
             """
-            result = await self._handle_list_resource_templates_tool()
+            result = await self._handle_list_resource_templates_tool(ctx)
             return ResourceTemplatesResult(**result)
 
         @self.app.tool(
@@ -531,6 +550,7 @@ class OdooToolHandler:
         async def create_record(
             model: str,
             values: Dict[str, Any],
+            ctx: Context = None,
         ) -> CreateResult:
             """Create a new record in an Odoo model.
 
@@ -541,7 +561,7 @@ class OdooToolHandler:
             Returns:
                 Created record details with ID, URL, and confirmation.
             """
-            result = await self._handle_create_record_tool(model, values)
+            result = await self._handle_create_record_tool(model, values, ctx)
             return CreateResult(**result)
 
         @self.app.tool(
@@ -557,6 +577,7 @@ class OdooToolHandler:
             model: str,
             record_id: int,
             values: Dict[str, Any],
+            ctx: Context = None,
         ) -> UpdateResult:
             """Update an existing record.
 
@@ -568,7 +589,7 @@ class OdooToolHandler:
             Returns:
                 Updated record details with confirmation.
             """
-            result = await self._handle_update_record_tool(model, record_id, values)
+            result = await self._handle_update_record_tool(model, record_id, values, ctx)
             return UpdateResult(**result)
 
         @self.app.tool(
@@ -583,6 +604,7 @@ class OdooToolHandler:
         async def delete_record(
             model: str,
             record_id: int,
+            ctx: Context = None,
         ) -> DeleteResult:
             """Delete a record.
 
@@ -593,7 +615,7 @@ class OdooToolHandler:
             Returns:
                 Deletion confirmation with the deleted record's name and ID.
             """
-            result = await self._handle_delete_record_tool(model, record_id)
+            result = await self._handle_delete_record_tool(model, record_id, ctx)
             return DeleteResult(**result)
 
     async def _handle_search_tool(
@@ -604,12 +626,14 @@ class OdooToolHandler:
         limit: int,
         offset: int,
         order: Optional[str],
+        ctx=None,
     ) -> Dict[str, Any]:
         """Handle search tool request."""
         try:
             with perf_logger.track_operation("tool_search", model=model):
                 # Check model access
                 self.access_controller.validate_model_access(model, "read")
+                await self._ctx_info(ctx, f"Searching {model}...")
 
                 # Ensure we're connected
                 if not self.connection.is_authenticated:
@@ -686,6 +710,7 @@ class OdooToolHandler:
 
                 # Get total count
                 total_count = self.connection.search_count(model, parsed_domain)
+                await self._ctx_progress(ctx, 1, 3, f"Found {total_count} records")
 
                 # Search for records
                 record_ids = self.connection.search(
@@ -697,12 +722,17 @@ class OdooToolHandler:
                 if parsed_fields is None:
                     # Use smart field selection to avoid serialization issues
                     fields_to_fetch = self._get_smart_default_fields(model)
+                    await self._ctx_info(ctx, f"Using smart field defaults for {model}")
                     logger.debug(
                         f"Using smart defaults for {model} search: {len(fields_to_fetch) if fields_to_fetch else 'all'} fields"
                     )
                 elif parsed_fields == ["__all__"]:
                     # Explicit request for all fields
                     fields_to_fetch = None  # Odoo interprets None as all fields
+                    await self._ctx_warning(
+                        ctx,
+                        f"Fetching ALL fields for {model} — may be slow or cause serialization errors",
+                    )
                     logger.debug(f"Fetching all fields for {model} search")
 
                 # Read records
@@ -711,6 +741,7 @@ class OdooToolHandler:
                     records = self.connection.read(model, record_ids, fields_to_fetch)
                     # Process datetime fields in each record
                     records = [self._process_record_dates(record, model) for record in records]
+                await self._ctx_progress(ctx, 3, 3, f"Returning {len(records)} records")
 
                 return {
                     "records": records,
@@ -734,12 +765,14 @@ class OdooToolHandler:
         model: str,
         record_id: int,
         fields: Optional[List[str]],
+        ctx=None,
     ) -> RecordResult:
         """Handle get record tool request."""
         try:
             with perf_logger.track_operation("tool_get_record", model=model):
                 # Check model access
                 self.access_controller.validate_model_access(model, "read")
+                await self._ctx_info(ctx, f"Getting {model}/{record_id}...")
 
                 # Ensure we're connected
                 if not self.connection.is_authenticated:
@@ -808,10 +841,11 @@ class OdooToolHandler:
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to get record: {sanitized_msg}") from e
 
-    async def _handle_list_models_tool(self) -> Dict[str, Any]:
+    async def _handle_list_models_tool(self, ctx=None) -> Dict[str, Any]:
         """Handle list models tool request with permissions."""
         try:
             with perf_logger.track_operation("tool_list_models"):
+                await self._ctx_info(ctx, "Listing available models...")
                 # Check if YOLO mode is enabled
                 if self.config.is_yolo_enabled:
                     # Query actual models from ir.model in YOLO mode
@@ -848,6 +882,10 @@ class OdooToolHandler:
                         # Prepare response with YOLO mode metadata
                         mode_desc = (
                             "READ-ONLY" if self.config.yolo_mode == "read" else "FULL ACCESS"
+                        )
+                        await self._ctx_info(
+                            ctx,
+                            f"YOLO mode ({mode_desc}): found {len(model_records)} models",
                         )
 
                         # Create metadata about YOLO mode
@@ -912,7 +950,8 @@ class OdooToolHandler:
 
                 # Enrich with permissions for each model
                 enriched_models = []
-                for model_info in models:
+                for i, model_info in enumerate(models):
+                    await self._ctx_progress(ctx, i + 1, len(models))
                     model_name = model_info["model"]
                     try:
                         # Get permissions for this model
@@ -952,9 +991,10 @@ class OdooToolHandler:
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to list models: {sanitized_msg}") from e
 
-    async def _handle_list_resource_templates_tool(self) -> Dict[str, Any]:
+    async def _handle_list_resource_templates_tool(self, ctx=None) -> Dict[str, Any]:
         """Handle list resource templates tool request."""
         try:
+            await self._ctx_info(ctx, "Listing resource templates...")
             # Get list of enabled models that can be used with resources
             enabled_models = self.access_controller.get_enabled_models()
             model_names = [m["model"] for m in enabled_models if m.get("read", True)]
@@ -1013,12 +1053,14 @@ class OdooToolHandler:
         self,
         model: str,
         values: Dict[str, Any],
+        ctx=None,
     ) -> Dict[str, Any]:
         """Handle create record tool request."""
         try:
             with perf_logger.track_operation("tool_create_record", model=model):
                 # Check model access
                 self.access_controller.validate_model_access(model, "create")
+                await self._ctx_info(ctx, f"Creating record in {model}...")
 
                 # Ensure we're connected
                 if not self.connection.is_authenticated:
@@ -1071,12 +1113,14 @@ class OdooToolHandler:
         model: str,
         record_id: int,
         values: Dict[str, Any],
+        ctx=None,
     ) -> Dict[str, Any]:
         """Handle update record tool request."""
         try:
             with perf_logger.track_operation("tool_update_record", model=model):
                 # Check model access
                 self.access_controller.validate_model_access(model, "write")
+                await self._ctx_info(ctx, f"Updating {model}/{record_id}...")
 
                 # Ensure we're connected
                 if not self.connection.is_authenticated:
@@ -1135,12 +1179,14 @@ class OdooToolHandler:
         self,
         model: str,
         record_id: int,
+        ctx=None,
     ) -> Dict[str, Any]:
         """Handle delete record tool request."""
         try:
             with perf_logger.track_operation("tool_delete_record", model=model):
                 # Check model access
                 self.access_controller.validate_model_access(model, "unlink")
+                await self._ctx_info(ctx, f"Deleting {model}/{record_id}...")
 
                 # Ensure we're connected
                 if not self.connection.is_authenticated:
