@@ -72,6 +72,8 @@ class OdooMCPServer:
 
         @self.app.completion()
         async def handle_completion(ref, argument, context):
+            from mcp.types import Completion
+
             if argument.name == "model":
                 model_names = self._get_model_names()
                 partial = argument.value or ""
@@ -79,7 +81,7 @@ class OdooMCPServer:
                     matches = [m for m in model_names if partial.lower() in m.lower()]
                 else:
                     matches = model_names
-                return matches[:20]
+                return Completion(values=matches[:20])
             return None
 
         logger.info(f"Initialized Odoo MCP Server v{SERVER_VERSION}")
@@ -91,11 +93,11 @@ class OdooMCPServer:
         Sets up connection, registers resources/tools before server starts.
         Cleans up connection when server stops.
         """
-        with perf_logger.track_operation("server_startup"):
-            self._ensure_connection()
-            self._register_resources()
-            self._register_tools()
         try:
+            with perf_logger.track_operation("server_startup"):
+                self._ensure_connection()
+                self._register_resources()
+                self._register_tools()
             yield {}
         finally:
             self._cleanup_connection()
@@ -233,32 +235,14 @@ class OdooMCPServer:
         Returns:
             Dict with health status and metrics
         """
-        is_connected = (
-            self.connection and self.connection.is_authenticated
-            if hasattr(self.connection, "is_authenticated")
-            else False
-        )
-
-        # Get performance stats if available
-        performance_stats = None
-        if self.performance_manager:
-            performance_stats = self.performance_manager.get_stats()
+        is_connected = bool(self.connection is not None and self.connection.is_authenticated)
 
         return {
             "status": "healthy" if is_connected else "unhealthy",
             "version": SERVER_VERSION,
             "connection": {
                 "connected": is_connected,
-                "url": self.config.url if self.config else None,
-                "database": (
-                    self.connection.database
-                    if self.connection and hasattr(self.connection, "database")
-                    else None
-                ),
             },
-            "error_metrics": error_handler.get_metrics(),
-            "recent_errors": error_handler.get_recent_errors(limit=5),
-            "performance": performance_stats,
         }
 
     def _get_model_names(self) -> list[str]:
@@ -267,6 +251,13 @@ class OdooMCPServer:
             return []
         try:
             models = self.access_controller.get_enabled_models()
-            return [m["model"] for m in models]
-        except Exception:
+            if models:
+                return [m["model"] for m in models]
+            # YOLO mode returns [] meaning "all allowed" — query ir.model directly
+            if self.connection and self.connection.is_authenticated:
+                records = self.connection.search_read("ir.model", [], ["model"], limit=200)
+                return [r["model"] for r in records]
+            return []
+        except Exception as e:
+            logger.debug(f"Failed to get model names for autocomplete: {e}")
             return []

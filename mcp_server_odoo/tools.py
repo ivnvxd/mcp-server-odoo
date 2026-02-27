@@ -389,17 +389,26 @@ class OdooToolHandler:
     async def _ctx_info(self, ctx, message: str):
         """Send info to MCP client context if available."""
         if ctx:
-            await ctx.info(message)
+            try:
+                await ctx.info(message)
+            except Exception:
+                logger.debug(f"Failed to send ctx info: {message}")
 
     async def _ctx_warning(self, ctx, message: str):
         """Send warning to MCP client context if available."""
         if ctx:
-            await ctx.warning(message)
+            try:
+                await ctx.warning(message)
+            except Exception:
+                logger.debug(f"Failed to send ctx warning: {message}")
 
     async def _ctx_progress(self, ctx, progress: float, total: float, message: str = ""):
         """Report progress to MCP client context if available."""
         if ctx:
-            await ctx.report_progress(progress, total, message)
+            try:
+                await ctx.report_progress(progress, total, message)
+            except Exception:
+                logger.debug(f"Failed to report progress: {progress}/{total}")
 
     def _register_tools(self):
         """Register all tool handlers with FastMCP."""

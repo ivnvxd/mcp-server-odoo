@@ -694,6 +694,117 @@ class TestOdooToolHandler:
         first_call_msg = ctx.info.call_args_list[0][0][0]
         assert "res.partner" in first_call_msg
 
+    @pytest.mark.asyncio
+    async def test_get_record_calls_context_info(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Test that get_record sends context logging."""
+        from unittest.mock import AsyncMock
+
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.read.return_value = [
+            {"id": 1, "name": "Test Partner", "email": "test@example.com"}
+        ]
+
+        ctx = AsyncMock()
+        get_record = mock_app._tools["get_record"]
+        await get_record(model="res.partner", record_id=1, fields=["name"], ctx=ctx)
+
+        ctx.info.assert_called()
+        first_msg = ctx.info.call_args_list[0][0][0]
+        assert "res.partner" in first_msg
+
+    @pytest.mark.asyncio
+    async def test_list_models_calls_context_info_and_progress(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Test that list_models sends context info and progress."""
+        from unittest.mock import AsyncMock
+
+        from mcp_server_odoo.access_control import ModelPermissions
+
+        mock_access_controller.get_enabled_models.return_value = [
+            {"model": "res.partner", "name": "Contact"},
+        ]
+        mock_access_controller.get_model_permissions.return_value = ModelPermissions(
+            model="res.partner",
+            enabled=True,
+            can_read=True,
+            can_write=False,
+            can_create=False,
+            can_unlink=False,
+        )
+
+        ctx = AsyncMock()
+        list_models = mock_app._tools["list_models"]
+        await list_models(ctx=ctx)
+
+        ctx.info.assert_called()
+        ctx.report_progress.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_create_record_calls_context_info(
+        self, handler, mock_connection, mock_access_controller, mock_app, valid_config
+    ):
+        """Test that create_record sends context logging."""
+        from unittest.mock import AsyncMock
+
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.create.return_value = 42
+        mock_connection.read.return_value = [{"id": 42, "display_name": "New Record"}]
+        mock_connection.build_record_url.return_value = "http://localhost:8069/odoo/res.partner/42"
+
+        ctx = AsyncMock()
+        create_record = mock_app._tools["create_record"]
+        await create_record(model="res.partner", values={"name": "New Record"}, ctx=ctx)
+
+        ctx.info.assert_called()
+        first_msg = ctx.info.call_args_list[0][0][0]
+        assert "res.partner" in first_msg
+
+    @pytest.mark.asyncio
+    async def test_search_all_fields_sends_warning(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Test that searching with __all__ fields sends a warning via context."""
+        from unittest.mock import AsyncMock
+
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.search_count.return_value = 1
+        mock_connection.search.return_value = [1]
+        mock_connection.read.return_value = [{"id": 1, "name": "Test"}]
+
+        ctx = AsyncMock()
+        search_records = mock_app._tools["search_records"]
+        await search_records(model="res.partner", fields=["__all__"], limit=10, ctx=ctx)
+
+        ctx.warning.assert_called()
+        warning_msg = ctx.warning.call_args_list[0][0][0]
+        assert "ALL fields" in warning_msg
+
+    @pytest.mark.asyncio
+    async def test_context_error_does_not_crash_tool(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Test that a broken context does not crash the tool operation."""
+        from unittest.mock import AsyncMock
+
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.search_count.return_value = 1
+        mock_connection.search.return_value = [1]
+        mock_connection.read.return_value = [{"id": 1, "name": "Test"}]
+
+        # Create a context that raises on every call
+        ctx = AsyncMock()
+        ctx.info.side_effect = RuntimeError("transport broken")
+        ctx.report_progress.side_effect = RuntimeError("transport broken")
+
+        search_records = mock_app._tools["search_records"]
+        # Should succeed despite broken context
+        result = await search_records(model="res.partner", fields=["name"], limit=10, ctx=ctx)
+        assert result.total == 1
+        assert len(result.records) == 1
+
 
 class TestRegisterTools:
     """Test cases for register_tools function."""

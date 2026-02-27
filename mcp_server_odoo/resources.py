@@ -58,7 +58,10 @@ class OdooResourceHandler:
     async def _ctx_info(self, ctx, message: str):
         """Send info to MCP client context if available."""
         if ctx:
-            await ctx.info(message)
+            try:
+                await ctx.info(message)
+            except Exception:
+                logger.debug(f"Failed to send ctx info: {message}")
 
     def _register_resources(self):
         """Register all resource handlers with FastMCP."""
