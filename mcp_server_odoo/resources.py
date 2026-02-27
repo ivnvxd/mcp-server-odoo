@@ -78,7 +78,7 @@ class OdooResourceHandler:
             description="Retrieve a specific record from an Odoo model by ID",
             annotations=Annotations(audience=["assistant"], priority=0.5),
         )
-        async def get_record(model: str, record_id: str, ctx: Context = None) -> str:
+        async def get_record(model: str, record_id: str, ctx: Optional[Context] = None) -> str:
             """Retrieve a specific record from Odoo.
 
             Args:
@@ -97,7 +97,7 @@ class OdooResourceHandler:
             description="Search records with default settings (first 10 records)",
             annotations=Annotations(audience=["assistant"], priority=0.5),
         )
-        async def search_records(model: str, ctx: Context = None) -> str:
+        async def search_records(model: str, ctx: Optional[Context] = None) -> str:
             """Search records with default settings.
 
             Returns first 10 records with all fields.
@@ -116,7 +116,7 @@ class OdooResourceHandler:
             description="Count all records in an Odoo model",
             annotations=Annotations(audience=["assistant"], priority=0.3),
         )
-        async def count_records(model: str, ctx: Context = None) -> str:
+        async def count_records(model: str, ctx: Optional[Context] = None) -> str:
             """Count all records in the model.
 
             For filtered counts, use the search_records tool with limit=0.
@@ -131,7 +131,7 @@ class OdooResourceHandler:
             description="Get field definitions and metadata for an Odoo model",
             annotations=Annotations(audience=["assistant"], priority=0.4),
         )
-        async def get_fields(model: str, ctx: Context = None) -> str:
+        async def get_fields(model: str, ctx: Optional[Context] = None) -> str:
             """Get field definitions for a model.
 
             Args:

@@ -420,7 +420,7 @@ class OdooToolHandler:
             limit: int = 10,
             offset: int = 0,
             order: Optional[str] = None,
-            ctx: Context = None,
+            ctx: Optional[Context] = None,
         ) -> SearchResult:
             """Search for records in an Odoo model.
 
@@ -460,7 +460,7 @@ class OdooToolHandler:
             model: str,
             record_id: int,
             fields: Optional[List[str]] = None,
-            ctx: Context = None,
+            ctx: Optional[Context] = None,
         ) -> RecordResult:
             """Get a specific record by ID with smart field selection.
 
@@ -506,7 +506,7 @@ class OdooToolHandler:
                 openWorldHint=False,
             ),
         )
-        async def list_models(ctx: Context = None) -> ModelsResult:
+        async def list_models(ctx: Optional[Context] = None) -> ModelsResult:
             """List all models enabled for MCP access with their allowed operations.
 
             Returns:
@@ -525,7 +525,7 @@ class OdooToolHandler:
                 openWorldHint=False,
             ),
         )
-        async def list_resource_templates(ctx: Context = None) -> ResourceTemplatesResult:
+        async def list_resource_templates(ctx: Optional[Context] = None) -> ResourceTemplatesResult:
             """List available resource URI templates.
 
             Since MCP resources with parameters are registered as templates,
@@ -550,7 +550,7 @@ class OdooToolHandler:
         async def create_record(
             model: str,
             values: Dict[str, Any],
-            ctx: Context = None,
+            ctx: Optional[Context] = None,
         ) -> CreateResult:
             """Create a new record in an Odoo model.
 
@@ -577,7 +577,7 @@ class OdooToolHandler:
             model: str,
             record_id: int,
             values: Dict[str, Any],
-            ctx: Context = None,
+            ctx: Optional[Context] = None,
         ) -> UpdateResult:
             """Update an existing record.
 
@@ -604,7 +604,7 @@ class OdooToolHandler:
         async def delete_record(
             model: str,
             record_id: int,
-            ctx: Context = None,
+            ctx: Optional[Context] = None,
         ) -> DeleteResult:
             """Delete a record.
 

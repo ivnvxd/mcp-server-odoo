@@ -661,7 +661,6 @@ class TestOdooToolHandler:
         # Should use default limit
         assert result.limit == valid_config.default_limit
 
-
     @pytest.mark.asyncio
     async def test_search_records_calls_context_info(
         self, handler, mock_connection, mock_access_controller, mock_app
@@ -682,7 +681,7 @@ class TestOdooToolHandler:
         search_records = mock_app._tools["search_records"]
 
         # Call with ctx parameter
-        result = await search_records(
+        await search_records(
             model="res.partner",
             fields=["name"],
             limit=10,
