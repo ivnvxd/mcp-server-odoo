@@ -240,6 +240,67 @@ class TestWriteTools:
         with pytest.raises(ValidationError, match="Connection error"):
             await tool_handler._handle_update_record_tool("res.partner", 123, {"name": "Test"})
 
+    @pytest.mark.asyncio
+    async def test_create_record_calls_validate_model_access(
+        self, tool_handler, mock_access_controller
+    ):
+        """Verify that create_record actually calls validate_model_access with 'create'."""
+        # If someone removes the access control check, this test will fail
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+
+        with pytest.raises(ValidationError, match="Access denied"):
+            await tool_handler._handle_create_record_tool("res.partner", {"name": "Test"})
+
+        mock_access_controller.validate_model_access.assert_called_once_with(
+            "res.partner", "create"
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_record_calls_validate_model_access(
+        self, tool_handler, mock_access_controller, mock_connection
+    ):
+        """Verify that update_record actually calls validate_model_access with 'write'."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+
+        with pytest.raises(ValidationError, match="Access denied"):
+            await tool_handler._handle_update_record_tool("res.partner", 1, {"name": "Test"})
+
+        mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "write")
+
+    @pytest.mark.asyncio
+    async def test_delete_record_calls_validate_model_access(
+        self, tool_handler, mock_access_controller
+    ):
+        """Verify that delete_record actually calls validate_model_access with 'unlink'."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+
+        with pytest.raises(ValidationError, match="Access denied"):
+            await tool_handler._handle_delete_record_tool("res.partner", 1)
+
+        mock_access_controller.validate_model_access.assert_called_once_with(
+            "res.partner", "unlink"
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_record_access_control_precedes_connection(
+        self, tool_handler, mock_access_controller, mock_connection
+    ):
+        """Access control check must happen before any connection calls."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError("No access")
+
+        with pytest.raises(ValidationError):
+            await tool_handler._handle_create_record_tool("res.partner", {"name": "X"})
+
+        # Connection should never be touched if access is denied
+        mock_connection.create.assert_not_called()
+        mock_connection.read.assert_not_called()
+
     def test_tools_registered(self, mock_app, mock_connection, mock_access_controller, mock_config):
         """Test that write tools are registered."""
         # Track functions that were decorated

@@ -31,11 +31,28 @@ def mock_config():
     return config
 
 
+def _realistic_fields_get():
+    """Realistic fields_get return value for testing safe-field filtering."""
+    return {
+        "id": {"type": "integer", "string": "ID"},
+        "name": {"type": "char", "string": "Name"},
+        "email": {"type": "char", "string": "Email"},
+        "is_company": {"type": "boolean", "string": "Is a Company"},
+        "phone": {"type": "char", "string": "Phone"},
+        "country_id": {"type": "many2one", "string": "Country", "relation": "res.country"},
+        # Fields that should be filtered out
+        "image_1920": {"type": "binary", "string": "Image"},
+        "website_description": {"type": "html", "string": "Website Description"},
+        "__last_update": {"type": "datetime", "string": "Last Modified on"},
+    }
+
+
 @pytest.fixture
 def mock_connection():
-    """Create a mock Odoo connection."""
+    """Create a mock Odoo connection with realistic field metadata."""
     conn = Mock(spec=OdooConnection)
     conn.is_authenticated = True
+    conn.fields_get = Mock(return_value=_realistic_fields_get())
     return conn
 
 
@@ -79,7 +96,7 @@ class TestBrowseResource:
     async def test_browse_multiple_records(
         self, resource_handler, mock_connection, mock_access_controller
     ):
-        """Test browsing multiple records by IDs."""
+        """Test browsing multiple records by IDs with safe-field filtering."""
         # Setup mocks
         mock_access_controller.validate_model_access.return_value = None
         mock_connection.read.return_value = [
@@ -87,18 +104,25 @@ class TestBrowseResource:
             {"id": 3, "name": "Record 3", "email": "r3@example.com"},
             {"id": 5, "name": "Record 5", "email": "r5@example.com"},
         ]
-        mock_connection.fields_get.return_value = {
-            "name": {"type": "char", "string": "Name"},
-            "email": {"type": "char", "string": "Email"},
-        }
 
         # Execute browse
         result = await resource_handler._handle_browse("res.partner", "1,3,5")
 
-        # Verify calls
+        # Verify access control
         mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "read")
-        # After smart field filtering, read is called with specific fields
-        mock_connection.read.assert_called_once_with("res.partner", [1, 3, 5], ["name", "email"])
+
+        # Verify safe-field filtering was applied: read should be called with safe fields
+        read_call_args = mock_connection.read.call_args
+        assert read_call_args[0][0] == "res.partner"
+        assert read_call_args[0][1] == [1, 3, 5]
+        safe_fields = read_call_args[0][2]
+        # Binary/html/private fields must be excluded
+        assert "image_1920" not in safe_fields
+        assert "website_description" not in safe_fields
+        assert "__last_update" not in safe_fields
+        # Normal fields must be included
+        assert "name" in safe_fields
+        assert "email" in safe_fields
 
         # Check result format
         assert "Browse Results: res.partner" in result
@@ -119,9 +143,8 @@ class TestBrowseResource:
             {"id": 1, "name": "Record 1"},
             {"id": 3, "name": "Record 3"},
         ]
-        mock_connection.fields_get.return_value = {}
 
-        # Execute browse
+        # Execute browse (fields_get returns realistic data from fixture)
         result = await resource_handler._handle_browse("res.partner", "1,2,3,4")
 
         # Check result shows missing records
@@ -139,13 +162,17 @@ class TestBrowseResource:
         mock_connection.read.return_value = [
             {"id": 1, "name": "Record 1"},
         ]
-        mock_connection.fields_get.return_value = {}
 
         # Execute browse with mixed valid/invalid IDs
         result = await resource_handler._handle_browse("res.partner", "1,abc,2.5,-3,0")
 
-        # Should only use valid ID (1)
-        mock_connection.read.assert_called_once_with("res.partner", [1])
+        # Should only use valid ID (1); verify safe-field filtering applied
+        read_call_args = mock_connection.read.call_args
+        assert read_call_args[0][0] == "res.partner"
+        assert read_call_args[0][1] == [1]
+        safe_fields = read_call_args[0][2]
+        assert "image_1920" not in safe_fields  # binary excluded
+        assert "name" in safe_fields  # normal field included
         assert "Record 1" in result
 
     @pytest.mark.asyncio
