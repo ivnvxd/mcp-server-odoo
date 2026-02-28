@@ -213,6 +213,43 @@ class TestDatabaseDiscovery:
 
         assert connection.validate_database_access(os.getenv("ODOO_DB", "db")) is False
 
+    def test_list_databases_yolo_access_denied_with_configured_db(self):
+        """Test list_databases falls back to configured db on Access Denied in YOLO mode."""
+        config = OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            username="admin",
+            password="admin",
+            database="my_configured_db",
+            yolo_mode="true",
+        )
+        conn = OdooConnection(config)
+        conn._connected = True
+        mock_proxy = Mock()
+        mock_proxy.list.side_effect = Fault(1, "Access Denied")
+        conn._db_proxy = mock_proxy
+
+        databases = conn.list_databases()
+
+        assert databases == ["my_configured_db"]
+
+    def test_validate_database_access_no_auth(self):
+        """Test validate_database_access raises when no auth method is configured."""
+        config = OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            username="admin",
+            password="admin",
+            database=os.getenv("ODOO_DB"),
+        )
+        conn = OdooConnection(config)
+        conn._connected = True
+        # Clear all credentials to reach the "no auth" branch
+        conn.config.api_key = None
+        conn.config.username = None
+        conn.config.password = None
+
+        with pytest.raises(OdooConnectionError, match="No authentication method configured"):
+            conn.validate_database_access("testdb")
+
     def test_validate_database_access_fault(self):
         """Test database validation with XML-RPC fault."""
         config = OdooConfig(

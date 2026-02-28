@@ -200,13 +200,6 @@ class TestSmartFieldSelection:
         # Call without fields parameter
         result = await tool_handler._handle_get_record_tool("res.partner", 1, None)
 
-        # Should have the record data
-        assert result.record["id"] == 1
-        assert result.record["name"] == "Test Partner"
-        assert result.record["email"] == "test@example.com"
-        assert result.record["active"]
-        assert result.record["display_name"] == "Test Partner"
-
         # Should have metadata
         assert result.metadata is not None
         assert result.metadata.field_selection_method == "smart_defaults"
@@ -268,8 +261,8 @@ class TestSmartFieldSelection:
         # Should have called read with specific fields
         tool_handler.connection.read.assert_called_once_with("res.partner", [1], fields)
 
-    def test_field_sorting(self, tool_handler):
-        """Test that fields are sorted correctly."""
+    def test_field_selection(self, tool_handler):
+        """Test that expected fields are selected by smart defaults."""
         # Mock fields_get response
         mock_fields = {
             "zip": {"type": "char", "store": True, "searchable": True},

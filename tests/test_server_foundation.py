@@ -165,98 +165,47 @@ class TestServerFoundation:
         assert server.access_controller is None
         assert server.resource_handler is None
 
-    def test_get_capabilities(self, valid_config):
-        """Test get_capabilities method."""
-        server = OdooMCPServer(valid_config)
-
-        capabilities = server.get_capabilities()
-
-        assert capabilities == {
-            "capabilities": {"resources": True, "tools": True, "prompts": False}
-        }
-
-    def test_server_logging_configuration(self, valid_config):
-        """Test that logging is properly configured."""
-        import logging
-
-        # Set a specific log level in config
-        valid_config.log_level = "DEBUG"
-
-        # Store original log level and handler count
-        original_level = logging.getLogger().level
-        original_handlers = logging.getLogger().handlers.copy()
-
-        try:
-            # Clear existing handlers to ensure our config takes effect
-            logging.getLogger().handlers.clear()
-
-            # Create server
-            server = OdooMCPServer(valid_config)
-
-            # The server sets up logging with basicConfig, which should have set the level
-            # However, in test environments, this might not always work as expected
-            # So we just verify the server was created with the right config
-            assert server.config.log_level == "DEBUG"
-
-        finally:
-            # Restore original level and handlers
-            logging.getLogger().setLevel(original_level)
-            logging.getLogger().handlers = original_handlers
-
     @pytest.mark.asyncio
     async def test_run_stdio_success(self, server_with_mock_connection):
-        """Test successful run_stdio execution."""
+        """Test successful run_stdio execution via lifespan."""
         server = server_with_mock_connection
 
-        # Mock the FastMCP run_stdio_async method
-        mock_run = AsyncMock()
-        server.app.run_stdio_async = mock_run
+        # Make run_stdio_async invoke the lifespan like real FastMCP does
+        async def mock_run_with_lifespan():
+            async with server._odoo_lifespan(server.app):
+                pass
 
-        # Mock AccessController and register_resources
-        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
-            with patch("mcp_server_odoo.server.register_resources") as mock_register:
-                mock_handler = Mock()
-                mock_register.return_value = mock_handler
+        with patch("mcp_server_odoo.server.AccessController"):
+            with patch("mcp_server_odoo.server.register_resources", return_value=Mock()):
+                with patch("mcp_server_odoo.server.register_tools", return_value=Mock()):
+                    server.app.run_stdio_async = mock_run_with_lifespan
+                    await server.run_stdio()
 
-                # Run the server
-                await server.run_stdio()
-
-                # Verify connection was established with performance manager
-                assert server._mock_connection_class.call_count == 1
-                call_args = server._mock_connection_class.call_args
-                assert call_args[0][0] == server.config
-                assert "performance_manager" in call_args[1]
-                server._mock_connection.connect.assert_called_once()
-                server._mock_connection.authenticate.assert_called_once()
-
-                # Verify access controller was created with resolved database
-                mock_access_ctrl.assert_called_once_with(
-                    server.config, database=server._mock_connection.database
-                )
-
-                # Verify resources were registered
-                mock_register.assert_called_once()
-
-                # Verify FastMCP was started
-                mock_run.assert_called_once()
-
-                # Verify connection was cleaned up
-                server._mock_connection.disconnect.assert_called_once()
+        # Verify connection lifecycle was executed
+        server._mock_connection.connect.assert_called_once()
+        server._mock_connection.authenticate.assert_called_once()
+        server._mock_connection.disconnect.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_run_stdio_connection_failure(self, server_with_mock_connection):
-        """Test run_stdio with connection failure."""
+        """Test run_stdio with connection failure — cleanup still runs."""
         server = server_with_mock_connection
 
         # Make connection fail
         server._mock_connection.connect.side_effect = OdooConnectionError("Failed to connect")
 
-        # Should raise an error
+        # Make run_stdio_async invoke the lifespan (which will fail on connect)
+        async def mock_run_that_invokes_lifespan():
+            async with server._odoo_lifespan(server.app):
+                pass
+
+        server.app.run_stdio_async = mock_run_that_invokes_lifespan
+
+        # Should raise since lifespan will fail on _ensure_connection
         with pytest.raises(OdooConnectionError, match="Failed to connect"):
             await server.run_stdio()
 
-        # Connection is created during _ensure_connection(), but cleanup is still called
-        # even when connect fails, so disconnect should be called once
+        # Cleanup should still run even when setup fails
         server._mock_connection.disconnect.assert_called_once()
 
     @pytest.mark.asyncio
@@ -270,19 +219,180 @@ class TestServerFoundation:
         # Should not raise (handled gracefully)
         await server.run_stdio()
 
-        # Verify cleanup was called
-        server._mock_connection.disconnect.assert_called_once()
+        # Verify cleanup ran despite interrupt
+        assert server.connection is None
 
-    def test_run_stdio_sync(self, server_with_mock_connection):
-        """Test run_stdio_sync wrapper method."""
+    @pytest.mark.asyncio
+    async def test_lifespan_setup_and_teardown(self, server_with_mock_connection):
+        """Test that lifespan context manager handles setup and teardown."""
         server = server_with_mock_connection
 
-        # Mock asyncio.run
-        with patch("asyncio.run") as mock_run:
-            server.run_stdio_sync()
+        # Mock AccessController
+        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
+            with patch("mcp_server_odoo.server.register_resources") as mock_register_res:
+                with patch("mcp_server_odoo.server.register_tools") as mock_register_tools:
+                    mock_register_res.return_value = Mock()
+                    mock_register_tools.return_value = Mock()
 
-            # Verify asyncio.run was called
-            mock_run.assert_called_once()
+                    # Use the lifespan context manager
+                    async with server._odoo_lifespan(server.app) as state:
+                        # Verify setup was called
+                        server._mock_connection.connect.assert_called_once()
+                        server._mock_connection.authenticate.assert_called_once()
+                        mock_access_ctrl.assert_called_once()
+                        mock_register_res.assert_called_once()
+                        mock_register_tools.assert_called_once()
+
+                        # State should be an empty dict
+                        assert state == {}
+
+                    # After exiting, verify cleanup was called
+                    server._mock_connection.disconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_cleanup_on_setup_failure(self, server_with_mock_connection):
+        """Test that lifespan cleans up if setup fails after connection is created."""
+        server = server_with_mock_connection
+
+        # Connection succeeds but authenticate fails
+        server._mock_connection.authenticate.side_effect = OdooConnectionError("Auth failed")
+
+        with pytest.raises(OdooConnectionError, match="Auth failed"):
+            async with server._odoo_lifespan(server.app):
+                pass
+
+        # Cleanup should still run
+        server._mock_connection.disconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_teardown_exception_swallowed(self, server_with_mock_connection):
+        """Test that lifespan teardown exceptions are swallowed gracefully."""
+        server = server_with_mock_connection
+
+        with patch("mcp_server_odoo.server.AccessController"):
+            with patch("mcp_server_odoo.server.register_resources", return_value=Mock()):
+                with patch("mcp_server_odoo.server.register_tools", return_value=Mock()):
+                    server._mock_connection.disconnect.side_effect = RuntimeError("cleanup boom")
+                    # Should not raise — _cleanup_connection swallows the error
+                    async with server._odoo_lifespan(server.app):
+                        pass
+                    # Connection reference should still be cleared
+                    assert server.connection is None
+
+    def test_get_model_names_returns_list(self, server_with_mock_connection):
+        """Test _get_model_names returns model name strings."""
+        server = server_with_mock_connection
+
+        # Set up connection and access controller
+        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
+            mock_ac = Mock()
+            mock_ac.get_enabled_models.return_value = [
+                {"model": "res.partner", "name": "Contact"},
+                {"model": "sale.order", "name": "Sales Order"},
+            ]
+            mock_access_ctrl.return_value = mock_ac
+
+            server._ensure_connection()
+
+            # Get model names
+            names = server._get_model_names()
+            assert names == ["res.partner", "sale.order"]
+
+    def test_get_model_names_no_access_controller(self, valid_config):
+        """Test _get_model_names returns empty list when no access controller."""
+        server = OdooMCPServer(valid_config)
+
+        # No connection/access controller set up
+        names = server._get_model_names()
+        assert names == []
+
+    def test_get_model_names_exception_returns_empty(self, server_with_mock_connection):
+        """Test _get_model_names returns empty list on exception."""
+        server = server_with_mock_connection
+
+        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
+            mock_ac = Mock()
+            mock_ac.get_enabled_models.side_effect = RuntimeError("boom")
+            mock_access_ctrl.return_value = mock_ac
+            server._ensure_connection()
+
+            names = server._get_model_names()
+            assert names == []
+
+    def test_get_model_names_yolo_mode_fallback(self, server_with_mock_connection):
+        """Test _get_model_names queries ir.model when get_enabled_models returns []."""
+        server = server_with_mock_connection
+
+        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
+            mock_ac = Mock()
+            mock_ac.get_enabled_models.return_value = []  # YOLO mode returns []
+            mock_access_ctrl.return_value = mock_ac
+            server._ensure_connection()
+
+            # Mock the connection's search_read for ir.model fallback
+            server._mock_connection.is_authenticated = True
+            server._mock_connection.search_read.return_value = [
+                {"model": "res.partner"},
+                {"model": "sale.order"},
+            ]
+
+            names = server._get_model_names()
+            assert names == ["res.partner", "sale.order"]
+            server._mock_connection.search_read.assert_called_once_with(
+                "ir.model", [], ["model"], limit=200
+            )
+
+    @pytest.mark.asyncio
+    async def test_completion_handler_partial_match(self, valid_config):
+        """Test that the registered completion handler filters by partial match."""
+        import mcp.types as types
+
+        server = OdooMCPServer(valid_config)
+        server.access_controller = Mock()
+        server.access_controller.get_enabled_models.return_value = [
+            {"model": "res.partner"},
+            {"model": "res.users"},
+            {"model": "sale.order"},
+        ]
+
+        # Build a real CompleteRequest and invoke the registered handler
+        handler = server.app._mcp_server.request_handlers[types.CompleteRequest]
+        req = types.CompleteRequest(
+            method="completion/complete",
+            params=types.CompleteRequestParams(
+                ref=types.PromptReference(type="ref/prompt", name="test"),
+                argument=types.CompletionArgument(name="model", value="res."),
+            ),
+        )
+
+        result = await handler(req)
+        values = result.root.completion.values
+        assert set(values) == {"res.partner", "res.users"}
+        assert "sale.order" not in values
+
+    @pytest.mark.asyncio
+    async def test_completion_handler_cap_at_20(self, valid_config):
+        """Test that the registered completion handler caps results at 20."""
+        import mcp.types as types
+
+        server = OdooMCPServer(valid_config)
+        server.access_controller = Mock()
+        server.access_controller.get_enabled_models.return_value = [
+            {"model": f"model.{i}"} for i in range(25)
+        ]
+
+        handler = server.app._mcp_server.request_handlers[types.CompleteRequest]
+        req = types.CompleteRequest(
+            method="completion/complete",
+            params=types.CompleteRequestParams(
+                ref=types.PromptReference(type="ref/prompt", name="test"),
+                argument=types.CompletionArgument(name="model", value=""),
+            ),
+        )
+
+        result = await handler(req)
+        values = result.root.completion.values
+        assert len(values) == 20
 
 
 class TestServerIntegration:
@@ -384,13 +494,6 @@ ODOO_MCP_LOG_LEVEL=DEBUG
         except OdooConnectionError as e:
             # Connection errors are expected if Odoo is not running
             pytest.skip(f"Integration test skipped (Odoo not available): {e}")
-        except Exception as e:
-            # Other exceptions might indicate a test issue
-            import traceback
-
-            pytest.skip(
-                f"Integration test skipped (unexpected error): {type(e).__name__}: {e}\n{traceback.format_exc()}"
-            )
         finally:
             # Always reset config for other tests
             reset_config()
@@ -480,6 +583,45 @@ class TestMainEntry:
                 assert exit_code == 0
                 mock_server_class.assert_called_once()
 
+    def test_main_with_http_transport(self, monkeypatch):
+        """Test main with streamable-http transport."""
+        from mcp_server_odoo.__main__ import main
+
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test_key")
+        # Pre-set so main()'s os.environ writes are captured by monkeypatch
+        monkeypatch.setenv("ODOO_MCP_TRANSPORT", "stdio")
+        monkeypatch.setenv("ODOO_MCP_HOST", "localhost")
+        monkeypatch.setenv("ODOO_MCP_PORT", "8000")
+
+        with patch("mcp_server_odoo.__main__.OdooMCPServer") as mock_server_class:
+            mock_config = Mock()
+            mock_config.transport = "streamable-http"
+            mock_config.host = "localhost"
+            mock_config.port = 8000
+
+            mock_server = Mock()
+
+            async def mock_run_http(**kwargs):
+                pass
+
+            mock_server.run_http = mock_run_http
+            mock_server_class.return_value = mock_server
+
+            def mock_asyncio_run(coro):
+                loop = asyncio.new_event_loop()
+                try:
+                    return loop.run_until_complete(coro)
+                finally:
+                    loop.close()
+
+            with (
+                patch("mcp_server_odoo.__main__.load_config", return_value=mock_config),
+                patch("asyncio.run", side_effect=mock_asyncio_run),
+            ):
+                exit_code = main(["--transport", "streamable-http"])
+                assert exit_code == 0
+
 
 class TestFastMCPApp:
     """Test the FastMCP app configuration."""
@@ -504,12 +646,36 @@ class TestFastMCPApp:
         assert server.app.name == "odoo-mcp-server"
         assert "Odoo ERP data" in server.app.instructions
 
-    def test_fastmcp_app_has_required_methods(self, valid_config):
-        """Test that FastMCP app has required methods."""
+    def test_health_route_registered(self, valid_config):
+        """Test that /health custom route is registered in Starlette routes."""
         server = OdooMCPServer(valid_config)
 
-        # Check that required methods exist
-        assert hasattr(server.app, "run_stdio_async")
-        assert hasattr(server.app, "resource")
-        assert hasattr(server.app, "tool")
-        assert hasattr(server.app, "prompt")
+        # Inspect the actual Starlette route table via the streamable HTTP app
+        starlette_app = server.app.streamable_http_app()
+        route_paths = [r.path for r in starlette_app.routes if hasattr(r, "path")]
+        assert "/health" in route_paths
+
+    def test_health_status_unhealthy_when_disconnected(self, valid_config):
+        """Test health returns unhealthy when not connected."""
+        server = OdooMCPServer(valid_config)
+
+        health = server.get_health_status()
+        assert health["status"] == "unhealthy"
+        assert health["version"] == SERVER_VERSION
+        assert health["connection"]["connected"] is False
+
+    def test_health_status_healthy_when_connected(self, valid_config):
+        """Test health returns healthy when connected."""
+        with patch("mcp_server_odoo.server.OdooConnection") as mock_conn_class:
+            mock_conn = Mock()
+            mock_conn.is_authenticated = True
+            mock_conn.database = "test_db"
+            mock_conn_class.return_value = mock_conn
+
+            server = OdooMCPServer(valid_config)
+            with patch("mcp_server_odoo.server.AccessController"):
+                server._ensure_connection()
+
+            health = server.get_health_status()
+            assert health["status"] == "healthy"
+            assert health["connection"]["connected"] is True

@@ -105,16 +105,6 @@ class TestWriteTools:
             await tool_handler._handle_create_record_tool("res.partner", {})
 
     @pytest.mark.asyncio
-    async def test_create_record_access_denied(self, tool_handler, mock_access_controller):
-        """Test create record with access denied."""
-        mock_access_controller.validate_model_access.side_effect = AccessControlError(
-            "Access denied"
-        )
-
-        with pytest.raises(ValidationError, match="Access denied"):
-            await tool_handler._handle_create_record_tool("res.partner", {"name": "Test"})
-
-    @pytest.mark.asyncio
     async def test_update_record_success(self, tool_handler, mock_connection):
         """Test successful record update."""
         # Setup
@@ -215,16 +205,6 @@ class TestWriteTools:
             await tool_handler._handle_delete_record_tool("res.partner", 999)
 
     @pytest.mark.asyncio
-    async def test_delete_record_access_denied(self, tool_handler, mock_access_controller):
-        """Test delete record with access denied."""
-        mock_access_controller.validate_model_access.side_effect = AccessControlError(
-            "Access denied"
-        )
-
-        with pytest.raises(ValidationError, match="Access denied"):
-            await tool_handler._handle_delete_record_tool("res.partner", 123)
-
-    @pytest.mark.asyncio
     async def test_create_record_not_authenticated(self, tool_handler, mock_connection):
         """Test create record when not authenticated."""
         mock_connection.is_authenticated = False
@@ -239,6 +219,67 @@ class TestWriteTools:
 
         with pytest.raises(ValidationError, match="Connection error"):
             await tool_handler._handle_update_record_tool("res.partner", 123, {"name": "Test"})
+
+    @pytest.mark.asyncio
+    async def test_create_record_calls_validate_model_access(
+        self, tool_handler, mock_access_controller
+    ):
+        """Verify that create_record actually calls validate_model_access with 'create'."""
+        # If someone removes the access control check, this test will fail
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+
+        with pytest.raises(ValidationError, match="Access denied"):
+            await tool_handler._handle_create_record_tool("res.partner", {"name": "Test"})
+
+        mock_access_controller.validate_model_access.assert_called_once_with(
+            "res.partner", "create"
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_record_calls_validate_model_access(
+        self, tool_handler, mock_access_controller, mock_connection
+    ):
+        """Verify that update_record actually calls validate_model_access with 'write'."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+
+        with pytest.raises(ValidationError, match="Access denied"):
+            await tool_handler._handle_update_record_tool("res.partner", 1, {"name": "Test"})
+
+        mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "write")
+
+    @pytest.mark.asyncio
+    async def test_delete_record_calls_validate_model_access(
+        self, tool_handler, mock_access_controller
+    ):
+        """Verify that delete_record actually calls validate_model_access with 'unlink'."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+
+        with pytest.raises(ValidationError, match="Access denied"):
+            await tool_handler._handle_delete_record_tool("res.partner", 1)
+
+        mock_access_controller.validate_model_access.assert_called_once_with(
+            "res.partner", "unlink"
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_record_access_control_precedes_connection(
+        self, tool_handler, mock_access_controller, mock_connection
+    ):
+        """Access control check must happen before any connection calls."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError("No access")
+
+        with pytest.raises(ValidationError):
+            await tool_handler._handle_create_record_tool("res.partner", {"name": "X"})
+
+        # Connection should never be touched if access is denied
+        mock_connection.create.assert_not_called()
+        mock_connection.read.assert_not_called()
 
     def test_tools_registered(self, mock_app, mock_connection, mock_access_controller, mock_config):
         """Test that write tools are registered."""
@@ -267,10 +308,18 @@ class TestWriteToolsIntegration:
 
     @pytest.fixture
     def real_config(self):
-        """Load real configuration."""
-        from mcp_server_odoo.config import load_config
+        """Create config with YOLO full-access mode for write testing."""
+        import os
 
-        return load_config()
+        from mcp_server_odoo.config import OdooConfig
+
+        return OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            username=os.getenv("ODOO_USER", "admin"),
+            password=os.getenv("ODOO_PASSWORD", "admin"),
+            database=os.getenv("ODOO_DB"),
+            yolo_mode="true",
+        )
 
     @pytest.fixture
     def real_connection(self, real_config):
@@ -306,8 +355,6 @@ class TestWriteToolsIntegration:
     @pytest.mark.asyncio
     async def test_create_update_delete_cycle(self, real_config, real_tool_handler):
         """Test full create, update, delete cycle with real Odoo."""
-        if real_config.yolo_mode != "true":
-            pytest.skip("Write test requires ODOO_YOLO=true (not read-only)")
         handler = real_tool_handler
 
         # Create a test partner

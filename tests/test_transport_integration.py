@@ -4,139 +4,13 @@ These tests verify that both stdio and streamable-http transports work
 correctly with the Odoo MCP server in integration with pytest.
 """
 
-import asyncio
-import json
-import subprocess
-import sys
-from typing import Any, Dict, List, Optional
-
 import pytest
-import requests
 
 from tests.helpers.mcp_test_client import MCPTestClient
+from tests.helpers.transport_client import HttpTransportTester
 
 # Mark all tests in this module as requiring Odoo with MCP module
 pytestmark = [pytest.mark.mcp]
-
-
-class HttpTransportTester:
-    """Helper class for testing streamable-http transport."""
-
-    def __init__(self, base_url: str = "http://localhost:8002/mcp/"):
-        self.base_url = base_url.rstrip("/") + "/"
-        self.session = requests.Session()
-        self.session_id: Optional[str] = None
-        self.request_id = 0
-        self.server_process = None
-
-    def _next_id(self) -> int:
-        """Get next request ID."""
-        self.request_id += 1
-        return self.request_id
-
-    @staticmethod
-    def _parse_sse_response(text: str) -> List[Dict[str, Any]]:
-        """Parse SSE-formatted response."""
-        results = []
-        for line in text.strip().split("\n"):
-            if line.startswith("data:"):
-                try:
-                    data = json.loads(line[5:].strip())
-                    results.append(data)
-                except json.JSONDecodeError:
-                    pass
-        return results
-
-    async def start_server(self, port: int = 8002, timeout: int = 10) -> bool:
-        """Start HTTP server."""
-        try:
-            self.server_process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "mcp_server_odoo",
-                    "--transport",
-                    "streamable-http",
-                    "--port",
-                    str(port),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-
-            # Wait for server to start
-            await asyncio.sleep(5)
-
-            # Test if server is responding
-            try:
-                requests.get(f"http://localhost:{port}/", timeout=3)
-                return True
-            except requests.exceptions.RequestException:
-                # Server might not have a root endpoint, try the MCP endpoint
-                try:
-                    # Just check if we can connect
-                    requests.post(
-                        f"http://localhost:{port}/mcp/", json={"test": "connectivity"}, timeout=3
-                    )
-                    return True
-                except requests.exceptions.RequestException:
-                    return self.server_process.poll() is None
-
-        except Exception as e:
-            print(f"Failed to start HTTP server: {e}")
-            return False
-
-    def stop_server(self):
-        """Stop HTTP server."""
-        if self.server_process:
-            self.server_process.terminate()
-            try:
-                self.server_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.server_process.kill()
-                self.server_process.wait()
-            self.server_process = None
-
-    async def _send_request(
-        self, method: str, params: Dict[str, Any], request_id: Optional[int] = None
-    ) -> Optional[Dict[str, Any]]:
-        """Send HTTP request and return response."""
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        }
-
-        if self.session_id:
-            headers["mcp-session-id"] = self.session_id
-
-        payload = {"jsonrpc": "2.0", "method": method, "params": params}
-
-        if request_id is not None:
-            payload["id"] = request_id
-
-        try:
-            response = self.session.post(self.base_url, json=payload, headers=headers, timeout=15)
-
-            # Update session ID if provided
-            if "mcp-session-id" in response.headers:
-                self.session_id = response.headers["mcp-session-id"]
-
-            # Parse SSE response
-            if response.status_code == 200:
-                events = self._parse_sse_response(response.text)
-                for event in events:
-                    if request_id is not None and event.get("id") == request_id:
-                        return event
-                    elif request_id is None:
-                        return {"status": response.status_code}
-
-            return {
-                "error": f"Request failed with status {response.status_code}",
-                "status": response.status_code,
-            }
-
-        except Exception as e:
-            return {"error": str(e)}
 
 
 class TestTransportIntegration:
@@ -147,55 +21,51 @@ class TestTransportIntegration:
         """Test stdio transport basic initialization and communication."""
         client = MCPTestClient()
 
-        try:
-            async with client.connect():
-                # Test basic operations
-                tools = await client.list_tools()
-                assert len(tools) > 0, "Expected at least one tool"
+        async with client.connect():
+            # Verify expected tools are registered
+            tools = await client.list_tools()
+            tool_names = {t.name for t in tools}
+            expected_tools = {"search_records", "get_record", "list_models"}
+            assert expected_tools.issubset(tool_names), (
+                f"Missing expected tools: {expected_tools - tool_names}"
+            )
 
-                await client.list_resources()
-                # Resources might be empty, that's ok for transport testing
-
-                # Test a basic tool call - list_models should work with proper auth
-                result = await client.call_tool("list_models", {})
-                assert result is not None, "Tool call should return a result"
-                # The result should be a proper MCP response
-                assert hasattr(result, "content"), "Tool result should have content"
-
-        except Exception as e:
-            # Log the actual error for debugging
-            import logging
-
-            logging.error(f"stdio transport test failed: {e}")
-            # Re-raise to fail the test
-            raise
+            # Test a tool call and verify content is meaningful
+            result = await client.call_tool("list_models", {})
+            assert hasattr(result, "content"), "Tool result should have content"
+            assert len(result.content) > 0, "Tool result should have non-empty content"
+            # Content text should contain model data (not an empty/error response)
+            content_text = result.content[0].text
+            assert "models" in content_text or "model" in content_text, (
+                f"list_models result should contain model data, got: {content_text[:200]}"
+            )
 
     @pytest.mark.asyncio
     async def test_stdio_transport_multiple_requests(self, odoo_server_required):
-        """Test stdio transport can handle multiple sequential requests."""
+        """Test stdio transport returns consistent results across sequential requests."""
         client = MCPTestClient()
 
-        try:
-            async with client.connect():
-                # Make multiple tool list requests
-                for i in range(3):
-                    tools = await client.list_tools()
-                    assert len(tools) > 0, f"Expected tools on request {i + 1}"
+        async with client.connect():
+            # Verify tool list is stable across requests
+            first_tools = await client.list_tools()
+            first_tool_names = {t.name for t in first_tools}
+            assert len(first_tool_names) > 0, "Expected tools on first request"
 
-                # Make multiple resource list requests
-                for i in range(3):
-                    resources = await client.list_resources()
-                    # Resources might be empty, that's ok - just testing transport stability
-                    assert resources is not None, (
-                        f"Resource list should not be None on request {i + 1}"
-                    )
+            for i in range(2):
+                tools = await client.list_tools()
+                tool_names = {t.name for t in tools}
+                assert tool_names == first_tool_names, (
+                    f"Tool list changed on request {i + 2}: {tool_names ^ first_tool_names}"
+                )
 
-        except Exception as e:
-            # Log the actual error for debugging
-            import logging
-
-            logging.error(f"stdio multiple requests test failed: {e}")
-            raise
+            # Verify resource list is stable across requests
+            first_resources = await client.list_resources()
+            for i in range(2):
+                resources = await client.list_resources()
+                assert len(resources) == len(first_resources), (
+                    f"Resource count changed on request {i + 2}: "
+                    f"{len(resources)} vs {len(first_resources)}"
+                )
 
     @pytest.mark.asyncio
     async def test_http_transport_basic_flow(self, odoo_server_required):
@@ -288,23 +158,13 @@ class TestTransportIntegration:
             # Send initialized notification
             await tester._send_request("notifications/initialized", {})
 
-            # Test list_models tool call
+            # Test list_models tool call — MCP tests have auth configured, so this should succeed
             params = {"name": "list_models", "arguments": {}}
             response = await tester._send_request("tools/call", params, tester._next_id())
             assert response is not None, "No response to tool call"
-            # Note: The tool call might fail due to auth, but the transport should work
-            # Just check that we got some kind of response (transport working)
-            assert isinstance(response, dict), f"Expected dict response, got: {response}"
-            # Accept either successful result or any error that's not a transport error
-            has_result = "result" in response
-            has_error = "error" in response
-            if has_error:
-                error = response.get("error")
-                # If error is a dict with code, check it's not a transport error (-32600)
-                if isinstance(error, dict) and error.get("code") == -32600:
-                    raise AssertionError(f"Transport error in tool call: {response}")
-            # If we get here, either we have a result or a non-transport error
-            assert has_result or has_error, f"Response should have result or error: {response}"
+            assert "result" in response, f"Tool call should succeed, got: {response}"
+            result_data = response["result"]
+            assert "content" in result_data, f"Expected content in result: {result_data}"
 
         finally:
             tester.stop_server()
@@ -315,7 +175,7 @@ class TestTransportCompatibility:
     """Test transport compatibility and edge cases."""
 
     @pytest.mark.asyncio
-    async def test_server_version_consistency(self, odoo_server_required):
+    async def test_both_transports_connect_successfully(self, odoo_server_required):
         """Test that both transports can successfully connect and communicate."""
         # Test stdio connection
         stdio_client = MCPTestClient()

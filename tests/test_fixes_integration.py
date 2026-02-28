@@ -19,6 +19,7 @@ class TestFixesIntegration:
         config = Mock()
         config.default_limit = 10
         config.max_limit = 100
+        config.max_smart_fields = 30
         config.is_yolo_enabled = False  # Ensure standard mode for these tests
         config.yolo_mode = "off"
 
@@ -47,11 +48,15 @@ class TestFixesIntegration:
 
         models_result = await tool_handler._handle_list_models_tool()
 
-        # Should return dict with models array
+        # Should return dict with models array containing permission info from handler logic
         assert isinstance(models_result, dict)
         assert "models" in models_result
-        assert isinstance(models_result["models"], list)
-        assert len(models_result["models"]) == 2
+        # Verify the handler added operations metadata (real logic, not mock passthrough)
+        for model in models_result["models"]:
+            assert "operations" in model, "Handler should add operations dict per model"
+            assert model["operations"]["read"] is True
+            assert model["operations"]["write"] is True
+            assert model["operations"]["create"] is False
 
         # Test 2: get_record with smart defaults and datetime formatting
         tool_handler.connection.fields_get.return_value = {
@@ -64,7 +69,8 @@ class TestFixesIntegration:
             "message_ids": {"type": "one2many"},  # Should be excluded
         }
 
-        # Mock read to return a record with Odoo's compact datetime format
+        # Mock read to return a record — include ALL fields so we can verify
+        # smart defaults actually filtered the request (not that mock lacks fields)
         tool_handler.connection.read.return_value = [
             {
                 "id": 1,
@@ -76,16 +82,18 @@ class TestFixesIntegration:
 
         record_result = await tool_handler._handle_get_record_tool("res.partner", 1, None)
 
-        # Should have smart field selection
-        assert "id" in record_result.record
-        assert "name" in record_result.record
-        assert "email" in record_result.record
-        assert "create_date" in record_result.record
-
-        # Should NOT have excluded fields
-        assert "write_date" not in record_result.record
-        assert "image_1920" not in record_result.record
-        assert "message_ids" not in record_result.record
+        # Verify smart defaults actually filtered the fields in the read() call
+        # (this is the real test — not just checking mock return values)
+        read_call_args = tool_handler.connection.read.call_args
+        requested_fields = read_call_args[0][2] if len(read_call_args[0]) > 2 else None
+        assert requested_fields is not None, "Smart defaults should have selected specific fields"
+        assert "write_date" not in requested_fields, (
+            "write_date should be excluded by smart defaults"
+        )
+        assert "image_1920" not in requested_fields, "binary fields should be excluded"
+        assert "message_ids" not in requested_fields, "one2many fields should be excluded"
+        assert "name" in requested_fields, "required char fields should be included"
+        assert "email" in requested_fields, "searchable char fields should be included"
 
         # Should have metadata
         assert record_result.metadata is not None
@@ -146,13 +154,16 @@ class TestFixesIntegration:
 
         result = await tool_handler._handle_get_record_tool("res.partner", 1, ["__all__"])
 
-        # Should return all fields
-        assert "image_1920" in result.record
-        assert "message_ids" in result.record
-        assert "write_date" in result.record
-
         # Should NOT have metadata (not using smart defaults)
         assert result.metadata is None
+
+        # Verify read was called without field filtering (__all__ disables smart fields)
+        tool_handler.connection.read.assert_called_once()
+        call_args = tool_handler.connection.read.call_args
+        fields_passed = call_args[0][2]
+        assert fields_passed is None, (
+            f"Expected fields=None when __all__ is used, got {fields_passed}"
+        )
 
         # Should still format datetime
         assert result.record["write_date"] == "2025-06-06T13:50:23+00:00"
@@ -170,13 +181,13 @@ class TestFixesIntegration:
             "res.partner", 1, ["name", "vat", "create_date"]
         )
 
-        # Should have only requested fields
-        assert "name" in result.record
-        assert "vat" in result.record
-        assert "create_date" in result.record
-
         # Should NOT have metadata (explicit field selection)
         assert result.metadata is None
+
+        # Verify read was called with the specific fields
+        tool_handler.connection.read.assert_called_once_with(
+            "res.partner", [1], ["name", "vat", "create_date"]
+        )
 
         # Should still format datetime
         assert result.record["create_date"] == "2025-06-06T13:50:23+00:00"

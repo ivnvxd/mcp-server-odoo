@@ -10,7 +10,6 @@ Integration tests require a live Odoo server and are auto-skipped otherwise.
 """
 
 import os
-import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -25,9 +24,8 @@ from .conftest import ODOO_SERVER_AVAILABLE
 
 @pytest.fixture(autouse=True)
 def _rate_limit_delay():
-    """Small delay between tests to avoid overwhelming Odoo with connections."""
+    """Placeholder — rate limiting not needed for local Odoo."""
     yield
-    time.sleep(0.1)
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +114,10 @@ def _verify_db_autodetect(scenario: AuthScenario, conn: OdooConnection):
 
 def _verify_write_cycle(conn: OdooConnection):
     """Create and delete a res.company record."""
-    record_id = conn.create("res.company", {"name": "Auth Matrix Test Temp"})
+    from uuid import uuid4
+
+    unique_name = f"Auth Matrix Test {uuid4().hex[:8]}"
+    record_id = conn.create("res.company", {"name": unique_name})
     assert isinstance(record_id, int)
     assert record_id > 0
     conn.unlink("res.company", [record_id])

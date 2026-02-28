@@ -39,17 +39,12 @@ class TestErrorSanitizationIntegration:
         return OdooResourceHandler(app, connection, access_controller, config)
 
     @pytest.mark.asyncio
-    async def test_tool_xmlrpc_fault_sanitization(self, tool_handler):
-        """Test that XML-RPC faults are sanitized in tool errors."""
-        # Mock XML-RPC fault from Odoo
-        import xmlrpc.client
+    async def test_tool_wraps_connection_error(self, tool_handler):
+        """Test that the tool layer wraps OdooConnectionError into ValidationError.
 
-        # Create XML-RPC fault (not used directly, but shows what the error originated from)
-        xmlrpc.client.Fault(
-            1,
-            "Internal Server Error in MCPObjectController: Invalid field res.partner.bogus_field in leaf ('bogus_field', '=', True)",
-        )
-
+        Note: actual XML-RPC fault sanitization happens in OdooConnection.execute_kw,
+        not in the tool layer. This test verifies the tool's error wrapping.
+        """
         tool_handler.connection.is_authenticated = True
         tool_handler.connection.search_count.side_effect = OdooConnectionError(
             "Operation failed: Invalid field 'bogus_field' in search criteria"
@@ -62,8 +57,6 @@ class TestErrorSanitizationIntegration:
 
         # Error message should be sanitized
         error_msg = str(exc_info.value)
-        assert "MCPObjectController" not in error_msg
-        assert "Internal Server Error" not in error_msg
         assert "Invalid field" in error_msg
         assert "bogus_field" in error_msg
 
@@ -184,4 +177,4 @@ class TestErrorSanitizationIntegration:
         assert "_serve_db" not in sanitized
 
         # Should contain useful information
-        assert "Invalid field" in sanitized or "error" in sanitized.lower()
+        assert "Invalid field" in sanitized

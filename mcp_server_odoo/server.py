@@ -4,6 +4,7 @@ This module provides the FastMCP server that exposes Odoo data
 and functionality through the Model Context Protocol.
 """
 
+import contextlib
 from typing import Any, Dict, Optional
 
 from mcp.server import FastMCP
@@ -25,7 +26,7 @@ from .tools import register_tools
 logger = get_logger(__name__)
 
 # Server version
-SERVER_VERSION = "0.4.5"
+SERVER_VERSION = "0.5.0"
 
 
 class OdooMCPServer:
@@ -60,9 +61,46 @@ class OdooMCPServer:
         self.app = FastMCP(
             name="odoo-mcp-server",
             instructions="MCP server for accessing and managing Odoo ERP data through the Model Context Protocol",
+            lifespan=self._odoo_lifespan,
         )
 
+        @self.app.custom_route("/health", methods=["GET"])
+        async def health_check(request):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse(self.get_health_status())
+
+        @self.app.completion()
+        async def handle_completion(ref, argument, context):
+            from mcp.types import Completion
+
+            if argument.name == "model":
+                model_names = self._get_model_names()
+                partial = argument.value or ""
+                if partial:
+                    matches = [m for m in model_names if partial.lower() in m.lower()]
+                else:
+                    matches = model_names
+                return Completion(values=matches[:20])
+            return None
+
         logger.info(f"Initialized Odoo MCP Server v{SERVER_VERSION}")
+
+    @contextlib.asynccontextmanager
+    async def _odoo_lifespan(self, app: FastMCP):
+        """Manage Odoo connection lifecycle for FastMCP.
+
+        Sets up connection, registers resources/tools before server starts.
+        Cleans up connection when server stops.
+        """
+        try:
+            with perf_logger.track_operation("server_startup"):
+                self._ensure_connection()
+                self._register_resources()
+                self._register_tools()
+            yield {}
+        finally:
+            self._cleanup_connection()
 
     def _ensure_connection(self):
         """Ensure connection to Odoo is established.
@@ -133,34 +171,17 @@ class OdooMCPServer:
             logger.info("Registered MCP tools")
 
     async def run_stdio(self):
-        """Run the server using stdio transport.
-
-        This is the main entry point for running the server
-        with standard input/output transport (used by uvx).
-        """
+        """Run the server using stdio transport."""
         try:
-            # Establish connection before starting server
-            with perf_logger.track_operation("server_startup"):
-                self._ensure_connection()
-
-                # Register resources after connection is established
-                self._register_resources()
-                self._register_tools()
-
             logger.info("Starting MCP server with stdio transport...")
             await self.app.run_stdio_async()
-
         except KeyboardInterrupt:
             logger.info("Server interrupted by user")
         except (OdooConnectionError, ConfigurationError):
-            # Let these specific errors propagate
             raise
         except Exception as e:
             context = ErrorContext(operation="server_run")
             error_handler.handle_error(e, context=context)
-        finally:
-            # Always cleanup connection
-            self._cleanup_connection()
 
     def run_stdio_sync(self):
         """Synchronous wrapper for run_stdio.
@@ -182,34 +203,17 @@ class OdooMCPServer:
             port: Port to bind to
         """
         try:
-            # Establish connection before starting server
-            with perf_logger.track_operation("server_startup"):
-                self._ensure_connection()
-
-                # Register resources after connection is established
-                self._register_resources()
-                self._register_tools()
-
             logger.info(f"Starting MCP server with HTTP transport on {host}:{port}...")
-
-            # Update FastMCP settings for host and port
             self.app.settings.host = host
             self.app.settings.port = port
-
-            # Use the specific streamable HTTP async method
             await self.app.run_streamable_http_async()
-
         except KeyboardInterrupt:
             logger.info("Server interrupted by user")
         except (OdooConnectionError, ConfigurationError):
-            # Let these specific errors propagate
             raise
         except Exception as e:
             context = ErrorContext(operation="server_run_http")
             error_handler.handle_error(e, context=context)
-        finally:
-            # Always cleanup connection
-            self._cleanup_connection()
 
     def get_capabilities(self) -> Dict[str, Dict[str, bool]]:
         """Get server capabilities.
@@ -231,30 +235,29 @@ class OdooMCPServer:
         Returns:
             Dict with health status and metrics
         """
-        is_connected = (
-            self.connection and self.connection.is_authenticated
-            if hasattr(self.connection, "is_authenticated")
-            else False
-        )
-
-        # Get performance stats if available
-        performance_stats = None
-        if self.performance_manager:
-            performance_stats = self.performance_manager.get_stats()
+        is_connected = bool(self.connection is not None and self.connection.is_authenticated)
 
         return {
             "status": "healthy" if is_connected else "unhealthy",
             "version": SERVER_VERSION,
             "connection": {
                 "connected": is_connected,
-                "url": self.config.url if self.config else None,
-                "database": (
-                    self.connection.database
-                    if self.connection and hasattr(self.connection, "database")
-                    else None
-                ),
             },
-            "error_metrics": error_handler.get_metrics(),
-            "recent_errors": error_handler.get_recent_errors(limit=5),
-            "performance": performance_stats,
         }
+
+    def _get_model_names(self) -> list[str]:
+        """Get available model names for autocomplete."""
+        if not self.access_controller:
+            return []
+        try:
+            models = self.access_controller.get_enabled_models()
+            if models:
+                return [m["model"] for m in models]
+            # YOLO mode returns [] meaning "all allowed" — query ir.model directly
+            if self.connection and self.connection.is_authenticated:
+                records = self.connection.search_read("ir.model", [], ["model"], limit=200)
+                return [r["model"] for r in records]
+            return []
+        except Exception as e:
+            logger.debug(f"Failed to get model names for autocomplete: {e}")
+            return []

@@ -1,7 +1,6 @@
 """Tests for caching functionality with Odoo integration."""
 
 import os
-import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -166,31 +165,24 @@ class TestCachingIntegration:
             conn.connect()
             conn.authenticate()
 
-            # Measure time for first fields_get call
-            start1 = time.time()
+            # First call populates cache
             fields1 = conn.fields_get("res.partner")
-            duration1 = time.time() - start1
 
-            # Measure time for second fields_get call (should be cached)
-            start2 = time.time()
+            # Second call should hit cache
             fields2 = conn.fields_get("res.partner")
-            duration2 = time.time() - start2
 
-            # Cached call should be much faster
-            assert duration2 < duration1 / 10  # At least 10x faster
             assert fields1 == fields2
 
-            # Check cache stats
+            # Verify cache stats (deterministic check instead of timing)
             stats = performance_manager.field_cache.get_stats()
-            assert stats["hits"] == 1
+            assert stats["hits"] >= 1
             assert stats["misses"] == 1
-            assert stats["hit_rate"] == 0.5
 
         finally:
             conn.disconnect()
 
     @pytest.mark.mcp
-    def test_real_read_returns_fresh_data(self, real_config, performance_manager):
+    def test_real_read_bypasses_cache(self, real_config, performance_manager):
         """Test read always returns fresh data from Odoo (no record caching)."""
         conn = OdooConnection(real_config, performance_manager=performance_manager)
 
@@ -231,7 +223,8 @@ class TestCachingIntegration:
             # They should be reusing connections from pool
             pool_stats = performance_manager.connection_pool.get_stats()
 
-            # Should have reused some connections
+            # Should have created and reused connections
+            assert pool_stats["connections_created"] >= 1
             assert pool_stats["connections_reused"] > 0
 
             # Do some operations

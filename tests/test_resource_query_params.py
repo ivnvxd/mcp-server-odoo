@@ -229,31 +229,20 @@ class TestResourceQueryParameterHandling:
 
 
 class TestResourceRegistration:
-    """Test that resources are properly registered with FastMCP."""
+    """Test that resources are actually registered with the FastMCP app."""
 
-    def test_search_resources_registered(self, resource_handler, fastmcp_app):
-        """Verify that multiple search resource patterns are registered."""
-        # Get registered handlers from the app
-        # Note: FastMCP doesn't expose registered resources directly,
-        # but we can verify they work by checking the handler exists
-
-        # Due to FastMCP limitations, only these patterns are registered:
-        # - odoo://{model}/search (no parameters)
-        # - odoo://{model}/record/{record_id}
-        # - odoo://{model}/count (no parameters)
-        # - odoo://{model}/fields
-
-        # Since we can't directly inspect FastMCP's internal registry,
-        # we verify that the handler methods exist
-        assert hasattr(resource_handler, "_handle_search")
-        # Browse resource removed due to FastMCP limitations
-        assert hasattr(resource_handler, "_handle_count")
-        assert hasattr(resource_handler, "_handle_fields")
-        assert hasattr(resource_handler, "_handle_record_retrieval")
-
-    def test_count_resources_registered(self, resource_handler, fastmcp_app):
-        """Verify that count resource patterns are registered."""
-        # Count only supports basic pattern due to FastMCP limitations:
-        # - odoo://{model}/count (no parameters)
-
-        assert hasattr(resource_handler, "_handle_count")
+    @pytest.mark.asyncio
+    async def test_resources_registered_with_fastmcp(self, resource_handler, fastmcp_app):
+        """Verify resources are registered by listing them from the FastMCP app."""
+        templates = await fastmcp_app.list_resource_templates()
+        template_uris = [t.uriTemplate for t in templates]
+        # The resource handler registers URI patterns during __init__
+        assert any("record" in uri for uri in template_uris), (
+            f"Expected a 'record' resource template, got: {template_uris}"
+        )
+        assert any("search" in uri for uri in template_uris), (
+            f"Expected a 'search' resource template, got: {template_uris}"
+        )
+        assert any("fields" in uri for uri in template_uris), (
+            f"Expected a 'fields' resource template, got: {template_uris}"
+        )

@@ -129,6 +129,21 @@ class TestSearchSmartDefaults:
         tool_handler.connection.read.assert_called_once_with("res.partner", [1], None)
 
     @pytest.mark.asyncio
+    async def test_search_falls_back_when_fields_get_fails(self, tool_handler):
+        """Smart defaults should fall back to all fields when fields_get fails."""
+        tool_handler.connection.is_authenticated = True
+        tool_handler.connection.search_count.return_value = 1
+        tool_handler.connection.search.return_value = [1]
+        tool_handler.connection.fields_get.side_effect = Exception("Cannot get fields")
+        tool_handler.connection.read.return_value = [{"id": 1, "name": "Test"}]
+
+        await tool_handler._handle_search_tool("res.partner", [], None, 10, 0, None)
+
+        # Should fall back to no field filtering
+        fields_arg = tool_handler.connection.read.call_args[0][2]
+        assert fields_arg is None
+
+    @pytest.mark.asyncio
     async def test_search_smart_defaults_with_datetime_formatting(self, tool_handler):
         """Test that datetime fields are formatted even with smart defaults."""
         # Setup mocks
@@ -136,21 +151,28 @@ class TestSearchSmartDefaults:
         tool_handler.connection.search_count.return_value = 1
         tool_handler.connection.search.return_value = [1]
 
-        # Mock fields_get
+        # Mock fields_get — use date_order (a business datetime field that smart
+        # selection includes) instead of create_date (which is in the exclude list
+        # and would get score 0, making the test internally inconsistent).
         tool_handler.connection.fields_get.return_value = {
             "id": {"type": "integer", "required": True},
             "name": {"type": "char", "required": True},
-            "create_date": {"type": "datetime"},
+            "date_order": {"type": "datetime", "store": True},
         }
 
         # Mock read with datetime that needs formatting
         tool_handler.connection.read.return_value = [
-            {"id": 1, "name": "Test", "create_date": "20250607T10:00:00"}
+            {"id": 1, "name": "Test", "date_order": "20250607T10:00:00"}
         ]
 
-        # Call the handler
+        # Call the handler with fields=None to trigger smart selection
         handler = tool_handler._handle_search_tool
         result = await handler("res.partner", [], None, 10, 0, None)
 
+        # Verify date_order was included by smart selection
+        call_args = tool_handler.connection.read.call_args
+        fields_arg = call_args[0][2]
+        assert "date_order" in fields_arg
+
         # Verify datetime was formatted
-        assert result["records"][0]["create_date"] == "2025-06-07T10:00:00+00:00"
+        assert result["records"][0]["date_order"] == "2025-06-07T10:00:00+00:00"

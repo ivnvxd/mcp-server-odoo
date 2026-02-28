@@ -95,10 +95,15 @@ class TestYoloModeTools:
         assert call_args[0][0] == "ir.model"  # Model name
         assert "transient" in str(call_args[0][1])  # Domain includes transient filter
 
-        # Check result structure
-        assert "yolo_mode" in result
-        assert "models" in result
-        assert "total" in result
+        # Check result structure and values
+        assert result["total"] == 3
+        assert len(result["models"]) == 3
+
+        # Verify model names from the mock actually appear in the result
+        model_names = [m["model"] for m in result["models"]]
+        assert "res.partner" in model_names
+        assert "product.product" in model_names
+        assert "sale.order" in model_names
 
         # Check YOLO mode metadata
         yolo_meta = result["yolo_mode"]
@@ -111,13 +116,14 @@ class TestYoloModeTools:
         assert yolo_meta["operations"]["create"] is False
         assert yolo_meta["operations"]["unlink"] is False
 
-        # Check actual models are clean (no operations field)
-        models = result["models"]
-        assert len(models) == 3  # Should match mock data
-        for model in models:
+        # Verify search_read was called with correct domain
+        call_args = mock_connection.search_read.call_args
+        assert call_args[0][0] == "ir.model"
+        assert ("transient", "=", False) in call_args[0][1]
+
+        # In YOLO mode, models should NOT have per-model operations (unlike standard mode)
+        for model in result["models"]:
             assert "operations" not in model
-            assert "model" in model
-            assert "name" in model
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_full_mode(
@@ -138,10 +144,14 @@ class TestYoloModeTools:
         # Call the method
         result = await handler._handle_list_models_tool()
 
-        # Check result structure
-        assert "yolo_mode" in result
-        assert "models" in result
-        assert "total" in result
+        # Check result structure and values
+        assert result["total"] == 2
+        assert len(result["models"]) == 2
+
+        # Verify model names from the mock actually appear in the result
+        model_names = [m["model"] for m in result["models"]]
+        assert "res.partner" in model_names
+        assert "account.move" in model_names
 
         # Check YOLO mode metadata
         yolo_meta = result["yolo_mode"]
@@ -154,13 +164,15 @@ class TestYoloModeTools:
         assert yolo_meta["operations"]["create"] is True
         assert yolo_meta["operations"]["unlink"] is True
 
-        # Check actual models are clean (no operations field)
+        # Verify search_read was called with correct domain and fields
+        mock_connection.search_read.assert_called_once()
+        call_args = mock_connection.search_read.call_args
+        assert call_args[0][0] == "ir.model"
+
+        # In YOLO mode, models should NOT have per-model operations (unlike standard mode)
         models = result["models"]
-        assert len(models) == 2  # Should match mock data
         for model in models:
             assert "operations" not in model
-            assert "model" in model
-            assert "name" in model
 
     @pytest.mark.asyncio
     async def test_list_models_standard_mode(
@@ -197,15 +209,15 @@ class TestYoloModeTools:
         # Verify access controller was called
         mock_access_controller.get_enabled_models.assert_called_once()
 
-        # Check result structure
-        assert "models" in result
+        # Verify result contains the models with correct permissions
         models = result["models"]
         assert len(models) == 2
-
-        # No YOLO warning in standard mode
         for model in models:
-            assert "YOLO MODE" not in model["model"]
-            assert model["model"] in ["res.partner", "res.users"]
+            assert "operations" in model
+            assert model["operations"]["read"] is True
+            assert model["operations"]["write"] is True
+            assert model["operations"]["create"] is False
+            assert model["operations"]["unlink"] is False
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_error_handling(
@@ -253,44 +265,29 @@ class TestYoloModeTools:
             mock_app, mock_connection, mock_access_controller, config_yolo_read
         )
 
-        # Call the method
-        await handler._handle_list_models_tool()
+        # Call the method and verify empty result is handled
+        result = await handler._handle_list_models_tool()
+        assert result["models"] == []
+        assert result["total"] == 0
 
         # Verify the domain passed to search_read
         call_args = mock_connection.search_read.call_args
         domain = call_args[0][1]
 
-        # Check domain structure
+        # Check domain structure — verify the actual Polish-notation domain
         assert isinstance(domain, list)
-        # Should filter out transient models
+        assert domain[0] == "&", "Domain should start with AND operator"
         assert ("transient", "=", False) in domain
-        # Should have complex domain with OR conditions
-        assert "&" in domain or "|" in domain
-
-    @pytest.mark.asyncio
-    async def test_list_models_yolo_includes_common_system_models(
-        self, config_yolo_full, mock_connection, mock_access_controller, mock_app
-    ):
-        """Test that common system models are included in YOLO mode."""
-        mock_connection.search_read.return_value = [
-            {"model": "res.partner", "name": "Contact"},
-            {"model": "ir.attachment", "name": "Attachment"},
-            {"model": "ir.model", "name": "Models"},
+        # Should have OR conditions for model filtering
+        assert "|" in domain, "Domain should include OR conditions for model filtering"
+        assert ("model", "not like", "ir.%") in domain
+        assert ("model", "not like", "base.%") in domain
+        # Should include whitelist of allowed ir.* models
+        ir_whitelist = [
+            c for c in domain if isinstance(c, tuple) and c[0] == "model" and c[1] == "in"
         ]
-
-        # Create handler
-        handler = OdooToolHandler(
-            mock_app, mock_connection, mock_access_controller, config_yolo_full
-        )
-
-        # Call the method
-        result = await handler._handle_list_models_tool()
-
-        # Check that system models are included
-        models = result["models"]
-        model_names = [m["model"] for m in models]
-        assert "ir.attachment" in model_names
-        assert "ir.model" in model_names
+        assert len(ir_whitelist) == 1, "Should have exactly one 'model in [...]' whitelist"
+        assert "ir.attachment" in ir_whitelist[0][2]
 
     @pytest.mark.asyncio
     async def test_yolo_mode_logging(
@@ -311,8 +308,11 @@ class TestYoloModeTools:
             mock_app, mock_connection, mock_access_controller, config_yolo_read
         )
 
-        # Call the method
-        await handler._handle_list_models_tool()
+        # Call the method and verify result
+        result = await handler._handle_list_models_tool()
+        assert result["total"] == 1
+        assert len(result["models"]) == 1
+        assert result["models"][0]["model"] == "res.partner"
 
         # Check logs
         assert "YOLO mode (READ-ONLY)" in caplog.text

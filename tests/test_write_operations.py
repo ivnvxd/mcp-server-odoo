@@ -1,7 +1,12 @@
-"""Tests for OdooConnection write operations (create, write, unlink)."""
+"""Tests for OdooConnection write operations (create, write, unlink).
 
-import os
-from unittest.mock import Mock, patch
+These tests mock only the XML-RPC proxy (the network boundary),
+letting all OdooConnection logic (argument building, caching,
+performance tracking, error handling) run for real.
+"""
+
+import xmlrpc.client
+from unittest.mock import Mock
 
 import pytest
 
@@ -9,196 +14,188 @@ from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.odoo_connection import OdooConnection, OdooConnectionError
 
 
-class TestWriteOperations:
-    """Test write operations in OdooConnection."""
+@pytest.fixture
+def config():
+    """Create a minimal config for testing."""
+    return OdooConfig(
+        url="http://localhost:8069",
+        database="testdb",
+        username="admin",
+        password="admin",
+    )
 
-    @pytest.fixture
-    def mock_config(self):
-        """Create mock config."""
-        config = Mock(spec=OdooConfig)
-        config.url = os.getenv("ODOO_URL", "http://localhost:8069")
-        config.db = "test"
-        config.username = "test"
-        config.password = "test"
-        config.api_key = None
-        config.uses_api_key = False
-        config.uses_credentials = True
-        config.is_yolo_enabled = False
-        config.yolo_mode = "off"
-        config.get_endpoint_paths.return_value = {
-            "db": "/xmlrpc/db",
-            "common": "/mcp/xmlrpc/common",
-            "object": "/mcp/xmlrpc/object",
-        }
-        return config
 
-    @pytest.fixture
-    def mock_performance_manager(self, mock_config):
-        """Create mock performance manager."""
-        manager = Mock()
-        # Create a proper context manager mock
-        cm = Mock()
-        cm.__enter__ = Mock(return_value=None)
-        cm.__exit__ = Mock(return_value=None)
-        manager.monitor.track_operation.return_value = cm
-        manager.invalidate_record_cache = Mock()
-        manager.get_optimized_connection = Mock(return_value=Mock())
-        return manager
+@pytest.fixture
+def conn(config):
+    """Create an OdooConnection with only the XML-RPC proxy mocked."""
+    conn = OdooConnection(config)
+    conn._connected = True
+    conn._authenticated = True
+    conn._uid = 2
+    conn._database = "testdb"
+    conn._auth_method = "password"
+    # Mock only the network boundary
+    conn._object_proxy = Mock()
+    return conn
 
-    @pytest.fixture
-    def connection(self, mock_config, mock_performance_manager):
-        """Create OdooConnection with mocks."""
-        conn = OdooConnection(mock_config, performance_manager=mock_performance_manager)
+
+class TestCreateOperation:
+    """Test OdooConnection.create() with real logic."""
+
+    def test_create_builds_correct_execute_kw_call(self, conn):
+        """create() should forward values as positional arg to execute_kw."""
+        conn._object_proxy.execute_kw.return_value = 123
+
+        result = conn.create("res.partner", {"name": "Test", "email": "t@example.com"})
+
+        assert result == 123
+        args = conn._object_proxy.execute_kw.call_args[0]
+        assert args[0] == "testdb"
+        assert args[1] == 2  # uid
+        assert args[2] == "admin"  # password credential
+        assert args[3] == "res.partner"
+        assert args[4] == "create"
+        assert args[5] == [{"name": "Test", "email": "t@example.com"}]
+        assert args[6] == {}
+
+    def test_create_invalidates_model_cache(self, conn):
+        """create() should invalidate the record cache for the model."""
+        conn._object_proxy.execute_kw.return_value = 42
+
+        # Prime the cache
+        conn._performance_manager.cache_record("res.partner", {"id": 1, "name": "Old"})
+
+        conn.create("res.partner", {"name": "New"})
+
+        # Cache should be invalidated (model-wide)
+        cached = conn._performance_manager.get_cached_record("res.partner", 1)
+        assert cached is None
+
+    def test_create_propagates_xmlrpc_fault(self, conn):
+        """create() should wrap XML-RPC faults as OdooConnectionError."""
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            1, "Access denied on res.partner"
+        )
+
+        with pytest.raises(OdooConnectionError, match="Operation failed"):
+            conn.create("res.partner", {"name": "Fail"})
+
+    def test_create_propagates_connection_error(self, conn):
+        """create() should propagate OdooConnectionError from execute_kw."""
+        conn._object_proxy.execute_kw.side_effect = OdooConnectionError("Network error")
+
+        with pytest.raises(OdooConnectionError, match="Network error"):
+            conn.create("res.partner", {"name": "Test"})
+
+
+class TestWriteOperation:
+    """Test OdooConnection.write() with real logic."""
+
+    def test_write_builds_correct_execute_kw_call(self, conn):
+        """write() should forward ids and values as positional args."""
+        conn._object_proxy.execute_kw.return_value = True
+
+        result = conn.write("res.partner", [10, 20], {"email": "new@example.com"})
+
+        assert result is True
+        args = conn._object_proxy.execute_kw.call_args[0]
+        assert args[3] == "res.partner"
+        assert args[4] == "write"
+        assert args[5] == [[10, 20], {"email": "new@example.com"}]
+
+    def test_write_invalidates_cache_per_record(self, conn):
+        """write() should invalidate cache for each updated record."""
+        conn._object_proxy.execute_kw.return_value = True
+
+        conn._performance_manager.cache_record("res.partner", {"id": 1, "name": "Old1"})
+        conn._performance_manager.cache_record("res.partner", {"id": 2, "name": "Old2"})
+        conn._performance_manager.cache_record("res.partner", {"id": 3, "name": "Untouched"})
+
+        conn.write("res.partner", [1, 2], {"name": "Updated"})
+
+        assert conn._performance_manager.get_cached_record("res.partner", 1) is None
+        assert conn._performance_manager.get_cached_record("res.partner", 2) is None
+        # Record 3 was not in the write list — it should remain cached
+        assert conn._performance_manager.get_cached_record("res.partner", 3) is not None
+
+    def test_write_propagates_xmlrpc_fault(self, conn):
+        """write() should wrap XML-RPC faults as OdooConnectionError."""
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            2, "Constraint violation: unique email"
+        )
+
+        with pytest.raises(OdooConnectionError):
+            conn.write("res.partner", [1], {"email": "dup@example.com"})
+
+
+class TestUnlinkOperation:
+    """Test OdooConnection.unlink() with real logic."""
+
+    def test_unlink_builds_correct_execute_kw_call(self, conn):
+        """unlink() should forward ids as positional arg."""
+        conn._object_proxy.execute_kw.return_value = True
+
+        result = conn.unlink("res.partner", [5, 6, 7])
+
+        assert result is True
+        args = conn._object_proxy.execute_kw.call_args[0]
+        assert args[3] == "res.partner"
+        assert args[4] == "unlink"
+        assert args[5] == [[5, 6, 7]]
+
+    def test_unlink_invalidates_cache_per_record(self, conn):
+        """unlink() should invalidate cache for each deleted record."""
+        conn._object_proxy.execute_kw.return_value = True
+
+        conn._performance_manager.cache_record("res.partner", {"id": 5, "name": "Del"})
+        conn._performance_manager.cache_record("res.partner", {"id": 6, "name": "Del2"})
+
+        conn.unlink("res.partner", [5, 6])
+
+        assert conn._performance_manager.get_cached_record("res.partner", 5) is None
+        assert conn._performance_manager.get_cached_record("res.partner", 6) is None
+
+    def test_unlink_propagates_xmlrpc_fault(self, conn):
+        """unlink() should wrap XML-RPC faults as OdooConnectionError."""
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            1, "Cannot delete record: linked to other records"
+        )
+
+        with pytest.raises(OdooConnectionError):
+            conn.unlink("res.partner", [1])
+
+
+class TestWriteOperationsGuards:
+    """Test authentication and connection guards for write operations."""
+
+    def test_create_not_authenticated_raises(self, config):
+        """create() should raise if not authenticated."""
+        conn = OdooConnection(config)
         conn._connected = True
+
+        with pytest.raises(OdooConnectionError, match="Not authenticated"):
+            conn.create("res.partner", {"name": "Test"})
+
+    def test_write_not_authenticated_raises(self, config):
+        """write() should raise if not authenticated."""
+        conn = OdooConnection(config)
+        conn._connected = True
+
+        with pytest.raises(OdooConnectionError, match="Not authenticated"):
+            conn.write("res.partner", [1], {"name": "Test"})
+
+    def test_unlink_not_authenticated_raises(self, config):
+        """unlink() should raise if not authenticated."""
+        conn = OdooConnection(config)
+        conn._connected = True
+
+        with pytest.raises(OdooConnectionError, match="Not authenticated"):
+            conn.unlink("res.partner", [1])
+
+    def test_create_not_connected_raises(self, config):
+        """create() should raise if not connected."""
+        conn = OdooConnection(config)
         conn._authenticated = True
-        conn._uid = 2
-        conn._database = "test"
-        conn._auth_method = "password"
-        return conn
 
-    def test_create_record(self, connection):
-        """Test creating a record."""
-        model = "res.partner"
-        values = {"name": "Test Partner", "email": "test@example.com"}
-        expected_id = 123
-
-        with patch.object(connection, "execute_kw", return_value=expected_id) as mock_execute:
-            result = connection.create(model, values)
-
-            assert result == expected_id
-            mock_execute.assert_called_once_with(model, "create", [values], {})
-            connection._performance_manager.invalidate_record_cache.assert_called_once_with(model)
-
-    def test_create_record_error(self, connection):
-        """Test create record with error."""
-        model = "res.partner"
-        values = {"name": "Test"}
-
-        with patch.object(
-            connection, "execute_kw", side_effect=OdooConnectionError("Create failed")
-        ):
-            with pytest.raises(OdooConnectionError, match="Create failed"):
-                connection.create(model, values)
-
-    def test_write_records(self, connection):
-        """Test updating records."""
-        model = "res.partner"
-        ids = [123, 124]
-        values = {"email": "updated@example.com"}
-
-        with patch.object(connection, "execute_kw", return_value=True) as mock_execute:
-            result = connection.write(model, ids, values)
-
-            assert result is True
-            mock_execute.assert_called_once_with(model, "write", [ids, values], {})
-            # Should invalidate cache for each record
-            assert connection._performance_manager.invalidate_record_cache.call_count == 2
-            connection._performance_manager.invalidate_record_cache.assert_any_call(model, 123)
-            connection._performance_manager.invalidate_record_cache.assert_any_call(model, 124)
-
-    def test_write_single_record(self, connection):
-        """Test updating a single record."""
-        model = "res.partner"
-        ids = [123]
-        values = {"name": "Updated Name"}
-
-        with patch.object(connection, "execute_kw", return_value=True):
-            result = connection.write(model, ids, values)
-
-            assert result is True
-            connection._performance_manager.invalidate_record_cache.assert_called_once_with(
-                model, 123
-            )
-
-    def test_write_records_error(self, connection):
-        """Test write records with error."""
-        model = "res.partner"
-        ids = [123]
-        values = {"name": "Test"}
-
-        with patch.object(
-            connection, "execute_kw", side_effect=OdooConnectionError("Write failed")
-        ):
-            with pytest.raises(OdooConnectionError, match="Write failed"):
-                connection.write(model, ids, values)
-
-    def test_unlink_records(self, connection):
-        """Test deleting records."""
-        model = "res.partner"
-        ids = [123, 124, 125]
-
-        with patch.object(connection, "execute_kw", return_value=True) as mock_execute:
-            result = connection.unlink(model, ids)
-
-            assert result is True
-            mock_execute.assert_called_once_with(model, "unlink", [ids], {})
-            # Should invalidate cache for each record
-            assert connection._performance_manager.invalidate_record_cache.call_count == 3
-            connection._performance_manager.invalidate_record_cache.assert_any_call(model, 123)
-            connection._performance_manager.invalidate_record_cache.assert_any_call(model, 124)
-            connection._performance_manager.invalidate_record_cache.assert_any_call(model, 125)
-
-    def test_unlink_single_record(self, connection):
-        """Test deleting a single record."""
-        model = "res.partner"
-        ids = [123]
-
-        with patch.object(connection, "execute_kw", return_value=True):
-            result = connection.unlink(model, ids)
-
-            assert result is True
-            connection._performance_manager.invalidate_record_cache.assert_called_once_with(
-                model, 123
-            )
-
-    def test_unlink_records_error(self, connection):
-        """Test unlink records with error."""
-        model = "res.partner"
-        ids = [123]
-
-        with patch.object(
-            connection, "execute_kw", side_effect=OdooConnectionError("Delete failed")
-        ):
-            with pytest.raises(OdooConnectionError, match="Delete failed"):
-                connection.unlink(model, ids)
-
-    def test_write_operations_performance_tracking(self, connection):
-        """Test that write operations track performance."""
-        # Test create
-        with patch.object(connection, "execute_kw", return_value=123):
-            connection.create("res.partner", {"name": "Test"})
-            connection._performance_manager.monitor.track_operation.assert_called_with(
-                "create_res.partner"
-            )
-
-        # Test write
-        with patch.object(connection, "execute_kw", return_value=True):
-            connection.write("res.partner", [123], {"name": "Updated"})
-            connection._performance_manager.monitor.track_operation.assert_called_with(
-                "write_res.partner"
-            )
-
-        # Test unlink
-        with patch.object(connection, "execute_kw", return_value=True):
-            connection.unlink("res.partner", [123])
-            connection._performance_manager.monitor.track_operation.assert_called_with(
-                "unlink_res.partner"
-            )
-
-    def test_write_operations_not_authenticated(self, connection):
-        """Test write operations when not authenticated."""
-        connection._authenticated = False
-
-        # Since execute_kw checks authentication, the error is raised from there
-        with pytest.raises(OdooConnectionError, match="Not authenticated"):
-            connection.create("res.partner", {"name": "Test"})
-
-        # Reset for next test
-        connection._authenticated = False
-        with pytest.raises(OdooConnectionError, match="Not authenticated"):
-            connection.write("res.partner", [123], {"name": "Test"})
-
-        # Reset for next test
-        connection._authenticated = False
-        with pytest.raises(OdooConnectionError, match="Not authenticated"):
-            connection.unlink("res.partner", [123])
+        with pytest.raises(OdooConnectionError, match="Not connected"):
+            conn.create("res.partner", {"name": "Test"})

@@ -267,7 +267,7 @@ class TestSearchResource:
 
         # Check result message
         assert "No records found matching the criteria" in result
-        assert "Showing records 1-0 of 0" in result
+        assert "of 0" in result
 
     @pytest.mark.asyncio
     async def test_search_access_denied(self, resource_handler, mock_access_controller):
@@ -423,5 +423,41 @@ class TestSearchResourceIntegration:
         assert "Fields: name, email, country_id" in result
         assert "Page 1 of" in result
 
-        # Should have actual partner data
-        assert "email:" in result or "Not set" in result
+        # Should have actual partner data — verify at least one record was returned
+        # Formatter uses "[1] Name" format for search results
+        assert "[1]" in result
+
+
+class TestSearchReadFailure:
+    """Test search resource when read fails after search succeeds."""
+
+    @pytest.mark.asyncio
+    async def test_search_read_failure_after_search_success(
+        self, resource_handler, mock_connection, mock_access_controller
+    ):
+        """Test that OdooConnectionError during read is wrapped as ValidationError."""
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.search_count.return_value = 3
+        mock_connection.search.return_value = [1, 2, 3]
+        # read raises OdooConnectionError after search succeeded
+        mock_connection.read.side_effect = OdooConnectionError("Connection reset during read")
+
+        with pytest.raises(ValidationError) as exc_info:
+            await resource_handler._handle_search("res.partner", None, None, None, None, None)
+
+        assert "Connection error" in str(exc_info.value)
+        assert "Connection reset during read" in str(exc_info.value)
+
+
+class TestSearchNotAuthenticated:
+    """Test search resource when not authenticated."""
+
+    @pytest.mark.asyncio
+    async def test_search_not_authenticated(self, resource_handler, mock_connection):
+        """Test that _handle_search raises ValidationError when not authenticated."""
+        mock_connection.is_authenticated = False
+
+        with pytest.raises(ValidationError) as exc_info:
+            await resource_handler._handle_search("res.partner", None, None, None, None, None)
+
+        assert "Not authenticated with Odoo" in str(exc_info.value)

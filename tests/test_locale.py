@@ -62,7 +62,7 @@ class TestLocaleInjection:
         conn.execute_kw("res.partner", "search", [[]], {})
 
         passed_kwargs = mock_proxy.execute_kw.call_args[0][6]
-        assert "context" not in passed_kwargs or "lang" not in passed_kwargs.get("context", {})
+        assert "lang" not in passed_kwargs.get("context", {})
 
     def test_locale_preserves_existing_context(self, config_with_locale):
         conn = OdooConnection(config_with_locale)
@@ -158,6 +158,23 @@ class TestLocaleInvalidFallback:
         # Second call (the retry) should not have lang
         retry_kwargs = mock_proxy.execute_kw.call_args_list[1][0][6]
         assert "lang" not in retry_kwargs.get("context", {})
+
+    def test_invalid_locale_code_cleared_and_retried(self, config_without_locale):
+        """Setting an invalid locale triggers fallback: locale cleared, call retried."""
+        conn = OdooConnection(config_without_locale)
+        mock_proxy = _make_connected(conn)
+
+        # Simulate an invalid locale set at runtime
+        conn.config.locale = "invalid_XX"
+
+        fault = xmlrpc.client.Fault(1, "Invalid language code: invalid_XX")
+        mock_proxy.execute_kw.side_effect = [fault, [{"id": 7}]]
+
+        result = conn.execute_kw("res.partner", "search_read", [[]], {})
+
+        assert result == [{"id": 7}]
+        assert conn.config.locale is None
+        assert mock_proxy.execute_kw.call_count == 2
 
     def test_other_faults_still_raise(self, config_with_locale):
         """Non-locale faults should propagate as OdooConnectionError."""

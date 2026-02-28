@@ -124,6 +124,7 @@ class TestRecordFormatter:
 
         assert "Relationships:" in result
         assert "child_ids: 5 record(s)" in result
+        # Note: _get_current_record_id() returns None so the URI domain contains None
         assert "→ View all: odoo://res.partner/search?" in result
 
     def test_format_many2many_field(self, formatter):
@@ -215,6 +216,29 @@ class TestRecordFormatter:
         assert "datetime_compact: 2024-01-15T14:30:00+00:00" in result
         assert "date_obj: 2024-01-15" in result
         assert "datetime_obj: 2024-01-15T14:30:00+00:00" in result
+
+
+class TestFormatSimpleValue:
+    """Test _format_simple_value boolean handling."""
+
+    @pytest.fixture
+    def formatter(self):
+        return DatasetFormatter("res.partner")
+
+    def test_format_simple_value_boolean_false(self, formatter):
+        """Test that False renders as 'No', not 'Not set'."""
+        result = formatter._format_simple_value(False)
+        assert result == "No"
+
+    def test_format_simple_value_boolean_true(self, formatter):
+        """Test that True renders as 'Yes'."""
+        result = formatter._format_simple_value(True)
+        assert result == "Yes"
+
+    def test_format_simple_value_none(self, formatter):
+        """Test that None renders as 'Not set'."""
+        result = formatter._format_simple_value(None)
+        assert result == "Not set"
 
 
 class TestDatasetFormatter:

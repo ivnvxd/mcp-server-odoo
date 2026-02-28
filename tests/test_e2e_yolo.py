@@ -12,6 +12,7 @@ import pytest
 
 from mcp_server_odoo.access_control import AccessController
 from mcp_server_odoo.config import OdooConfig
+from mcp_server_odoo.error_handling import ValidationError
 from mcp_server_odoo.odoo_connection import OdooConnection
 from mcp_server_odoo.tools import OdooToolHandler
 
@@ -93,7 +94,7 @@ class TestYoloModeE2E:
         )
 
         assert "records" in search_result
-        assert search_result["total"] >= 0
+        assert search_result["total"] > 0  # res.partner always has records
 
         # 4. Get a specific record - should work
         if search_result["records"]:
@@ -107,7 +108,7 @@ class TestYoloModeE2E:
             assert get_result.record["id"] == first_record["id"]
 
         # 5. Attempt to create record - should fail
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await handler._handle_create_record_tool(
                 model="res.partner",
                 values={"name": "YOLO Test Partner - Should Fail"},
@@ -116,7 +117,7 @@ class TestYoloModeE2E:
 
         # 6. Attempt to update record - should fail
         if search_result["records"]:
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises(ValidationError) as exc_info:
                 await handler._handle_update_record_tool(
                     model="res.partner",
                     record_id=first_record["id"],
@@ -126,7 +127,7 @@ class TestYoloModeE2E:
 
         # 7. Attempt to delete record - should fail
         if search_result["records"]:
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises(ValidationError) as exc_info:
                 await handler._handle_delete_record_tool(
                     model="res.partner",
                     record_id=first_record["id"],
@@ -242,7 +243,7 @@ class TestYoloModeE2E:
         handler = OdooToolHandler(app, connection, access_controller, config_full_access)
 
         # Test standard models
-        standard_models = ["res.partner", "res.users", "res.company"]
+        standard_models = ["res.partner", "res.users", "res.company", "res.country"]
         for model in standard_models:
             result = await handler._handle_search_tool(
                 model=model,
@@ -253,6 +254,7 @@ class TestYoloModeE2E:
                 order=None,
             )
             assert "records" in result, f"Failed to access standard model: {model}"
+            assert result["total"] > 0, f"Expected records in {model}"
 
         # Test system models (usually restricted in standard mode)
         system_models = ["ir.model", "ir.model.fields", "ir.config_parameter"]
@@ -266,21 +268,6 @@ class TestYoloModeE2E:
                 order=None,
             )
             assert "records" in result, f"Failed to access system model: {model}"
-
-        # Test accounting models if available
-        try:
-            account_result = await handler._handle_search_tool(
-                model="account.account",
-                domain=[],
-                fields=["id", "name"],
-                limit=1,
-                offset=0,
-                order=None,
-            )
-            assert "records" in account_result
-        except Exception:
-            # Accounting module might not be installed
-            pass
 
         connection.disconnect()
 
@@ -296,7 +283,7 @@ class TestYoloModeE2E:
         handler = OdooToolHandler(app, connection, access_controller, config_full_access)
 
         # Test invalid model name
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await handler._handle_search_tool(
                 model="invalid.model.name",
                 domain=[],
@@ -305,14 +292,10 @@ class TestYoloModeE2E:
                 offset=0,
                 order=None,
             )
-        # Should get Odoo error, not MCP error
-        assert (
-            "invalid.model.name" in str(exc_info.value)
-            or "not found" in str(exc_info.value).lower()
-        )
+        assert "invalid.model.name" in str(exc_info.value)
 
         # Test invalid field name
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await handler._handle_search_tool(
                 model="res.partner",
                 domain=[],
@@ -321,24 +304,27 @@ class TestYoloModeE2E:
                 offset=0,
                 order=None,
             )
-        assert "invalid_field_xyz" in str(exc_info.value) or "field" in str(exc_info.value).lower()
+        assert "invalid_field_xyz" in str(exc_info.value)
 
         # Test invalid record ID
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await handler._handle_get_record_tool(
                 model="res.partner",
                 record_id=999999999,  # Very unlikely to exist
                 fields=["id", "name"],
             )
-        # Should indicate record not found
+        assert "not found" in str(exc_info.value).lower()
 
         # Test creating record with missing required fields
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await handler._handle_create_record_tool(
                 model="res.users",  # Requires login field
                 values={"name": "Test User Without Login"},
             )
-        # Should get validation error from Odoo
+        err_msg = str(exc_info.value).lower()
+        assert "required" in err_msg or "login" in err_msg, (
+            f"Expected error about missing required fields, got: {exc_info.value}"
+        )
 
         connection.disconnect()
 
@@ -436,69 +422,6 @@ class TestYoloModeE2E:
         connection.disconnect()
 
     @pytest.mark.asyncio
-    async def test_explicit_opt_in_requirement(self):
-        """Test that only 'true' enables full access, not other truthy values."""
-        # Test valid YOLO modes
-        valid_cases = [
-            ("true", True),  # Should enable full access
-            ("read", False),  # Should be read-only
-            ("off", False),  # Should be disabled (standard mode)
-        ]
-
-        for value, should_allow_write in valid_cases:
-            config = OdooConfig(
-                url=os.getenv("ODOO_URL", "http://localhost:8069"),
-                database=os.getenv("ODOO_DB"),
-                username=os.getenv("ODOO_USER", "admin"),
-                password=os.getenv("ODOO_PASSWORD", "admin"),
-                yolo_mode=value,
-            )
-
-            if value in ["true", "read"]:
-                # These enable YOLO mode
-                assert config.is_yolo_enabled
-
-                if value == "true":
-                    assert config.yolo_mode == "true"
-                    # Check permissions allow write
-                    access_controller = AccessController(config)
-                    allowed, _ = access_controller.check_operation_allowed("res.partner", "write")
-                    assert allowed == should_allow_write, (
-                        f"Value '{value}' should {'allow' if should_allow_write else 'not allow'} write"
-                    )
-                else:
-                    assert config.yolo_mode == "read"
-                    # Check permissions block write
-                    access_controller = AccessController(config)
-                    allowed, _ = access_controller.check_operation_allowed("res.partner", "write")
-                    assert not allowed, "Read mode should not allow write"
-            else:
-                # "off" mode
-                assert not config.is_yolo_enabled
-                assert config.yolo_mode == "off"
-
-        # Test invalid YOLO mode values - should raise ValueError
-        invalid_cases = [
-            "True",  # Wrong case
-            "1",  # Not accepted
-            "yes",  # Not accepted
-            "on",  # Not accepted
-            "false",  # Not accepted
-            "full",  # Not accepted
-            "",  # Empty string
-        ]
-
-        for value in invalid_cases:
-            with pytest.raises(ValueError, match="Invalid YOLO mode"):
-                OdooConfig(
-                    url="http://localhost:8069",
-                    database=os.getenv("ODOO_DB", "mcp-18"),
-                    username=os.getenv("ODOO_USER", "admin"),
-                    password=os.getenv("ODOO_PASSWORD", "admin"),
-                    yolo_mode=value,
-                )
-
-    @pytest.mark.asyncio
     async def test_no_mcp_module_required(self, config_full_access):
         """Test that YOLO mode works without MCP module installed in Odoo."""
         # This test verifies YOLO mode connects to standard endpoints
@@ -528,3 +451,56 @@ class TestYoloModeE2E:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
+
+
+class TestYoloOptInValidation:
+    """Unit tests for YOLO mode opt-in validation (no Odoo needed)."""
+
+    def test_explicit_opt_in_requirement(self):
+        """Test that only 'true' enables full access, not other truthy values."""
+        valid_cases = [
+            ("true", True),
+            ("read", False),
+            ("off", False),
+        ]
+
+        for value, should_allow_write in valid_cases:
+            config = OdooConfig(
+                url=os.getenv("ODOO_URL", "http://localhost:8069"),
+                database=os.getenv("ODOO_DB"),
+                username=os.getenv("ODOO_USER", "admin"),
+                password=os.getenv("ODOO_PASSWORD", "admin"),
+                yolo_mode=value,
+            )
+
+            if value in ["true", "read"]:
+                assert config.is_yolo_enabled
+
+                if value == "true":
+                    assert config.yolo_mode == "true"
+                    access_controller = AccessController(config)
+                    allowed, _ = access_controller.check_operation_allowed("res.partner", "write")
+                    assert allowed == should_allow_write, (
+                        f"Value '{value}' should"
+                        f" {'allow' if should_allow_write else 'not allow'} write"
+                    )
+                else:
+                    assert config.yolo_mode == "read"
+                    access_controller = AccessController(config)
+                    allowed, _ = access_controller.check_operation_allowed("res.partner", "write")
+                    assert not allowed, "Read mode should not allow write"
+            else:
+                assert not config.is_yolo_enabled
+                assert config.yolo_mode == "off"
+
+        invalid_cases = ["True", "1", "yes", "on", "false", "full", ""]
+
+        for value in invalid_cases:
+            with pytest.raises(ValueError, match="Invalid YOLO mode"):
+                OdooConfig(
+                    url="http://localhost:8069",
+                    database=os.getenv("ODOO_DB", "mcp-18"),
+                    username=os.getenv("ODOO_USER", "admin"),
+                    password=os.getenv("ODOO_PASSWORD", "admin"),
+                    yolo_mode=value,
+                )

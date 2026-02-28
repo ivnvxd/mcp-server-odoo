@@ -34,7 +34,6 @@ from mcp_server_odoo.logging_config import (
     StructuredFormatter,
     log_request,
     log_response,
-    logging_config,
     perf_logger,
     setup_logging,
 )
@@ -238,22 +237,29 @@ class TestErrorHandler:
         assert "uptime_seconds" in metrics
 
     def test_error_history_limit(self):
-        """Test that error history respects size limit."""
+        """Test that error history respects max size while total count tracks all."""
         handler = ErrorHandler()
         handler._max_history_size = 5
         handler.clear_metrics()
 
-        # Add more errors than the limit
         for i in range(10):
             handler.handle_error(
                 ValidationError(f"Error {i}"),
                 reraise=False,
             )
 
-        # Check that only the last 5 are kept
+        # History is capped at 5
         recent = handler.get_recent_errors(limit=10)
         assert len(recent) == 5
-        # Messages are sanitized, but we can verify the history is properly limited
+
+        # But total counter tracks all 10 errors
+        assert handler.metrics.total_errors == 10
+
+        # All entries should have valid structure
+        for entry in recent:
+            assert "error" in entry
+            assert "timestamp" in entry["error"]
+            assert entry["error"]["code"] == "VALIDATION_ERROR"
 
 
 class TestOdooErrorHandling:
@@ -346,6 +352,43 @@ class TestUserErrorFormatting:
         assert "Unable to connect to Odoo" in formatted
         assert "check your connection settings" in formatted
 
+    def test_format_authentication_error(self):
+        """Test formatting authentication errors."""
+        error = AuthenticationError("Invalid credentials")
+
+        formatted = format_user_error(error)
+
+        assert "Invalid credentials" in formatted
+        assert "Please check your credentials and try again" in formatted
+
+    def test_format_system_error(self):
+        """Test formatting system errors."""
+        error = SystemError("Internal failure")
+
+        formatted = format_user_error(error)
+
+        assert "Internal failure" in formatted
+        assert "An unexpected error occurred. Please try again later" in formatted
+
+    def test_format_configuration_error(self):
+        """Test formatting configuration errors."""
+        error = ConfigurationError("Missing database setting")
+
+        formatted = format_user_error(error)
+
+        assert "Missing database setting" in formatted
+        assert "Server configuration error" in formatted
+        assert "contact your administrator" in formatted
+
+    def test_format_rate_limit_error(self):
+        """Test formatting rate limit errors."""
+        error = RateLimitError("Too many requests")
+
+        formatted = format_user_error(error)
+
+        assert "Too many requests" in formatted
+        assert "Please wait a moment and try again" in formatted
+
 
 class TestLoggingConfiguration:
     """Test logging configuration and utilities."""
@@ -408,7 +451,7 @@ class TestLoggingConfiguration:
         assert call_args[1]["extra"]["duration_ms"] > 0
 
     def test_setup_logging(self):
-        """Test logging setup."""
+        """Test logging setup writes valid JSON to file."""
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             setup_logging(
                 log_level="DEBUG",
@@ -419,9 +462,19 @@ class TestLoggingConfiguration:
             logger = logging.getLogger("test")
             logger.debug("Test debug message")
 
-            # Check that file was written
-            assert os.path.exists(tmp.name)
-            assert os.path.getsize(tmp.name) > 0
+            # Force flush all handlers
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+
+            # Read and verify file content
+            with open(tmp.name) as f:
+                content = f.read()
+            assert len(content) > 0
+            # Verify at least one line is valid JSON
+            for line in content.strip().split("\n"):
+                if line.strip():
+                    parsed = json.loads(line)
+                    assert "message" in parsed
 
             # Clean up
             os.unlink(tmp.name)
@@ -507,15 +560,13 @@ class TestGlobalInstances:
         metrics = error_handler.get_metrics()
         assert metrics["total_errors"] == 1
 
-    def test_global_perf_logger(self):
-        """Test that global performance logger works."""
-        with perf_logger.track_operation("test_operation"):
-            time.sleep(0.01)
+    def test_global_perf_logger(self, caplog):
+        """Test that global performance logger tracks operations."""
+        with caplog.at_level(logging.DEBUG):
+            with perf_logger.track_operation("test_operation"):
+                time.sleep(0.01)
 
-        # Operation should complete without error
-
-    def test_global_logging_config(self):
-        """Test that global logging config works."""
-        assert isinstance(logging_config, LoggingConfig)
-        assert hasattr(logging_config, "log_level")
-        assert hasattr(logging_config, "setup")
+        # Verify the operation was actually tracked — check real log output
+        perf_messages = [r.message for r in caplog.records if "test_operation" in r.message]
+        assert len(perf_messages) >= 1, "Performance logger should have logged the operation"
+        assert "completed in" in perf_messages[0]

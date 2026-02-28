@@ -44,8 +44,8 @@ class StdioTransportTester(TransportTestBase):
                 text=True,
                 bufsize=0,
             )
-            time.sleep(2)  # Give server time to start
-            return True
+            time.sleep(0.5)  # Stdio server — no port to poll
+            return self.process.poll() is None
         except Exception as e:
             print(f"Failed to start stdio server: {e}")
             return False
@@ -117,9 +117,9 @@ class StdioTransportTester(TransportTestBase):
 
 
 class HttpTransportTester(TransportTestBase):
-    """Test streamable-http transport."""
+    """Test streamable-http transport with async methods."""
 
-    def __init__(self, base_url: str = "http://localhost:8001/mcp/"):
+    def __init__(self, base_url: str = "http://localhost:8002/mcp/"):
         self.base_url = base_url.rstrip("/") + "/"
         self.session = requests.Session()
         self.session_id: Optional[str] = None
@@ -131,12 +131,14 @@ class HttpTransportTester(TransportTestBase):
         self.request_id += 1
         return self.request_id
 
-    def start_server(self, port: int = 8001, timeout: int = 5) -> bool:
-        """Start HTTP server."""
+    async def start_server(self, port: int = 8002, timeout: int = 10) -> bool:
+        """Start HTTP server, polling until it accepts connections."""
+        import asyncio
+
         try:
             self.server_process = subprocess.Popen(
                 [
-                    "python",
+                    sys.executable,
                     "-m",
                     "mcp_server_odoo",
                     "--transport",
@@ -147,15 +149,23 @@ class HttpTransportTester(TransportTestBase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            time.sleep(3)  # Give server time to start
 
-            # Test if server is responding
-            try:
-                requests.get(f"http://localhost:{port}/", timeout=2)
-                return True
-            except requests.exceptions.RequestException:
-                # Server might not have a root endpoint, that's OK
-                return True
+            # Poll until the server accepts connections instead of a fixed sleep
+            import socket
+
+            for _ in range(timeout * 10):
+                if self.server_process.poll() is not None:
+                    return False
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    sock.connect(("localhost", port))
+                    sock.close()
+                    return True
+                except OSError:
+                    sock.close()
+                    await asyncio.sleep(0.1)
+
+            return self.server_process.poll() is None
 
         except Exception as e:
             print(f"Failed to start HTTP server: {e}")
@@ -165,10 +175,14 @@ class HttpTransportTester(TransportTestBase):
         """Stop HTTP server."""
         if self.server_process:
             self.server_process.terminate()
-            self.server_process.wait(timeout=5)
+            try:
+                self.server_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.server_process.kill()
+                self.server_process.wait()
             self.server_process = None
 
-    def _send_request(
+    async def _send_request(
         self, method: str, params: Dict[str, Any], request_id: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
         """Send HTTP request and return response."""
@@ -186,13 +200,11 @@ class HttpTransportTester(TransportTestBase):
             payload["id"] = request_id
 
         try:
-            response = self.session.post(self.base_url, json=payload, headers=headers, timeout=10)
+            response = self.session.post(self.base_url, json=payload, headers=headers, timeout=15)
 
-            # Update session ID if provided
             if "mcp-session-id" in response.headers:
                 self.session_id = response.headers["mcp-session-id"]
 
-            # Parse SSE response
             if response.status_code == 200:
                 events = self.parse_sse_response(response.text)
                 for event in events:
@@ -208,39 +220,3 @@ class HttpTransportTester(TransportTestBase):
 
         except Exception as e:
             return {"error": str(e)}
-
-    def test_basic_flow(self) -> bool:
-        """Test basic HTTP flow."""
-        # Initialize
-        init_params = {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
-            "clientInfo": {"name": "http-test-client", "version": "1.0.0"},
-        }
-
-        response = self._send_request("initialize", init_params, self._next_id())
-        if not response or "error" in response or "result" not in response:
-            print(f"Initialize failed: {response}")
-            return False
-
-        if not self.session_id:
-            print("No session ID received")
-            return False
-
-        # Send initialized notification
-        self._send_request("notifications/initialized", {})
-
-        # Test tools/list
-        response = self._send_request("tools/list", {}, self._next_id())
-        if not response or "error" in response:
-            print(f"Tools/list failed: {response}")
-            return False
-
-        return "result" in response
-
-    def test_tool_call(self, tool_name: str, arguments: Dict[str, Any]) -> bool:
-        """Test calling a specific tool."""
-        params = {"name": tool_name, "arguments": arguments}
-
-        response = self._send_request("tools/call", params, self._next_id())
-        return response is not None and "error" not in response
