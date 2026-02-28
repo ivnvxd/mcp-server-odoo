@@ -514,14 +514,16 @@ class TestGlobalInstances:
         metrics = error_handler.get_metrics()
         assert metrics["total_errors"] == 1
 
-    def test_global_perf_logger(self):
+    def test_global_perf_logger(self, caplog):
         """Test that global performance logger tracks operations."""
-        with perf_logger.track_operation("test_operation"):
-            time.sleep(0.01)
+        with caplog.at_level(logging.DEBUG):
+            with perf_logger.track_operation("test_operation"):
+                time.sleep(0.01)
 
-        # Verify the operation was actually tracked by checking the logger recorded it
-        assert perf_logger is not None
-        assert hasattr(perf_logger, "track_operation")
+        # Verify the operation was actually tracked — check real log output
+        perf_messages = [r.message for r in caplog.records if "test_operation" in r.message]
+        assert len(perf_messages) >= 1, "Performance logger should have logged the operation"
+        assert "completed in" in perf_messages[0]
 
     def test_global_logging_config(self):
         """Test that global logging config works."""

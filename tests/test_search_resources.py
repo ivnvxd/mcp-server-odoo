@@ -423,5 +423,5 @@ class TestSearchResourceIntegration:
         assert "Fields: name, email, country_id" in result
         assert "Page 1 of" in result
 
-        # Should have actual partner data
-        assert "email:" in result or "Not set" in result
+        # Should have actual partner data — verify at least one record was returned
+        assert "Record " in result or "name:" in result

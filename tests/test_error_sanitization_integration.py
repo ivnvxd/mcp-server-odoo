@@ -41,15 +41,9 @@ class TestErrorSanitizationIntegration:
     @pytest.mark.asyncio
     async def test_tool_xmlrpc_fault_sanitization(self, tool_handler):
         """Test that XML-RPC faults are sanitized in tool errors."""
-        # Mock XML-RPC fault from Odoo
-        import xmlrpc.client
-
-        # Create XML-RPC fault (not used directly, but shows what the error originated from)
-        xmlrpc.client.Fault(
-            1,
-            "Internal Server Error in MCPObjectController: Invalid field res.partner.bogus_field in leaf ('bogus_field', '=', True)",
-        )
-
+        # OdooConnection.execute_kw wraps XML-RPC Faults into OdooConnectionError
+        # with sanitized messages. Here we test the tool layer's handling of
+        # the already-wrapped error.
         tool_handler.connection.is_authenticated = True
         tool_handler.connection.search_count.side_effect = OdooConnectionError(
             "Operation failed: Invalid field 'bogus_field' in search criteria"
@@ -184,4 +178,4 @@ class TestErrorSanitizationIntegration:
         assert "_serve_db" not in sanitized
 
         # Should contain useful information
-        assert "Invalid field" in sanitized or "error" in sanitized.lower()
+        assert "Invalid field" in sanitized

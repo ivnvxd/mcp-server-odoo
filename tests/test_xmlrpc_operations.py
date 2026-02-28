@@ -1,7 +1,8 @@
-"""Tests for XML-RPC operations in OdooConnection.
+"""Tests for XML-RPC communication layer in OdooConnection.
 
-This module tests the XML-RPC communication layer including execute methods
-and core Odoo operations.
+Focuses on execute_kw/execute wrappers, error mapping (XML-RPC faults,
+timeouts), and credential routing. CRUD operation tests (search, read,
+create, write, unlink) are in test_odoo_connection_crud.py.
 """
 
 import os
@@ -154,130 +155,6 @@ class TestXMLRPCOperations:
         # Should raise timeout error
         with pytest.raises(OdooConnectionError, match="timeout"):
             authenticated_connection.execute_kw("res.partner", "search", [[]], {})
-
-    def test_search_operation(self, authenticated_connection):
-        """Test search operation."""
-        # Mock object proxy
-        mock_proxy = Mock()
-        mock_proxy.execute_kw.return_value = [1, 2, 3]
-        authenticated_connection._object_proxy = mock_proxy
-
-        # Search
-        result = authenticated_connection.search(
-            "res.partner", [["is_company", "=", True]], limit=5
-        )
-
-        assert result == [1, 2, 3]
-
-        # Verify call
-        mock_proxy.execute_kw.assert_called_once_with(
-            os.getenv("ODOO_DB", "db"),
-            2,
-            "test_api_key",
-            "res.partner",
-            "search",
-            [[["is_company", "=", True]]],
-            {"limit": 5},
-        )
-
-    def test_read_operation(self, authenticated_connection):
-        """Test read operation."""
-        # Mock object proxy
-        mock_proxy = Mock()
-        mock_proxy.execute_kw.return_value = [
-            {"id": 1, "name": "Company A"},
-            {"id": 2, "name": "Company B"},
-        ]
-        authenticated_connection._object_proxy = mock_proxy
-
-        # Read
-        result = authenticated_connection.read("res.partner", [1, 2], ["name", "email"])
-
-        assert len(result) == 2
-        assert result[0]["name"] == "Company A"
-
-        # Verify call
-        mock_proxy.execute_kw.assert_called_once_with(
-            os.getenv("ODOO_DB", "db"),
-            2,
-            "test_api_key",
-            "res.partner",
-            "read",
-            [[1, 2]],
-            {"fields": ["name", "email"]},
-        )
-
-    def test_search_read_operation(self, authenticated_connection):
-        """Test search_read operation."""
-        # Mock object proxy
-        mock_proxy = Mock()
-        mock_proxy.execute_kw.return_value = [
-            {"id": 1, "name": "Company A", "email": "a@example.com"}
-        ]
-        authenticated_connection._object_proxy = mock_proxy
-
-        # Search and read
-        result = authenticated_connection.search_read(
-            "res.partner", [["is_company", "=", True]], ["name", "email"], limit=1
-        )
-
-        assert len(result) == 1
-        assert result[0]["email"] == "a@example.com"
-
-        # Verify call
-        mock_proxy.execute_kw.assert_called_once_with(
-            os.getenv("ODOO_DB", "db"),
-            2,
-            "test_api_key",
-            "res.partner",
-            "search_read",
-            [[["is_company", "=", True]]],
-            {"fields": ["name", "email"], "limit": 1},
-        )
-
-    def test_fields_get_operation(self, authenticated_connection):
-        """Test fields_get operation."""
-        # Mock object proxy
-        mock_proxy = Mock()
-        mock_proxy.execute_kw.return_value = {
-            "name": {"type": "char", "string": "Name", "required": True},
-            "email": {"type": "char", "string": "Email"},
-        }
-        authenticated_connection._object_proxy = mock_proxy
-
-        # Get fields
-        result = authenticated_connection.fields_get("res.partner")
-
-        assert "name" in result
-        assert result["name"]["type"] == "char"
-
-        # Verify call
-        mock_proxy.execute_kw.assert_called_once_with(
-            os.getenv("ODOO_DB", "db"), 2, "test_api_key", "res.partner", "fields_get", [], {}
-        )
-
-    def test_search_count_operation(self, authenticated_connection):
-        """Test search_count operation."""
-        # Mock object proxy
-        mock_proxy = Mock()
-        mock_proxy.execute_kw.return_value = 42
-        authenticated_connection._object_proxy = mock_proxy
-
-        # Count records
-        result = authenticated_connection.search_count("res.partner", [["is_company", "=", True]])
-
-        assert result == 42
-
-        # Verify call
-        mock_proxy.execute_kw.assert_called_once_with(
-            os.getenv("ODOO_DB", "db"),
-            2,
-            "test_api_key",
-            "res.partner",
-            "search_count",
-            [[["is_company", "=", True]]],
-            {},
-        )
 
     def test_password_auth_uses_password(self, config):
         """Test that password auth uses password for execute_kw."""
