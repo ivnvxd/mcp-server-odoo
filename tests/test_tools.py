@@ -72,11 +72,17 @@ class TestOdooToolHandler:
         assert handler.config is not None
 
     def test_tools_registered(self, handler, mock_app):
-        """Test that tools are registered with FastMCP."""
-        # Check that all three tools are registered
-        assert "search_records" in mock_app._tools
-        assert "get_record" in mock_app._tools
-        assert "list_models" in mock_app._tools
+        """Test that all tools are registered with FastMCP."""
+        expected_tools = {
+            "search_records",
+            "get_record",
+            "list_models",
+            "create_record",
+            "update_record",
+            "delete_record",
+            "list_resource_templates",
+        }
+        assert set(mock_app._tools.keys()) == expected_tools
 
     @pytest.mark.asyncio
     async def test_search_records_success(
@@ -804,6 +810,493 @@ class TestOdooToolHandler:
         result = await search_records(model="res.partner", fields=["name"], limit=10, ctx=ctx)
         assert result.total == 1
         assert len(result.records) == 1
+
+
+class TestCreateRecordTool:
+    """Test cases for create_record tool."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=FastMCP)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        return connection
+
+    @pytest.fixture
+    def mock_access_controller(self):
+        return MagicMock(spec=AccessController)
+
+    @pytest.fixture
+    def valid_config(self):
+        return OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            database="test_db",
+        )
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+
+    @pytest.mark.asyncio
+    async def test_create_record_success(self, handler, mock_connection, mock_app):
+        """Test successful record creation returns CreateResult with correct data."""
+        mock_connection.create.return_value = 42
+        mock_connection.read.return_value = [{"id": 42, "display_name": "New Partner"}]
+        mock_connection.build_record_url.return_value = "http://localhost:8069/odoo/res.partner/42"
+
+        create_record = mock_app._tools["create_record"]
+        result = await create_record(model="res.partner", values={"name": "New Partner"})
+
+        assert result.success is True
+        assert result.record["id"] == 42
+        assert result.record["display_name"] == "New Partner"
+        assert result.url == "http://localhost:8069/odoo/res.partner/42"
+        assert "42" in result.message
+
+        mock_connection.create.assert_called_once_with("res.partner", {"name": "New Partner"})
+        mock_connection.read.assert_called_once_with("res.partner", [42], ["id", "display_name"])
+
+    @pytest.mark.asyncio
+    async def test_create_record_empty_values(self, handler, mock_app):
+        """Test create_record rejects empty values."""
+        create_record = mock_app._tools["create_record"]
+        with pytest.raises(ValidationError, match="No values provided"):
+            await create_record(model="res.partner", values={})
+
+    @pytest.mark.asyncio
+    async def test_create_record_not_authenticated(self, handler, mock_connection, mock_app):
+        """Test create_record when not authenticated."""
+        mock_connection.is_authenticated = False
+        create_record = mock_app._tools["create_record"]
+        with pytest.raises(ValidationError, match="Not authenticated"):
+            await create_record(model="res.partner", values={"name": "Test"})
+
+    @pytest.mark.asyncio
+    async def test_create_record_access_denied(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Test create_record with access denied checks 'create' permission."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+        create_record = mock_app._tools["create_record"]
+        with pytest.raises(ValidationError, match="Access denied"):
+            await create_record(model="res.partner", values={"name": "Test"})
+        mock_access_controller.validate_model_access.assert_called_once_with(
+            "res.partner", "create"
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_record_connection_error(self, handler, mock_connection, mock_app):
+        """Test create_record with connection error."""
+        mock_connection.create.side_effect = OdooConnectionError("Connection lost")
+        create_record = mock_app._tools["create_record"]
+        with pytest.raises(ValidationError, match="Connection error"):
+            await create_record(model="res.partner", values={"name": "Test"})
+
+
+class TestUpdateRecordTool:
+    """Test cases for update_record tool."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=FastMCP)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        return connection
+
+    @pytest.fixture
+    def mock_access_controller(self):
+        return MagicMock(spec=AccessController)
+
+    @pytest.fixture
+    def valid_config(self):
+        return OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            database="test_db",
+        )
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+
+    @pytest.mark.asyncio
+    async def test_update_record_success(self, handler, mock_connection, mock_app):
+        """Test successful record update with existence check and result read."""
+        # First read: existence check returns [{"id": 10}]
+        # Second read: post-update fetch returns updated record
+        mock_connection.read.side_effect = [
+            [{"id": 10}],  # existence check
+            [{"id": 10, "display_name": "Updated Partner"}],  # post-update read
+        ]
+        mock_connection.write.return_value = True
+        mock_connection.build_record_url.return_value = "http://localhost:8069/odoo/res.partner/10"
+
+        update_record = mock_app._tools["update_record"]
+        result = await update_record(
+            model="res.partner", record_id=10, values={"name": "Updated Partner"}
+        )
+
+        assert result.success is True
+        assert result.record["id"] == 10
+        assert result.record["display_name"] == "Updated Partner"
+        assert "10" in result.message
+
+        # Verify existence check then post-update read
+        assert mock_connection.read.call_count == 2
+        mock_connection.read.assert_any_call("res.partner", [10], ["id"])
+        mock_connection.read.assert_any_call("res.partner", [10], ["id", "display_name"])
+        mock_connection.write.assert_called_once_with(
+            "res.partner", [10], {"name": "Updated Partner"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_record_not_found(self, handler, mock_connection, mock_app):
+        """Test update_record when record doesn't exist."""
+        mock_connection.read.return_value = []  # existence check fails
+        update_record = mock_app._tools["update_record"]
+        with pytest.raises(ValidationError, match="Record not found"):
+            await update_record(model="res.partner", record_id=999, values={"name": "Test"})
+        # Should not attempt write
+        mock_connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_record_empty_values(self, handler, mock_app):
+        """Test update_record rejects empty values."""
+        update_record = mock_app._tools["update_record"]
+        with pytest.raises(ValidationError, match="No values provided"):
+            await update_record(model="res.partner", record_id=1, values={})
+
+    @pytest.mark.asyncio
+    async def test_update_record_access_denied(self, handler, mock_access_controller, mock_app):
+        """Test update_record checks 'write' permission."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+        update_record = mock_app._tools["update_record"]
+        with pytest.raises(ValidationError, match="Access denied"):
+            await update_record(model="res.partner", record_id=1, values={"name": "Test"})
+        mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "write")
+
+    @pytest.mark.asyncio
+    async def test_update_record_not_authenticated(self, handler, mock_connection, mock_app):
+        """Test update_record when not authenticated."""
+        mock_connection.is_authenticated = False
+        update_record = mock_app._tools["update_record"]
+        with pytest.raises(ValidationError, match="Not authenticated"):
+            await update_record(model="res.partner", record_id=1, values={"name": "Test"})
+
+
+class TestDeleteRecordTool:
+    """Test cases for delete_record tool."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=FastMCP)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        return connection
+
+    @pytest.fixture
+    def mock_access_controller(self):
+        return MagicMock(spec=AccessController)
+
+    @pytest.fixture
+    def valid_config(self):
+        return OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            database="test_db",
+        )
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+
+    @pytest.mark.asyncio
+    async def test_delete_record_success(self, handler, mock_connection, mock_app):
+        """Test successful record deletion with pre-delete info fetch."""
+        mock_connection.read.return_value = [{"id": 5, "display_name": "Old Partner"}]
+        mock_connection.unlink.return_value = True
+
+        delete_record = mock_app._tools["delete_record"]
+        result = await delete_record(model="res.partner", record_id=5)
+
+        assert result.success is True
+        assert result.deleted_id == 5
+        assert result.deleted_name == "Old Partner"
+        assert "Old Partner" in result.message
+
+        mock_connection.read.assert_called_once_with("res.partner", [5], ["id", "display_name"])
+        mock_connection.unlink.assert_called_once_with("res.partner", [5])
+
+    @pytest.mark.asyncio
+    async def test_delete_record_not_found(self, handler, mock_connection, mock_app):
+        """Test delete_record when record doesn't exist."""
+        mock_connection.read.return_value = []
+        delete_record = mock_app._tools["delete_record"]
+        with pytest.raises(ValidationError, match="Record not found"):
+            await delete_record(model="res.partner", record_id=999)
+        mock_connection.unlink.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_record_access_denied(self, handler, mock_access_controller, mock_app):
+        """Test delete_record checks 'unlink' permission."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+        delete_record = mock_app._tools["delete_record"]
+        with pytest.raises(ValidationError, match="Access denied"):
+            await delete_record(model="res.partner", record_id=1)
+        mock_access_controller.validate_model_access.assert_called_once_with(
+            "res.partner", "unlink"
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_record_not_authenticated(self, handler, mock_connection, mock_app):
+        """Test delete_record when not authenticated."""
+        mock_connection.is_authenticated = False
+        delete_record = mock_app._tools["delete_record"]
+        with pytest.raises(ValidationError, match="Not authenticated"):
+            await delete_record(model="res.partner", record_id=1)
+
+    @pytest.mark.asyncio
+    async def test_delete_record_connection_error(self, handler, mock_connection, mock_app):
+        """Test delete_record with connection error during unlink."""
+        mock_connection.read.return_value = [{"id": 1, "display_name": "Test"}]
+        mock_connection.unlink.side_effect = OdooConnectionError("Connection lost")
+        delete_record = mock_app._tools["delete_record"]
+        with pytest.raises(ValidationError, match="Connection error"):
+            await delete_record(model="res.partner", record_id=1)
+
+
+class TestListModelsTool:
+    """Test YOLO-mode list_models which has a completely separate code path."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=FastMCP)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        return connection
+
+    @pytest.fixture
+    def mock_access_controller(self):
+        return MagicMock(spec=AccessController)
+
+    @pytest.fixture
+    def yolo_read_config(self):
+        return OdooConfig(
+            url="http://localhost:8069",
+            username="admin",
+            password="admin",
+            database="test_db",
+            yolo_mode="read",
+        )
+
+    @pytest.fixture
+    def yolo_full_config(self):
+        return OdooConfig(
+            url="http://localhost:8069",
+            username="admin",
+            password="admin",
+            database="test_db",
+            yolo_mode="true",
+        )
+
+    @pytest.fixture
+    def yolo_handler(self, mock_app, mock_connection, mock_access_controller, yolo_read_config):
+        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, yolo_read_config)
+
+    @pytest.mark.asyncio
+    async def test_list_models_yolo_read_mode(self, yolo_handler, mock_connection, mock_app):
+        """Test list_models in YOLO read mode queries ir.model directly."""
+        mock_connection.search_read.return_value = [
+            {"model": "res.partner", "name": "Contact"},
+            {"model": "sale.order", "name": "Sales Order"},
+        ]
+
+        list_models = mock_app._tools["list_models"]
+        result = await list_models()
+
+        # YOLO mode returns a ModelsResult with yolo_mode as YoloModeInfo
+        assert result.yolo_mode is not None
+        assert result.yolo_mode.enabled is True
+        assert result.yolo_mode.level == "read"
+        assert result.yolo_mode.operations.read is True
+        assert result.yolo_mode.operations.write is False
+
+        assert result.total == 2
+        assert result.models[0].model == "res.partner"
+        assert result.models[1].model == "sale.order"
+
+        # Verify ir.model was queried directly
+        mock_connection.search_read.assert_called_once()
+        call_args = mock_connection.search_read.call_args
+        assert call_args[0][0] == "ir.model"
+
+    @pytest.mark.asyncio
+    async def test_list_models_yolo_full_mode(
+        self, mock_app, mock_connection, mock_access_controller, yolo_full_config
+    ):
+        """Test list_models in YOLO full mode enables write operations."""
+        OdooToolHandler(mock_app, mock_connection, mock_access_controller, yolo_full_config)
+        mock_connection.search_read.return_value = [
+            {"model": "res.partner", "name": "Contact"},
+        ]
+
+        list_models = mock_app._tools["list_models"]
+        result = await list_models()
+
+        assert result.yolo_mode.level == "true"
+        assert result.yolo_mode.operations.read is True
+        assert result.yolo_mode.operations.write is True
+        assert result.yolo_mode.operations.create is True
+        assert result.yolo_mode.operations.unlink is True
+
+    @pytest.mark.asyncio
+    async def test_list_models_yolo_query_error(self, yolo_handler, mock_connection, mock_app):
+        """Test list_models in YOLO mode when ir.model query fails."""
+        mock_connection.search_read.side_effect = Exception("Database error")
+
+        list_models = mock_app._tools["list_models"]
+        result = await list_models()
+
+        # Should return error structure, not raise
+        assert result.yolo_mode.operations.read is False
+        assert result.models == []
+        assert result.total == 0
+
+
+class TestSearchRecordReturnValue:
+    """Test that search_records return value is checked, not just mock calls."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=FastMCP)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        return connection
+
+    @pytest.fixture
+    def mock_access_controller(self):
+        return MagicMock(spec=AccessController)
+
+    @pytest.fixture
+    def valid_config(self):
+        return OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            database="test_db",
+        )
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+
+    @pytest.mark.asyncio
+    async def test_search_with_complex_domain_checks_result(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Test search_records with complex domain verifies the actual return value."""
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.search_count.return_value = 5
+        mock_connection.search.return_value = [1, 2]
+        mock_connection.read.return_value = [
+            {"id": 1, "name": "Company A", "is_company": True},
+            {"id": 2, "name": "Company B", "is_company": True},
+        ]
+
+        search_records = mock_app._tools["search_records"]
+        complex_domain = [
+            "&",
+            ["is_company", "=", True],
+            "|",
+            ["name", "ilike", "Company"],
+            ["email", "!=", False],
+        ]
+        result = await search_records(model="res.partner", domain=complex_domain, limit=5)
+
+        # Actually verify the return value
+        assert result.model == "res.partner"
+        assert result.total == 5
+        assert len(result.records) == 2
+        assert result.records[0]["name"] == "Company A"
+        assert result.records[1]["name"] == "Company B"
+        assert result.limit == 5
+        assert result.offset == 0
 
 
 class TestRegisterTools:

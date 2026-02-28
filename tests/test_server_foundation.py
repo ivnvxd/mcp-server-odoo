@@ -176,32 +176,14 @@ class TestServerFoundation:
         }
 
     def test_server_logging_configuration(self, valid_config):
-        """Test that logging is properly configured."""
-        import logging
-
-        # Set a specific log level in config
+        """Test that server stores and uses the configured log level."""
         valid_config.log_level = "DEBUG"
+        server = OdooMCPServer(valid_config)
+        assert server.config.log_level == "DEBUG"
 
-        # Store original log level and handler count
-        original_level = logging.getLogger().level
-        original_handlers = logging.getLogger().handlers.copy()
-
-        try:
-            # Clear existing handlers to ensure our config takes effect
-            logging.getLogger().handlers.clear()
-
-            # Create server
-            server = OdooMCPServer(valid_config)
-
-            # The server sets up logging with basicConfig, which should have set the level
-            # However, in test environments, this might not always work as expected
-            # So we just verify the server was created with the right config
-            assert server.config.log_level == "DEBUG"
-
-        finally:
-            # Restore original level and handlers
-            logging.getLogger().setLevel(original_level)
-            logging.getLogger().handlers = original_handlers
+        valid_config.log_level = "WARNING"
+        server2 = OdooMCPServer(valid_config)
+        assert server2.config.log_level == "WARNING"
 
     @pytest.mark.asyncio
     async def test_run_stdio_success(self, server_with_mock_connection):
@@ -378,7 +360,7 @@ class TestServerFoundation:
             )
 
     def test_completion_handler_partial_match(self, valid_config):
-        """Test completion handler filters models by partial match."""
+        """Test _get_model_names filtering works for completion handler use case."""
         server = OdooMCPServer(valid_config)
         server.access_controller = Mock()
         server.access_controller.get_enabled_models.return_value = [
@@ -387,15 +369,18 @@ class TestServerFoundation:
             {"model": "sale.order"},
         ]
 
-        # Test the filtering logic used by the completion handler
+        # _get_model_names is the data source for the completion handler
         names = server._get_model_names()
+        assert names == ["res.partner", "res.users", "sale.order"]
+
+        # Simulate the filtering the handler does (partial match)
         partial = "res."
         matches = [m for m in names if partial.lower() in m.lower()]
         assert matches == ["res.partner", "res.users"]
+        assert "sale.order" not in matches
 
-    @pytest.mark.asyncio
-    async def test_completion_handler_empty_prefix(self, valid_config):
-        """Test completion handler returns all models (capped at 20) for empty prefix."""
+    def test_completion_handler_cap_at_20(self, valid_config):
+        """Test that completion would cap at 20 results via _get_model_names."""
         server = OdooMCPServer(valid_config)
         server.access_controller = Mock()
         server.access_controller.get_enabled_models.return_value = [
@@ -404,8 +389,11 @@ class TestServerFoundation:
 
         names = server._get_model_names()
         assert len(names) == 25
-        # Completion caps at 20
-        assert len(names[:20]) == 20
+        # The completion handler caps at 20 via matches[:20]
+        capped = names[:20]
+        assert len(capped) == 20
+        # Verify the cap actually excludes some models
+        assert names[20] not in capped
 
     def test_run_stdio_sync(self, server_with_mock_connection):
         """Test run_stdio_sync wrapper method."""
@@ -518,13 +506,6 @@ ODOO_MCP_LOG_LEVEL=DEBUG
         except OdooConnectionError as e:
             # Connection errors are expected if Odoo is not running
             pytest.skip(f"Integration test skipped (Odoo not available): {e}")
-        except Exception as e:
-            # Other exceptions might indicate a test issue
-            import traceback
-
-            pytest.skip(
-                f"Integration test skipped (unexpected error): {type(e).__name__}: {e}\n{traceback.format_exc()}"
-            )
         finally:
             # Always reset config for other tests
             reset_config()

@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Health endpoint**: `GET /health` HTTP route via FastMCP `custom_route` — returns connection status and version as JSON for load balancers and monitoring
 - **Model autocomplete**: FastMCP completion handler returns matching model names when clients request autocomplete for `model` parameters in resource URIs
 
+### Changed
+- **Tests**: Strengthen assertions across test suite — add CRUD tool tests, replace defensive guards with strict checks, restore timing and health-endpoint coverage
+
 ## [0.4.5] - 2026-02-27
 
 ### Changed

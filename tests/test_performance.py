@@ -350,21 +350,24 @@ class TestPerformanceMonitor:
         assert stats["operations"]["test_op"]["avg_ms"] > 0
 
     def test_multiple_operations(self):
-        """Test tracking multiple operations."""
+        """Test tracking multiple distinct operations."""
         monitor = PerformanceMonitor()
 
-        # Track multiple operations
         for _ in range(5):
             with monitor.track_operation("op1"):
                 time.sleep(0.001)
 
         for _ in range(3):
             with monitor.track_operation("op2"):
-                time.sleep(0.002)
+                time.sleep(0.005)
 
         stats = monitor.get_stats()
         assert stats["operations"]["op1"]["count"] == 5
         assert stats["operations"]["op2"]["count"] == 3
+        # Both ops have recorded positive durations
+        assert stats["operations"]["op1"]["avg_ms"] > 0
+        assert stats["operations"]["op2"]["avg_ms"] > 0
+        # op2 sleeps 5x longer, so its average should be higher
         assert stats["operations"]["op2"]["avg_ms"] > stats["operations"]["op1"]["avg_ms"]
 
 
@@ -391,7 +394,7 @@ class TestPerformanceManager:
         assert manager.monitor is not None
 
     def test_cache_key_generation(self, mock_config):
-        """Test cache key generation."""
+        """Test cache key generation for various parameter combinations."""
         manager = PerformanceManager(mock_config)
 
         # Simple key
@@ -403,14 +406,11 @@ class TestPerformanceManager:
         assert "model:res.partner" in key
         assert "fields:" in key
 
-        # Test key with None fields
-        key = manager.cache_key("record", model="res.partner", id=1, fields=None)
-        print(f"Key with fields=None: {key}")
-
-        # Test invalidation pattern
-        pattern = "record:model:res.partner:id:1:*"
-        print(f"Invalidation pattern: {pattern}")
-        print(f"Pattern matches key: {key.startswith(pattern.rstrip('*'))}")
+        # Key with fields=None should be matchable by invalidation pattern
+        key_none = manager.cache_key("record", model="res.partner", id=1, fields=None)
+        assert "record:" in key_none
+        assert "model:res.partner" in key_none
+        assert "id:1" in key_none
 
     def test_field_caching(self, mock_config):
         """Test field definition caching."""

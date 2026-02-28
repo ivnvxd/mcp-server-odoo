@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 class TestPackageStructure:
     """Test the package structure and configuration."""
@@ -30,35 +32,34 @@ class TestPackageStructure:
             assert full_path.exists(), f"Missing required file: {file_path}"
 
     def test_package_imports(self):
-        """Test that the package can be imported."""
+        """Test that the package can be imported with expected exports."""
         import mcp_server_odoo
 
-        # Check version
+        # Check version exists and is a valid semver string
         assert hasattr(mcp_server_odoo, "__version__")
-        assert mcp_server_odoo.__version__ == "0.5.0"
+        parts = mcp_server_odoo.__version__.split(".")
+        assert len(parts) == 3, f"Expected semver x.y.z, got {mcp_server_odoo.__version__}"
+        assert all(p.isdigit() for p in parts)
 
         # Check main class
         assert hasattr(mcp_server_odoo, "OdooMCPServer")
 
     def test_main_entry_point(self):
-        """Test the main entry point."""
+        """Test the main entry point responds to --help."""
         from mcp_server_odoo.__main__ import main
 
-        # Test help - argparse raises SystemExit for --help
-        try:
-            exit_code = main(["--help"])
-            assert exit_code == 0
-        except SystemExit as e:
-            assert e.code == 0
+        # argparse always raises SystemExit(0) for --help
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+        assert exc_info.value.code == 0
 
     def test_cli_help(self):
-        """Test CLI help output."""
+        """Test CLI help output contains expected content."""
         result = subprocess.run(
             [sys.executable, "-m", "mcp_server_odoo", "--help"], capture_output=True, text=True
         )
 
         assert result.returncode == 0
-        # Help output goes to stdout by default from argparse
-        help_output = result.stdout or result.stderr
-        assert "Odoo MCP Server" in help_output
-        assert "ODOO_URL" in help_output
+        # argparse sends --help to stdout
+        assert "Odoo MCP Server" in result.stdout
+        assert "ODOO_URL" in result.stdout
