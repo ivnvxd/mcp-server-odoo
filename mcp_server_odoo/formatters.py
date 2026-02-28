@@ -475,14 +475,14 @@ class DatasetFormatter:
         Returns:
             Formatted value string
         """
-        if value is None or value is False:
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if value is None:
             return "Not set"
         elif isinstance(value, (list, tuple)) and len(value) == 2:
             # Many2one value
             return f"{value[1]} (ID: {value[0]})"
         elif isinstance(value, list):
             return f"{len(value)} items"
-        elif isinstance(value, bool):
-            return "Yes" if value else "No"
         else:
             return str(value)

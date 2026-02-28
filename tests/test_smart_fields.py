@@ -268,8 +268,8 @@ class TestSmartFieldSelection:
         # Should have called read with specific fields
         tool_handler.connection.read.assert_called_once_with("res.partner", [1], fields)
 
-    def test_field_sorting(self, tool_handler):
-        """Test that fields are sorted correctly."""
+    def test_field_selection(self, tool_handler):
+        """Test that expected fields are selected by smart defaults."""
         # Mock fields_get response
         mock_fields = {
             "zip": {"type": "char", "store": True, "searchable": True},

@@ -6,6 +6,7 @@ the Odoo MCP module's REST API endpoints.
 
 import json
 import os
+import time
 import urllib.error
 from unittest.mock import MagicMock, patch
 
@@ -121,6 +122,16 @@ class TestAccessControl:
             controller._make_request("/test/endpoint")
 
     @patch("urllib.request.urlopen")
+    def test_make_request_http_500(self, mock_urlopen, controller):
+        """Test REST API request with 500 error returns generic HTTP error."""
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            None, 500, "Internal Server Error", {}, None
+        )
+
+        with pytest.raises(AccessControlError, match="HTTP error 500"):
+            controller._make_request("/test/endpoint")
+
+    @patch("urllib.request.urlopen")
     def test_make_request_url_error(self, mock_urlopen, controller):
         """Test REST API request with URLError (connection refused)."""
         mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
@@ -156,6 +167,9 @@ class TestAccessControl:
         # Set cache with short TTL
         controller.cache_ttl = 0  # Immediate expiration
         controller._set_cache("test_key", "value")
+
+        # Ensure clock has advanced past TTL
+        time.sleep(0.01)
 
         # Should be expired
         assert controller._get_from_cache("test_key") is None
@@ -524,6 +538,19 @@ class TestSessionAuth:
             cred_controller._authenticate_session()
 
     @patch("urllib.request.urlopen")
+    def test_session_retry_disabled(self, mock_urlopen, cred_controller):
+        """Test that allow_session_retry=False raises on 401 without retrying."""
+        cred_controller._session_id = "some_session"
+
+        mock_urlopen.side_effect = urllib.error.HTTPError(None, 401, "Unauthorized", {}, None)
+
+        with pytest.raises(AccessControlError, match="authentication failed"):
+            cred_controller._do_request("/mcp/models", timeout=30, allow_session_retry=False)
+
+        # Only one call — no retry attempt
+        mock_urlopen.assert_called_once()
+
+    @patch("urllib.request.urlopen")
     def test_session_auth_json_error(self, mock_urlopen, cred_controller):
         """Test session auth when server returns JSON-RPC error."""
         response = MagicMock()
@@ -607,35 +634,28 @@ class TestAccessControlIntegration:
         controller = AccessController(real_config)
 
         # Should not raise for enabled model with permission
-        try:
-            controller.validate_model_access(readable_model.model, "read")
-            print(f"{readable_model.model} read access validated")
-        except AccessControlError as e:
-            print(f"{readable_model.model} read access denied: {e}")
+        controller.validate_model_access(readable_model.model, "read")
+        print(f"{readable_model.model} read access validated")
 
         # Should raise for non-enabled model
         with pytest.raises(AccessControlError):
             controller.validate_model_access(disabled_model, "read")
 
     def test_real_cache_performance(self, real_config):
-        """Test cache improves performance."""
+        """Test cache returns consistent results on repeated calls."""
         controller = AccessController(real_config)
 
-        import time
-
-        # First call - no cache
-        start = time.time()
+        # First call populates cache
         models1 = controller.get_enabled_models()
-        time1 = time.time() - start
 
-        # Second call - from cache
-        start = time.time()
+        # Second call should return from cache
         models2 = controller.get_enabled_models()
-        time2 = time.time() - start
 
         assert models1 == models2
-        assert time2 < time1  # Cache should be faster
-        print(f"First call: {time1:.3f}s, Cached call: {time2:.3f}s")
+
+        # Verify cache is populated (deterministic check instead of timing)
+        cached = controller._get_from_cache("enabled_models")
+        assert cached is not None
 
     def test_real_all_permissions(self, real_config):
         """Test getting all permissions from real server."""
@@ -643,10 +663,12 @@ class TestAccessControlIntegration:
 
         all_perms = controller.get_all_permissions()
 
-        print(f"Retrieved permissions for {len(all_perms)} models")
+        assert isinstance(all_perms, dict)
+        assert len(all_perms) > 0
 
-        # Print a sample
+        # Verify permission structure
         for model, perms in list(all_perms.items())[:3]:
+            assert hasattr(perms, "can_read")
             print(f"{model}: read={perms.can_read}, write={perms.can_write}")
 
 

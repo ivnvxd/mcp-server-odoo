@@ -164,6 +164,11 @@ class TestFixesIntegration:
         # Should NOT have metadata (not using smart defaults)
         assert result.metadata is None
 
+        # Verify read was called without field filtering (__all__ disables smart fields)
+        tool_handler.connection.read.assert_called_once()
+        call_args = tool_handler.connection.read.call_args
+        assert call_args[0][2] is None or "__all__" not in call_args[0][2]
+
         # Should still format datetime
         assert result.record["write_date"] == "2025-06-06T13:50:23+00:00"
 
@@ -187,6 +192,11 @@ class TestFixesIntegration:
 
         # Should NOT have metadata (explicit field selection)
         assert result.metadata is None
+
+        # Verify read was called with the specific fields
+        tool_handler.connection.read.assert_called_once_with(
+            "res.partner", [1], ["name", "vat", "create_date"]
+        )
 
         # Should still format datetime
         assert result.record["create_date"] == "2025-06-06T13:50:23+00:00"

@@ -11,7 +11,7 @@ from mcp_server_odoo.error_handling import (
     ValidationError,
 )
 from mcp_server_odoo.odoo_connection import OdooConnection, OdooConnectionError
-from mcp_server_odoo.tools import OdooToolHandler, register_tools
+from mcp_server_odoo.tools import OdooToolHandler
 
 
 class TestOdooToolHandler:
@@ -64,12 +64,14 @@ class TestOdooToolHandler:
         """Create an OdooToolHandler instance."""
         return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
 
-    def test_handler_initialization(self, handler, mock_app):
-        """Test handler is properly initialized."""
-        assert handler.app == mock_app
-        assert handler.connection is not None
-        assert handler.access_controller is not None
-        assert handler.config is not None
+    def test_handler_initialization(
+        self, handler, mock_app, mock_connection, mock_access_controller, valid_config
+    ):
+        """Test handler is properly initialized with correct references."""
+        assert handler.app is mock_app
+        assert handler.connection is mock_connection
+        assert handler.access_controller is mock_access_controller
+        assert handler.config is valid_config
 
     def test_tools_registered(self, handler, mock_app):
         """Test that all tools are registered with FastMCP."""
@@ -363,7 +365,12 @@ class TestOdooToolHandler:
             ["email", "!=", False],
         ]
 
-        await search_records(model="res.partner", domain=complex_domain, limit=5)
+        result = await search_records(model="res.partner", domain=complex_domain, limit=5)
+
+        # Verify the result
+        assert result.model == "res.partner"
+        assert result.total == 5
+        assert len(result.records) == 2
 
         # Verify the domain was passed correctly
         mock_connection.search_count.assert_called_with("res.partner", complex_domain)
@@ -694,11 +701,11 @@ class TestOdooToolHandler:
             ctx=ctx,
         )
 
-        # Verify context.info was called
+        # Verify context.info was called with operation name and model
         ctx.info.assert_called()
-        # First call should mention the model
         first_call_msg = ctx.info.call_args_list[0][0][0]
         assert "res.partner" in first_call_msg
+        assert "Searching" in first_call_msg
 
     @pytest.mark.asyncio
     async def test_get_record_calls_context_info(
@@ -719,6 +726,7 @@ class TestOdooToolHandler:
         ctx.info.assert_called()
         first_msg = ctx.info.call_args_list[0][0][0]
         assert "res.partner" in first_msg
+        assert "Getting" in first_msg
 
     @pytest.mark.asyncio
     async def test_list_models_calls_context_info_and_progress(
@@ -746,6 +754,8 @@ class TestOdooToolHandler:
         await list_models(ctx=ctx)
 
         ctx.info.assert_called()
+        first_msg = ctx.info.call_args_list[0][0][0]
+        assert "Listing" in first_msg
         ctx.report_progress.assert_called()
 
     @pytest.mark.asyncio
@@ -767,6 +777,7 @@ class TestOdooToolHandler:
         ctx.info.assert_called()
         first_msg = ctx.info.call_args_list[0][0][0]
         assert "res.partner" in first_msg
+        assert "Creating" in first_msg
 
     @pytest.mark.asyncio
     async def test_search_all_fields_sends_warning(
@@ -1423,27 +1434,92 @@ class TestSearchRecordReturnValue:
         assert result.offset == 0
 
 
-class TestRegisterTools:
-    """Test cases for register_tools function."""
+class TestToolEdgeCases:
+    """Test edge cases and error paths in tool handlers."""
 
-    def test_register_tools_success(self):
-        """Test successful registration of tools."""
-        # Create mocks
-        mock_app = MagicMock(spec=FastMCP)
-        mock_connection = MagicMock(spec=OdooConnection)
-        mock_access_controller = MagicMock(spec=AccessController)
-        config = OdooConfig(
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=FastMCP)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        return connection
+
+    @pytest.fixture
+    def mock_access_controller(self):
+        return MagicMock(spec=AccessController)
+
+    @pytest.fixture
+    def valid_config(self):
+        return OdooConfig(
             url="http://localhost:8069",
-            api_key="test_key",
+            api_key="test_api_key",
             database="test_db",
         )
 
-        # Register tools
-        handler = register_tools(mock_app, mock_connection, mock_access_controller, config)
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
 
-        # Verify handler is returned
-        assert isinstance(handler, OdooToolHandler)
-        assert handler.app == mock_app
-        assert handler.connection == mock_connection
-        assert handler.access_controller == mock_access_controller
-        assert handler.config == config
+    @pytest.mark.asyncio
+    async def test_list_models_access_controller_failure(
+        self, handler, mock_access_controller, mock_app
+    ):
+        """Test list_models raises ValidationError when get_enabled_models raises RuntimeError."""
+        mock_access_controller.get_enabled_models.side_effect = RuntimeError(
+            "API endpoint unreachable"
+        )
+
+        list_models = mock_app._tools["list_models"]
+
+        with pytest.raises(ValidationError) as exc_info:
+            await list_models()
+
+        assert "Failed to list models" in str(exc_info.value)
+        assert "API endpoint unreachable" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_search_records_domain_not_list(self, handler, mock_access_controller, mock_app):
+        """Test search_records rejects a JSON string that parses to a dict instead of list."""
+        search_records = mock_app._tools["search_records"]
+
+        with pytest.raises(ValidationError) as exc_info:
+            await search_records(model="res.partner", domain='{"key": "value"}', limit=10)
+
+        assert "Domain must be a list, got dict" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_search_records_fields_not_list(self, handler, mock_access_controller, mock_app):
+        """Test search_records rejects a JSON string that parses to a str instead of list."""
+        search_records = mock_app._tools["search_records"]
+
+        with pytest.raises(ValidationError) as exc_info:
+            await search_records(model="res.partner", fields='"name"', limit=10)
+
+        assert "Fields must be a list, got str" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_create_record_generic_exception(self, handler, mock_connection, mock_app):
+        """Test create_record wraps unexpected RuntimeError in ValidationError."""
+        mock_connection.create.side_effect = RuntimeError("unexpected")
+
+        create_record = mock_app._tools["create_record"]
+
+        with pytest.raises(ValidationError) as exc_info:
+            await create_record(model="res.partner", values={"name": "Test"})
+
+        assert "Failed to create record" in str(exc_info.value)
+        assert "unexpected" in str(exc_info.value).lower()

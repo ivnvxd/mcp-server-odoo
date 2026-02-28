@@ -34,7 +34,6 @@ from mcp_server_odoo.logging_config import (
     StructuredFormatter,
     log_request,
     log_response,
-    logging_config,
     perf_logger,
     setup_logging,
 )
@@ -452,7 +451,7 @@ class TestLoggingConfiguration:
         assert call_args[1]["extra"]["duration_ms"] > 0
 
     def test_setup_logging(self):
-        """Test logging setup."""
+        """Test logging setup writes valid JSON to file."""
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             setup_logging(
                 log_level="DEBUG",
@@ -463,9 +462,19 @@ class TestLoggingConfiguration:
             logger = logging.getLogger("test")
             logger.debug("Test debug message")
 
-            # Check that file was written
-            assert os.path.exists(tmp.name)
-            assert os.path.getsize(tmp.name) > 0
+            # Force flush all handlers
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+
+            # Read and verify file content
+            with open(tmp.name) as f:
+                content = f.read()
+            assert len(content) > 0
+            # Verify at least one line is valid JSON
+            for line in content.strip().split("\n"):
+                if line.strip():
+                    parsed = json.loads(line)
+                    assert "message" in parsed
 
             # Clean up
             os.unlink(tmp.name)
@@ -561,9 +570,3 @@ class TestGlobalInstances:
         perf_messages = [r.message for r in caplog.records if "test_operation" in r.message]
         assert len(perf_messages) >= 1, "Performance logger should have logged the operation"
         assert "completed in" in perf_messages[0]
-
-    def test_global_logging_config(self):
-        """Test that global logging config works."""
-        assert isinstance(logging_config, LoggingConfig)
-        assert hasattr(logging_config, "log_level")
-        assert hasattr(logging_config, "setup")

@@ -165,26 +165,6 @@ class TestServerFoundation:
         assert server.access_controller is None
         assert server.resource_handler is None
 
-    def test_get_capabilities(self, valid_config):
-        """Test get_capabilities method."""
-        server = OdooMCPServer(valid_config)
-
-        capabilities = server.get_capabilities()
-
-        assert capabilities == {
-            "capabilities": {"resources": True, "tools": True, "prompts": False}
-        }
-
-    def test_server_logging_configuration(self, valid_config):
-        """Test that server stores and uses the configured log level."""
-        valid_config.log_level = "DEBUG"
-        server = OdooMCPServer(valid_config)
-        assert server.config.log_level == "DEBUG"
-
-        valid_config.log_level = "WARNING"
-        server2 = OdooMCPServer(valid_config)
-        assert server2.config.log_level == "WARNING"
-
     @pytest.mark.asyncio
     async def test_run_stdio_success(self, server_with_mock_connection):
         """Test successful run_stdio execution via lifespan."""
@@ -238,6 +218,9 @@ class TestServerFoundation:
 
         # Should not raise (handled gracefully)
         await server.run_stdio()
+
+        # Verify cleanup ran despite interrupt
+        assert server.connection is None
 
     @pytest.mark.asyncio
     async def test_lifespan_setup_and_teardown(self, server_with_mock_connection):

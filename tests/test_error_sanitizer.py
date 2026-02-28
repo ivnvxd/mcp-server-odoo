@@ -87,6 +87,12 @@ class TestErrorSanitizer:
         sanitized = ErrorSanitizer.sanitize_xmlrpc_fault(fault)
         assert sanitized == "Cannot delete record that has dependencies"
 
+    def test_sanitize_missing_error(self):
+        """Test that MissingError fault is sanitized to a user-friendly message."""
+        fault = "MissingError: Record does not exist or has been deleted."
+        sanitized = ErrorSanitizer.sanitize_xmlrpc_fault(fault)
+        assert sanitized == "The requested record was not found"
+
     def test_sanitize_error_details(self):
         """Test error details sanitization."""
         details = {

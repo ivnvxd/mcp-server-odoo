@@ -253,6 +253,26 @@ class TestOdooResourceHandler:
         assert "res.partner" in str(exc_info.value)
 
     @pytest.mark.asyncio
+    async def test_record_retrieval_all_fields_unsafe(
+        self, resource_handler, mock_connection, mock_access_controller
+    ):
+        """Test fallback to unfiltered read when all fields are binary/image (unsafe)."""
+        # fields_get returns ONLY binary fields, so safe_fields will be empty
+        mock_connection.fields_get.return_value = {
+            "image_1920": {"type": "binary", "string": "Image"},
+            "image_128": {"type": "binary", "string": "Image 128"},
+            "__last_update": {"type": "datetime", "string": "Last Modified on"},
+        }
+        mock_connection.search.return_value = [1]
+        mock_connection.read.return_value = [{"id": 1, "name": "Binary Partner"}]
+
+        result = await resource_handler._handle_record_retrieval("res.partner", "1")
+
+        # Since all fields are unsafe, safe_fields is empty => fallback to no filter
+        mock_connection.read.assert_called_once_with("res.partner", [1])
+        assert "Binary Partner" in result
+
+    @pytest.mark.asyncio
     async def test_handle_record_retrieval_fields_get_fallback(
         self, resource_handler, mock_connection, mock_access_controller
     ):

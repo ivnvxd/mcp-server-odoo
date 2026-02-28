@@ -93,7 +93,7 @@ class TestYoloModeE2E:
         )
 
         assert "records" in search_result
-        assert search_result["total"] >= 0
+        assert search_result["total"] > 0  # res.partner always has records
 
         # 4. Get a specific record - should work
         if search_result["records"]:
@@ -253,6 +253,7 @@ class TestYoloModeE2E:
                 order=None,
             )
             assert "records" in result, f"Failed to access standard model: {model}"
+            assert result["total"] >= 0
 
         # Test system models (usually restricted in standard mode)
         system_models = ["ir.model", "ir.model.fields", "ir.config_parameter"]

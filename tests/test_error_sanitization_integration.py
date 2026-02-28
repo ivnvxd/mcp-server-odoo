@@ -39,11 +39,12 @@ class TestErrorSanitizationIntegration:
         return OdooResourceHandler(app, connection, access_controller, config)
 
     @pytest.mark.asyncio
-    async def test_tool_xmlrpc_fault_sanitization(self, tool_handler):
-        """Test that XML-RPC faults are sanitized in tool errors."""
-        # OdooConnection.execute_kw wraps XML-RPC Faults into OdooConnectionError
-        # with sanitized messages. Here we test the tool layer's handling of
-        # the already-wrapped error.
+    async def test_tool_wraps_connection_error(self, tool_handler):
+        """Test that the tool layer wraps OdooConnectionError into ValidationError.
+
+        Note: actual XML-RPC fault sanitization happens in OdooConnection.execute_kw,
+        not in the tool layer. This test verifies the tool's error wrapping.
+        """
         tool_handler.connection.is_authenticated = True
         tool_handler.connection.search_count.side_effect = OdooConnectionError(
             "Operation failed: Invalid field 'bogus_field' in search criteria"

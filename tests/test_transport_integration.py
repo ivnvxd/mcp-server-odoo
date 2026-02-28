@@ -177,8 +177,11 @@ class TestTransportIntegration:
                 # If error is a dict with code, check it's not a transport error (-32600)
                 if isinstance(error, dict) and error.get("code") == -32600:
                     raise AssertionError(f"Transport error in tool call: {response}")
-            # If we get here, either we have a result or a non-transport error
+            # Verify we got a semantic response (not a transport-level failure)
             assert has_result or has_error, f"Response should have result or error: {response}"
+            if has_error:
+                # Verify error contains meaningful info (not just empty)
+                assert "message" in response["error"] or "code" in response["error"]
 
         finally:
             tester.stop_server()
@@ -189,7 +192,7 @@ class TestTransportCompatibility:
     """Test transport compatibility and edge cases."""
 
     @pytest.mark.asyncio
-    async def test_server_version_consistency(self, odoo_server_required):
+    async def test_both_transports_connect_successfully(self, odoo_server_required):
         """Test that both transports can successfully connect and communicate."""
         # Test stdio connection
         stdio_client = MCPTestClient()

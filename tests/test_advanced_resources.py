@@ -418,6 +418,54 @@ class TestFieldsResource:
         assert "Readonly: True" in result
 
 
+class TestFieldsEdgeCases:
+    """Test edge cases for fields resource."""
+
+    @pytest.mark.asyncio
+    async def test_fields_with_many_selections(
+        self, resource_handler, mock_connection, mock_access_controller
+    ):
+        """Test that selection fields with 6+ options show count instead of listing."""
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.fields_get.return_value = {
+            "priority": {
+                "type": "selection",
+                "string": "Priority",
+                "selection": [
+                    ("0", "Normal"),
+                    ("1", "Low"),
+                    ("2", "Medium"),
+                    ("3", "High"),
+                    ("4", "Very High"),
+                    ("5", "Critical"),
+                ],
+            },
+        }
+
+        result = await resource_handler._handle_fields("project.task")
+
+        # With 6 options (>5), should show count instead of listing each option
+        assert "6 choices available" in result
+        # Should NOT list individual options
+        assert "Normal" not in result
+
+    @pytest.mark.asyncio
+    async def test_fields_connection_error(
+        self, resource_handler, mock_connection, mock_access_controller
+    ):
+        """Test that OdooConnectionError in fields_get is wrapped as ValidationError."""
+        from mcp_server_odoo.odoo_connection import OdooConnectionError
+
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.fields_get.side_effect = OdooConnectionError("Server unreachable")
+
+        with pytest.raises(ValidationError) as exc_info:
+            await resource_handler._handle_fields("res.partner")
+
+        assert "Connection error" in str(exc_info.value)
+        assert "Server unreachable" in str(exc_info.value)
+
+
 class TestBrowseNotAuthenticated:
     """Test browse resource when not authenticated."""
 

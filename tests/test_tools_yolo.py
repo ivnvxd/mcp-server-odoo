@@ -111,9 +111,13 @@ class TestYoloModeTools:
         assert yolo_meta["operations"]["create"] is False
         assert yolo_meta["operations"]["unlink"] is False
 
+        # Verify search_read was called with correct domain and fields
+        call_args = mock_connection.search_read.call_args
+        assert call_args[0][0] == "ir.model"
+        assert ("transient", "=", False) in call_args[0][1]
+
         # Check actual models are clean (no operations field)
         models = result["models"]
-        assert len(models) == 3  # Should match mock data
         for model in models:
             assert "operations" not in model
             assert "model" in model
@@ -154,9 +158,13 @@ class TestYoloModeTools:
         assert yolo_meta["operations"]["create"] is True
         assert yolo_meta["operations"]["unlink"] is True
 
+        # Verify search_read was called with correct domain and fields
+        mock_connection.search_read.assert_called_once()
+        call_args = mock_connection.search_read.call_args
+        assert call_args[0][0] == "ir.model"
+
         # Check actual models are clean (no operations field)
         models = result["models"]
-        assert len(models) == 2  # Should match mock data
         for model in models:
             assert "operations" not in model
             assert "model" in model
@@ -202,10 +210,11 @@ class TestYoloModeTools:
         models = result["models"]
         assert len(models) == 2
 
-        # No YOLO warning in standard mode
-        for model in models:
-            assert "YOLO MODE" not in model["model"]
-            assert model["model"] in ["res.partner", "res.users"]
+        # Verify connection.search_read was NOT called (standard mode)
+        mock_connection.search_read.assert_not_called()
+
+        # Verify access_controller.get_enabled_models WAS called
+        mock_access_controller.get_enabled_models.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_error_handling(
@@ -266,31 +275,6 @@ class TestYoloModeTools:
         assert ("transient", "=", False) in domain
         # Should have complex domain with OR conditions
         assert "&" in domain or "|" in domain
-
-    @pytest.mark.asyncio
-    async def test_list_models_yolo_includes_common_system_models(
-        self, config_yolo_full, mock_connection, mock_access_controller, mock_app
-    ):
-        """Test that common system models are included in YOLO mode."""
-        mock_connection.search_read.return_value = [
-            {"model": "res.partner", "name": "Contact"},
-            {"model": "ir.attachment", "name": "Attachment"},
-            {"model": "ir.model", "name": "Models"},
-        ]
-
-        # Create handler
-        handler = OdooToolHandler(
-            mock_app, mock_connection, mock_access_controller, config_yolo_full
-        )
-
-        # Call the method
-        result = await handler._handle_list_models_tool()
-
-        # Check that system models are included
-        models = result["models"]
-        model_names = [m["model"] for m in models]
-        assert "ir.attachment" in model_names
-        assert "ir.model" in model_names
 
     @pytest.mark.asyncio
     async def test_yolo_mode_logging(

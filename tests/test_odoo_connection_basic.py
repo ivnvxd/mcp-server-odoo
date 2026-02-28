@@ -326,6 +326,18 @@ class TestOdooConnectionHealth:
 
         conn.disconnect()
 
+    def test_check_health_timeout(self, test_config):
+        """Test health check returns failure tuple on socket timeout."""
+        conn = OdooConnection(test_config)
+        conn._connected = True
+        conn._common_proxy = MagicMock()
+        conn._common_proxy.version.side_effect = socket.timeout("timed out")
+
+        is_healthy, message = conn.check_health()
+
+        assert is_healthy is False
+        assert "Health check timeout" in message
+
 
 class TestOdooConnectionProxies:
     """Test proxy access."""

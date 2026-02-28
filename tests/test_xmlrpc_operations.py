@@ -140,6 +140,35 @@ class TestXMLRPCOperations:
             os.getenv("ODOO_DB", "db"), 2, "admin123", "res.partner", "search", [[]], {}
         )
 
+    def test_api_key_auth_uses_api_key(self, authenticated_connection):
+        """Test that api_key auth passes api_key (not password) to execute_kw."""
+        # authenticated_connection already has _auth_method = "api_key"
+        mock_proxy = Mock()
+        mock_proxy.execute_kw.return_value = []
+        authenticated_connection._object_proxy = mock_proxy
+
+        authenticated_connection.search("res.partner", [])
+
+        # Verify api_key was passed as the credential argument
+        mock_proxy.execute_kw.assert_called_once_with(
+            authenticated_connection._database,
+            2,
+            "test_api_key",
+            "res.partner",
+            "search",
+            [[]],
+            {},
+        )
+
+    def test_execute_kw_generic_exception(self, authenticated_connection):
+        """Test execute_kw wraps generic exceptions in OdooConnectionError."""
+        mock_proxy = Mock()
+        mock_proxy.execute_kw.side_effect = ConnectionResetError("Connection reset")
+        authenticated_connection._object_proxy = mock_proxy
+
+        with pytest.raises(OdooConnectionError, match="Operation failed"):
+            authenticated_connection.execute_kw("res.partner", "search", [[]], {})
+
 
 @pytest.mark.yolo
 @pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")

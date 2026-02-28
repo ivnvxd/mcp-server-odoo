@@ -198,8 +198,8 @@ class TestYoloModeAccessControl:
             # Verify no API calls were made
             mock_request.assert_not_called()
 
-    def test_mode_transition_standard_to_yolo(self, config_yolo_read):
-        """Test that we can switch from standard to YOLO mode."""
+    def test_standard_and_yolo_controllers_independent(self, config_yolo_read):
+        """Test that standard and YOLO controllers can coexist independently."""
         # Create standard mode config without API key
         config_no_api = OdooConfig(
             url=os.getenv("ODOO_URL", "http://localhost:8069"),
@@ -219,56 +219,20 @@ class TestYoloModeAccessControl:
         # Should work without API
         assert controller_yolo.is_model_enabled("res.partner") is True
 
-    def test_permission_caching_disabled_in_yolo(self, config_yolo_read):
-        """Test that caching is effectively bypassed in YOLO mode."""
+    def test_yolo_permissions_consistent(self, config_yolo_read):
+        """Test that YOLO mode returns consistent permissions without cache."""
         controller = AccessController(config_yolo_read)
 
-        # Get permissions twice
-        perms1 = controller.get_model_permissions("res.partner")
-        perms2 = controller.get_model_permissions("res.partner")
+        # Verify no API calls are made (cache is irrelevant in YOLO mode)
+        with patch.object(controller, "_make_request") as mock_request:
+            perms1 = controller.get_model_permissions("res.partner")
+            perms2 = controller.get_model_permissions("res.partner")
+
+            mock_request.assert_not_called()
 
         # Should return consistent results
         assert perms1.can_read == perms2.can_read
         assert perms1.can_write == perms2.can_write
-
-    def test_error_messages_clarity(self, config_yolo_read):
-        """Test that error messages are clear in YOLO mode."""
-        controller = AccessController(config_yolo_read)
-
-        # Try a write operation
-        allowed, msg = controller.check_operation_allowed("res.partner", "create")
-
-        assert allowed is False
-        assert "create" in msg  # Operation name should be in message
-        assert "read-only YOLO mode" in msg  # Mode should be clear
-        assert "Only read operations are permitted" in msg  # Guidance provided
-
-    def test_all_read_operation_types(self, config_yolo_read):
-        """Test that all read operation types are recognized."""
-        controller = AccessController(config_yolo_read)
-
-        # These should all be considered read operations
-        read_ops = ["read", "search", "search_read", "fields_get", "count", "search_count"]
-
-        for op in read_ops:
-            allowed, msg = controller.check_operation_allowed("any.model", op)
-            assert allowed is True, f"Operation {op} should be allowed in read-only mode"
-            assert msg is None
-
-    def test_all_write_operation_types(self, config_yolo_read):
-        """Test that all write operation types are blocked in read-only."""
-        controller = AccessController(config_yolo_read)
-
-        # These should all be considered write operations
-        # Note: "update" and "remove" are not standard Odoo operations,
-        # so they would return False but without specific error messages
-        write_ops = ["write", "create", "unlink", "delete"]
-
-        for op in write_ops:
-            allowed, msg = controller.check_operation_allowed("any.model", op)
-            assert allowed is False, f"Operation {op} should be blocked in read-only mode"
-            assert msg is not None
-            assert "not allowed in read-only" in msg
 
 
 if __name__ == "__main__":

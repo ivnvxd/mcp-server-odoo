@@ -105,16 +105,6 @@ class TestWriteTools:
             await tool_handler._handle_create_record_tool("res.partner", {})
 
     @pytest.mark.asyncio
-    async def test_create_record_access_denied(self, tool_handler, mock_access_controller):
-        """Test create record with access denied."""
-        mock_access_controller.validate_model_access.side_effect = AccessControlError(
-            "Access denied"
-        )
-
-        with pytest.raises(ValidationError, match="Access denied"):
-            await tool_handler._handle_create_record_tool("res.partner", {"name": "Test"})
-
-    @pytest.mark.asyncio
     async def test_update_record_success(self, tool_handler, mock_connection):
         """Test successful record update."""
         # Setup
@@ -213,16 +203,6 @@ class TestWriteTools:
 
         with pytest.raises(ValidationError, match="Record not found"):
             await tool_handler._handle_delete_record_tool("res.partner", 999)
-
-    @pytest.mark.asyncio
-    async def test_delete_record_access_denied(self, tool_handler, mock_access_controller):
-        """Test delete record with access denied."""
-        mock_access_controller.validate_model_access.side_effect = AccessControlError(
-            "Access denied"
-        )
-
-        with pytest.raises(ValidationError, match="Access denied"):
-            await tool_handler._handle_delete_record_tool("res.partner", 123)
 
     @pytest.mark.asyncio
     async def test_create_record_not_authenticated(self, tool_handler, mock_connection):

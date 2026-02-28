@@ -144,7 +144,7 @@ class TestServerLifecycle:
             text=True,
             timeout=10,
         )
-        assert result.returncode == 0 or "MCP" in result.stdout or "MCP" in result.stderr
+        assert result.returncode == 0
 
 
 class TestAuthenticationFlows:
@@ -206,7 +206,7 @@ class TestAuthenticationFlows:
         if config.api_key:
             assert response.status_code == 401
         else:
-            assert response.status_code == 200
+            pytest.skip("API key not configured, cannot test auth rejection")
 
 
 class TestResourceOperations:
@@ -235,7 +235,7 @@ class TestResourceOperations:
         result = await handler._handle_search("res.partner", None, None, 5, 0, None)
 
         assert "res.partner" in result
-        assert "Total:" in result or "record" in result.lower()
+        assert "Total records:" in result
         # Must contain actual record data, not fake mock strings
         assert "Mock data" not in result
 
@@ -250,6 +250,8 @@ class TestResourceOperations:
         result = await handler._handle_search("res.partner", quote(domain), None, 5, 0, None)
 
         assert "res.partner" in result
+        # Should mention record count from filtered results
+        assert "Total records:" in result
 
     @pytest.mark.asyncio
     async def test_count_operation(self, connected_env):
@@ -359,6 +361,8 @@ class TestToolOperations:
 
         assert "models" in result
         assert len(result["models"]) > 0
+        # res.partner should always be available
+        assert any(m["model"] == "res.partner" for m in result["models"])
         for model in result["models"]:
             assert "model" in model
 

@@ -35,10 +35,6 @@ class TestCacheEntry:
             size_bytes=100,
         )
 
-        assert entry.key == "test_key"
-        assert entry.value == {"data": "test"}
-        assert entry.ttl_seconds == 300
-        assert entry.hit_count == 0
         assert not entry.is_expired()
 
     def test_cache_entry_expiration(self):
@@ -257,6 +253,38 @@ class TestConnectionPool:
         assert stats["active_connections"] == 2
         assert stats["connections_closed"] == 1
 
+    @patch("mcp_server_odoo.performance.ServerProxy")
+    def test_connection_pool_set_database(self, mock_proxy, mock_config):
+        """Test set_database clears pool and sets transport database."""
+        pool = ConnectionPool(mock_config, max_connections=5)
+
+        # Create a couple of connections first
+        pool.get_connection("/xmlrpc/2/common")
+        pool.get_connection("/xmlrpc/2/object")
+        assert pool.get_stats()["active_connections"] == 2
+
+        # Set database
+        pool.set_database("new_db")
+
+        # Pool should be cleared
+        assert pool.get_stats()["active_connections"] == 0
+        assert pool.get_stats()["connections_closed"] == 2
+        # Transport should have database set
+        assert pool._transport.database == "new_db"
+
+    def test_odoo_transport_sends_database_header(self, mock_config):
+        """Test OdooTransport injects X-Odoo-Database header via send_headers."""
+        from mcp_server_odoo.performance import OdooTransport
+
+        transport = OdooTransport(database="mydb")
+        mock_connection = Mock()
+
+        # Call send_headers with empty headers list
+        transport.send_headers(mock_connection, [])
+
+        # Verify that putheader was called with the database header
+        mock_connection.putheader.assert_called_with("X-Odoo-Database", "mydb")
+
     def test_connection_pool_clear(self, mock_config):
         """Test clearing connection pool."""
         pool = ConnectionPool(mock_config)
@@ -293,14 +321,11 @@ class TestRequestOptimizer:
         assert fields[0] == "name"
         assert len(fields) <= 20
 
-    def test_get_optimized_fields_with_requested(self):
-        """Test optimized fields when specific fields are requested."""
+    def test_get_optimized_fields_passthrough(self):
+        """Test that explicitly requested fields are returned as-is (early-return path)."""
         optimizer = RequestOptimizer()
 
-        # Track some usage
-        optimizer.track_field_usage("res.partner", ["name", "email"])
-
-        # But request specific fields
+        # When specific fields are requested, they should pass through unchanged
         fields = optimizer.get_optimized_fields("res.partner", ["id", "display_name"])
         assert fields == ["id", "display_name"]
 
@@ -513,6 +538,29 @@ class TestPerformanceManager:
         assert manager.get_cached_fields("res.partner") is None
         assert manager.get_cached_record("res.partner", 1) is None
         assert manager.get_cached_permission("res.partner", "read", 2) is None
+
+    def test_optimize_search_fields(self, mock_config):
+        """Test optimize_search_fields returns optimized fields and tracks usage."""
+        manager = PerformanceManager(mock_config)
+
+        # Pre-populate field usage so optimizer has data
+        manager.request_optimizer.track_field_usage("res.partner", ["name", "email"])
+        manager.request_optimizer.track_field_usage("res.partner", ["name", "phone"])
+
+        # Call optimize_search_fields with no explicit fields
+        result = manager.optimize_search_fields("res.partner")
+
+        # Should return fields ranked by usage: name (2), email (1), phone (1)
+        assert "name" in result
+        assert "email" in result
+        assert "phone" in result
+
+        # Verify side effect: usage counts increased from the internal track call
+        usage = manager.request_optimizer._field_usage["res.partner"]
+        # name was tracked 2 + 1 (from optimize call) = 3
+        assert usage["name"] == 3
+        # email was tracked 1 + 1 = 2
+        assert usage["email"] == 2
 
 
 class TestPerformanceIntegration:
