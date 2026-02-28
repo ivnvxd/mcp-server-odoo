@@ -154,8 +154,8 @@ class MCPTestClient:
             text=True,
         )
 
-        # Give server time to start
-        time.sleep(2)
+        # Wait for server to initialize (stdio — no port to poll)
+        time.sleep(0.5)
 
         # Check if process is still running
         if process.poll() is not None:

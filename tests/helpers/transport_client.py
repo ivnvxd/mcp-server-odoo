@@ -44,8 +44,8 @@ class StdioTransportTester(TransportTestBase):
                 text=True,
                 bufsize=0,
             )
-            time.sleep(2)  # Give server time to start
-            return True
+            time.sleep(0.5)  # Stdio server — no port to poll
+            return self.process.poll() is None
         except Exception as e:
             print(f"Failed to start stdio server: {e}")
             return False
@@ -132,7 +132,7 @@ class HttpTransportTester(TransportTestBase):
         return self.request_id
 
     async def start_server(self, port: int = 8002, timeout: int = 10) -> bool:
-        """Start HTTP server."""
+        """Start HTTP server, polling until it accepts connections."""
         import asyncio
 
         try:
@@ -150,19 +150,22 @@ class HttpTransportTester(TransportTestBase):
                 stderr=subprocess.PIPE,
             )
 
-            await asyncio.sleep(5)
+            # Poll until the server accepts connections instead of a fixed sleep
+            import socket
 
-            try:
-                requests.get(f"http://localhost:{port}/", timeout=3)
-                return True
-            except requests.exceptions.RequestException:
+            for _ in range(timeout * 10):
+                if self.server_process.poll() is not None:
+                    return False
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 try:
-                    requests.post(
-                        f"http://localhost:{port}/mcp/", json={"test": "connectivity"}, timeout=3
-                    )
+                    sock.connect(("localhost", port))
+                    sock.close()
                     return True
-                except requests.exceptions.RequestException:
-                    return self.server_process.poll() is None
+                except OSError:
+                    sock.close()
+                    await asyncio.sleep(0.1)
+
+            return self.server_process.poll() is None
 
         except Exception as e:
             print(f"Failed to start HTTP server: {e}")

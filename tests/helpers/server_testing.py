@@ -87,8 +87,12 @@ class MCPTestServer:
             text=True,
         )
 
-        # Wait for server to start
-        time.sleep(2)
+        # Wait for server to initialize (stdio — no port to poll)
+        time.sleep(0.5)
+
+        if self.server_process.poll() is not None:
+            stdout, stderr = self.server_process.communicate()
+            raise RuntimeError(f"Server crashed on startup:\nstdout: {stdout}\nstderr: {stderr}")
 
         return self.server_process
 

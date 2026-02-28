@@ -10,7 +10,6 @@ Integration tests require a live Odoo server and are auto-skipped otherwise.
 """
 
 import os
-import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -25,9 +24,8 @@ from .conftest import ODOO_SERVER_AVAILABLE
 
 @pytest.fixture(autouse=True)
 def _rate_limit_delay():
-    """Small delay between tests to avoid overwhelming Odoo with connections."""
+    """Placeholder — rate limiting not needed for local Odoo."""
     yield
-    time.sleep(0.1)
 
 
 # ---------------------------------------------------------------------------

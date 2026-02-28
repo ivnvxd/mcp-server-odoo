@@ -117,7 +117,7 @@ class TestServerLifecycle:
             assert process is not None
             assert process.poll() is None
 
-            time.sleep(2)
+            time.sleep(0.5)
             assert process.poll() is None
 
         assert server.server_process is None
