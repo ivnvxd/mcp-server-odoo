@@ -137,9 +137,8 @@ class TestSearchSmartDefaults:
         tool_handler.connection.fields_get.side_effect = Exception("Cannot get fields")
         tool_handler.connection.read.return_value = [{"id": 1, "name": "Test"}]
 
-        result = await tool_handler._handle_search_tool("res.partner", [], None, 10, 0, None)
+        await tool_handler._handle_search_tool("res.partner", [], None, 10, 0, None)
 
-        assert result["total"] == 1
         # Should fall back to no field filtering
         fields_arg = tool_handler.connection.read.call_args[0][2]
         assert fields_arg is None

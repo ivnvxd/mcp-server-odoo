@@ -162,26 +162,13 @@ class TestTransportIntegration:
             # Send initialized notification
             await tester._send_request("notifications/initialized", {})
 
-            # Test list_models tool call
+            # Test list_models tool call — MCP tests have auth configured, so this should succeed
             params = {"name": "list_models", "arguments": {}}
             response = await tester._send_request("tools/call", params, tester._next_id())
             assert response is not None, "No response to tool call"
-            # Note: The tool call might fail due to auth, but the transport should work
-            # Just check that we got some kind of response (transport working)
-            assert isinstance(response, dict), f"Expected dict response, got: {response}"
-            # Accept either successful result or any error that's not a transport error
-            has_result = "result" in response
-            has_error = "error" in response
-            if has_error:
-                error = response.get("error")
-                # If error is a dict with code, check it's not a transport error (-32600)
-                if isinstance(error, dict) and error.get("code") == -32600:
-                    raise AssertionError(f"Transport error in tool call: {response}")
-            # Verify we got a semantic response (not a transport-level failure)
-            assert has_result or has_error, f"Response should have result or error: {response}"
-            if has_error:
-                # Verify error contains meaningful info (not just empty)
-                assert "message" in response["error"] or "code" in response["error"]
+            assert "result" in response, f"Tool call should succeed, got: {response}"
+            result_data = response["result"]
+            assert "content" in result_data, f"Expected content in result: {result_data}"
 
         finally:
             tester.stop_server()

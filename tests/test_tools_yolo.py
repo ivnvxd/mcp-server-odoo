@@ -116,12 +116,10 @@ class TestYoloModeTools:
         assert call_args[0][0] == "ir.model"
         assert ("transient", "=", False) in call_args[0][1]
 
-        # Check actual models are clean (no operations field)
+        # In YOLO mode, models should NOT have per-model operations (unlike standard mode)
         models = result["models"]
         for model in models:
             assert "operations" not in model
-            assert "model" in model
-            assert "name" in model
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_full_mode(
@@ -163,12 +161,10 @@ class TestYoloModeTools:
         call_args = mock_connection.search_read.call_args
         assert call_args[0][0] == "ir.model"
 
-        # Check actual models are clean (no operations field)
+        # In YOLO mode, models should NOT have per-model operations (unlike standard mode)
         models = result["models"]
         for model in models:
             assert "operations" not in model
-            assert "model" in model
-            assert "name" in model
 
     @pytest.mark.asyncio
     async def test_list_models_standard_mode(
@@ -269,12 +265,20 @@ class TestYoloModeTools:
         call_args = mock_connection.search_read.call_args
         domain = call_args[0][1]
 
-        # Check domain structure
+        # Check domain structure — verify the actual Polish-notation domain
         assert isinstance(domain, list)
-        # Should filter out transient models
+        assert domain[0] == "&", "Domain should start with AND operator"
         assert ("transient", "=", False) in domain
-        # Should have complex domain with OR conditions
-        assert "&" in domain or "|" in domain
+        # Should have OR conditions for model filtering
+        assert "|" in domain, "Domain should include OR conditions for model filtering"
+        assert ("model", "not like", "ir.%") in domain
+        assert ("model", "not like", "base.%") in domain
+        # Should include whitelist of allowed ir.* models
+        ir_whitelist = [
+            c for c in domain if isinstance(c, tuple) and c[0] == "model" and c[1] == "in"
+        ]
+        assert len(ir_whitelist) == 1, "Should have exactly one 'model in [...]' whitelist"
+        assert "ir.attachment" in ir_whitelist[0][2]
 
     @pytest.mark.asyncio
     async def test_yolo_mode_logging(

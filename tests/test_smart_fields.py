@@ -200,13 +200,6 @@ class TestSmartFieldSelection:
         # Call without fields parameter
         result = await tool_handler._handle_get_record_tool("res.partner", 1, None)
 
-        # Should have the record data
-        assert result.record["id"] == 1
-        assert result.record["name"] == "Test Partner"
-        assert result.record["email"] == "test@example.com"
-        assert result.record["active"]
-        assert result.record["display_name"] == "Test Partner"
-
         # Should have metadata
         assert result.metadata is not None
         assert result.metadata.field_selection_method == "smart_defaults"

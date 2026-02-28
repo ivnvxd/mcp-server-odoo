@@ -56,7 +56,7 @@ class TestDatabaseDiscovery:
 
         databases = connection.list_databases()
 
-        assert isinstance(databases, list)
+        assert databases == ["db1", "db2", os.getenv("ODOO_DB", "db")]
         mock_proxy.list.assert_called_once()
 
     def test_list_databases_error(self, connection):

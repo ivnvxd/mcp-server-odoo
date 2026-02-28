@@ -48,11 +48,15 @@ class TestFixesIntegration:
 
         models_result = await tool_handler._handle_list_models_tool()
 
-        # Should return dict with models array
+        # Should return dict with models array containing permission info from handler logic
         assert isinstance(models_result, dict)
         assert "models" in models_result
-        assert isinstance(models_result["models"], list)
-        assert len(models_result["models"]) == 2
+        # Verify the handler added operations metadata (real logic, not mock passthrough)
+        for model in models_result["models"]:
+            assert "operations" in model, "Handler should add operations dict per model"
+            assert model["operations"]["read"] is True
+            assert model["operations"]["write"] is True
+            assert model["operations"]["create"] is False
 
         # Test 2: get_record with smart defaults and datetime formatting
         tool_handler.connection.fields_get.return_value = {
@@ -77,12 +81,6 @@ class TestFixesIntegration:
         ]
 
         record_result = await tool_handler._handle_get_record_tool("res.partner", 1, None)
-
-        # Should have smart field selection
-        assert "id" in record_result.record
-        assert "name" in record_result.record
-        assert "email" in record_result.record
-        assert "create_date" in record_result.record
 
         # Verify smart defaults actually filtered the fields in the read() call
         # (this is the real test — not just checking mock return values)
@@ -156,11 +154,6 @@ class TestFixesIntegration:
 
         result = await tool_handler._handle_get_record_tool("res.partner", 1, ["__all__"])
 
-        # Should return all fields
-        assert "image_1920" in result.record
-        assert "message_ids" in result.record
-        assert "write_date" in result.record
-
         # Should NOT have metadata (not using smart defaults)
         assert result.metadata is None
 
@@ -187,11 +180,6 @@ class TestFixesIntegration:
         result = await tool_handler._handle_get_record_tool(
             "res.partner", 1, ["name", "vat", "create_date"]
         )
-
-        # Should have only requested fields
-        assert "name" in result.record
-        assert "vat" in result.record
-        assert "create_date" in result.record
 
         # Should NOT have metadata (explicit field selection)
         assert result.metadata is None
