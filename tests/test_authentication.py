@@ -495,41 +495,39 @@ class TestYoloModeAuthentication:
                 assert success is True
 
     def test_authentication_fallback_in_standard_mode(self):
-        """Test fallback from API key to password in standard mode."""
+        """Test fallback from API key to password in standard mode.
+
+        Verifies the fallback order: api_key is tried first, and when it
+        fails, password auth is tried. Uses a real _authenticate_password
+        with a mocked common_proxy to exercise the real auth state logic.
+        """
         config = OdooConfig(
             url=os.getenv("ODOO_URL", "http://localhost:8069"),
             api_key="test_api_key",
-            username=os.getenv("ODOO_USER", "admin"),
-            password=os.getenv("ODOO_PASSWORD", "admin"),
-            database=os.getenv("ODOO_DB"),
+            username="admin",
+            password="admin",
+            database="testdb",
             yolo_mode="off",
         )
         conn = OdooConnection(config)
         conn._connected = True
 
-        # Mock database operations
-        mock_db = Mock()
-        mock_db.list.return_value = ["testdb"]
-        conn._db_proxy = mock_db
+        # Mock the common proxy so _authenticate_password runs real logic
+        mock_common = Mock()
+        mock_common.authenticate.return_value = 2  # Successful UID
+        conn._common_proxy = mock_common
 
-        # Mock authentication methods
-        with patch.object(conn, "_authenticate_api_key", return_value=False):
-            with patch.object(conn, "_authenticate_password", return_value=True) as mock_pwd:
-                # Set authentication state when password auth succeeds
-                def set_auth_state(db):
-                    conn._authenticated = True
-                    conn._uid = 2
-                    conn._database = db
-                    conn._auth_method = "password"
-                    return True
+        # Only mock _authenticate_api_key to fail — let password auth run real code
+        with patch.object(conn, "_authenticate_api_key", return_value=False) as mock_api:
+            conn.authenticate("testdb")
 
-                mock_pwd.side_effect = set_auth_state
-
-                # Should fallback to password auth
-                conn.authenticate("testdb")
-
-                mock_pwd.assert_called_once_with("testdb")
-                assert conn.is_authenticated
+            # API key was tried first
+            mock_api.assert_called_once_with("testdb")
+            # Password auth ran for real and set state
+            mock_common.authenticate.assert_called_once_with("testdb", "admin", "admin", {})
+            assert conn.is_authenticated
+            assert conn._auth_method == "password"
+            assert conn._uid == 2
 
     def test_authentication_error_messages(self):
         """Test detailed error messages for authentication failures."""

@@ -105,11 +105,37 @@ class TestAccessControl:
             controller._make_request("/test/endpoint")
 
     @patch("urllib.request.urlopen")
+    def test_make_request_http_403(self, mock_urlopen, controller):
+        """Test REST API request with 403 error."""
+        mock_urlopen.side_effect = urllib.error.HTTPError(None, 403, "Forbidden", {}, None)
+
+        with pytest.raises(AccessControlError, match="Access denied to MCP endpoints"):
+            controller._make_request("/test/endpoint")
+
+    @patch("urllib.request.urlopen")
     def test_make_request_http_404(self, mock_urlopen, controller):
         """Test REST API request with 404 error."""
         mock_urlopen.side_effect = urllib.error.HTTPError(None, 404, "Not Found", {}, None)
 
         with pytest.raises(AccessControlError, match="Endpoint not found"):
+            controller._make_request("/test/endpoint")
+
+    @patch("urllib.request.urlopen")
+    def test_make_request_url_error(self, mock_urlopen, controller):
+        """Test REST API request with URLError (connection refused)."""
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+
+        with pytest.raises(AccessControlError, match="Connection error"):
+            controller._make_request("/test/endpoint")
+
+    @patch("urllib.request.urlopen")
+    def test_make_request_json_decode_error(self, mock_urlopen, controller):
+        """Test REST API request with malformed JSON response."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"not valid json"
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        with pytest.raises(AccessControlError, match="Invalid JSON response"):
             controller._make_request("/test/endpoint")
 
     def test_cache_operations(self, controller):

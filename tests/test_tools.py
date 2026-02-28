@@ -788,6 +788,12 @@ class TestOdooToolHandler:
         warning_msg = ctx.warning.call_args_list[0][0][0]
         assert "ALL fields" in warning_msg
 
+        # Verify that __all__ was translated to fields=None (fetch all fields from Odoo)
+        mock_connection.read.assert_called_once()
+        call_args = mock_connection.read.call_args
+        fields_arg = call_args[0][2]  # Third positional argument is fields
+        assert fields_arg is None, "Expected fields=None when __all__ is requested"
+
     @pytest.mark.asyncio
     async def test_context_error_does_not_crash_tool(
         self, handler, mock_connection, mock_access_controller, mock_app
@@ -810,6 +816,124 @@ class TestOdooToolHandler:
         result = await search_records(model="res.partner", fields=["name"], limit=10, ctx=ctx)
         assert result.total == 1
         assert len(result.records) == 1
+
+
+class TestYoloListModels:
+    """Test cases for list_models in YOLO mode."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=FastMCP)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        return connection
+
+    @pytest.fixture
+    def mock_access_controller(self):
+        return MagicMock(spec=AccessController)
+
+    @pytest.fixture
+    def yolo_config(self):
+        """Create a YOLO mode config."""
+        return OdooConfig(
+            url="http://localhost:8069",
+            username="admin",
+            api_key="test_api_key",
+            database="test_db",
+            yolo_mode="read",
+        )
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection, mock_access_controller, yolo_config):
+        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, yolo_config)
+
+    @pytest.mark.asyncio
+    async def test_yolo_list_models_success(self, handler, mock_connection, mock_app, yolo_config):
+        """Test list_models in YOLO mode queries ir.model and returns model list."""
+        mock_connection.search_read.return_value = [
+            {"model": "res.partner", "name": "Contact"},
+            {"model": "sale.order", "name": "Sales Order"},
+        ]
+
+        list_models = mock_app._tools["list_models"]
+        result = await list_models()
+
+        # Verify search_read was called on ir.model
+        mock_connection.search_read.assert_called_once()
+        call_args = mock_connection.search_read.call_args
+        assert call_args[0][0] == "ir.model"
+        assert call_args[0][2] == ["model", "name"]
+
+        # Result is a ModelsResult Pydantic model
+        assert result.total == 2
+        assert len(result.models) == 2
+        assert result.models[0].model == "res.partner"
+        assert result.models[0].name == "Contact"
+        assert result.models[1].model == "sale.order"
+        assert result.models[1].name == "Sales Order"
+
+        # Verify YOLO metadata
+        assert result.yolo_mode is not None
+        assert result.yolo_mode.enabled is True
+        assert result.yolo_mode.level == "read"
+        assert result.yolo_mode.operations.read is True
+        assert result.yolo_mode.operations.write is False
+
+    @pytest.mark.asyncio
+    async def test_yolo_list_models_full_access(
+        self, mock_app, mock_connection, mock_access_controller
+    ):
+        """Test list_models in YOLO 'true' mode reports full access operations."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            username="admin",
+            api_key="test_api_key",
+            database="test_db",
+            yolo_mode="true",
+        )
+        OdooToolHandler(mock_app, mock_connection, mock_access_controller, config)
+
+        mock_connection.search_read.return_value = [
+            {"model": "res.partner", "name": "Contact"},
+        ]
+
+        list_models = mock_app._tools["list_models"]
+        result = await list_models()
+
+        assert result.yolo_mode.level == "true"
+        assert result.yolo_mode.operations.write is True
+        assert result.yolo_mode.operations.create is True
+        assert result.yolo_mode.operations.unlink is True
+
+    @pytest.mark.asyncio
+    async def test_yolo_list_models_error(self, handler, mock_connection, mock_app, yolo_config):
+        """Test list_models in YOLO mode returns error dict when search_read fails."""
+        mock_connection.search_read.side_effect = Exception("Connection refused")
+
+        list_models = mock_app._tools["list_models"]
+        result = await list_models()
+
+        # Should return error structure, not raise
+        assert result.models == []
+        assert result.total == 0
+        assert result.error is not None
+        assert "Connection refused" in result.error
+        assert result.yolo_mode.enabled is True
+        assert result.yolo_mode.operations.read is False
 
 
 class TestCreateRecordTool:

@@ -418,6 +418,48 @@ class TestFieldsResource:
         assert "Readonly: True" in result
 
 
+class TestBrowseNotAuthenticated:
+    """Test browse resource when not authenticated."""
+
+    @pytest.mark.asyncio
+    async def test_browse_not_authenticated(self, resource_handler, mock_connection):
+        """Test that _handle_browse raises ValidationError when not authenticated."""
+        mock_connection.is_authenticated = False
+
+        with pytest.raises(ValidationError) as exc_info:
+            await resource_handler._handle_browse("res.partner", "1,2,3")
+
+        assert "Not authenticated with Odoo" in str(exc_info.value)
+
+
+class TestCountNotAuthenticated:
+    """Test count resource when not authenticated."""
+
+    @pytest.mark.asyncio
+    async def test_count_not_authenticated(self, resource_handler, mock_connection):
+        """Test that _handle_count raises ValidationError when not authenticated."""
+        mock_connection.is_authenticated = False
+
+        with pytest.raises(ValidationError) as exc_info:
+            await resource_handler._handle_count("res.partner", None)
+
+        assert "Not authenticated with Odoo" in str(exc_info.value)
+
+
+class TestFieldsNotAuthenticated:
+    """Test fields resource when not authenticated."""
+
+    @pytest.mark.asyncio
+    async def test_fields_not_authenticated(self, resource_handler, mock_connection):
+        """Test that _handle_fields raises ValidationError when not authenticated."""
+        mock_connection.is_authenticated = False
+
+        with pytest.raises(ValidationError) as exc_info:
+            await resource_handler._handle_fields("res.partner")
+
+        assert "Not authenticated with Odoo" in str(exc_info.value)
+
+
 class TestAdvancedResourceIntegration:
     """Integration tests for advanced resources with real Odoo."""
 

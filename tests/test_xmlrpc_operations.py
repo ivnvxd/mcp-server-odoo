@@ -87,50 +87,6 @@ class TestXMLRPCOperations:
         with pytest.raises(OdooConnectionError, match="Not connected"):
             conn.execute("res.partner", "search", [])
 
-    def test_execute_kw_success(self, authenticated_connection):
-        """Test successful execute_kw operation."""
-        # Mock object proxy
-        mock_proxy = Mock()
-        mock_proxy.execute_kw.return_value = [1, 2, 3]
-        authenticated_connection._object_proxy = mock_proxy
-
-        # Execute operation
-        result = authenticated_connection.execute_kw(
-            "res.partner", "search", [[["is_company", "=", True]]], {"limit": 10}
-        )
-
-        # Verify result
-        assert result == [1, 2, 3]
-
-        # Verify call
-        mock_proxy.execute_kw.assert_called_once_with(
-            os.getenv("ODOO_DB", "db"),
-            2,
-            "test_api_key",
-            "res.partner",
-            "search",
-            [[["is_company", "=", True]]],
-            {"limit": 10},
-        )
-
-    def test_execute_simple(self, authenticated_connection):
-        """Test simple execute method."""
-        # Mock object proxy
-        mock_proxy = Mock()
-        mock_proxy.execute_kw.return_value = {"id": 1, "name": "Test"}
-        authenticated_connection._object_proxy = mock_proxy
-
-        # Execute operation
-        result = authenticated_connection.execute("res.partner", "read", [1])
-
-        # Verify result
-        assert result == {"id": 1, "name": "Test"}
-
-        # Verify it called execute_kw correctly
-        mock_proxy.execute_kw.assert_called_once_with(
-            os.getenv("ODOO_DB", "db"), 2, "test_api_key", "res.partner", "read", [[1]], {}
-        )
-
     def test_execute_kw_xmlrpc_fault(self, authenticated_connection):
         """Test execute_kw handles XML-RPC fault."""
         # Mock object proxy

@@ -353,6 +353,43 @@ class TestUserErrorFormatting:
         assert "Unable to connect to Odoo" in formatted
         assert "check your connection settings" in formatted
 
+    def test_format_authentication_error(self):
+        """Test formatting authentication errors."""
+        error = AuthenticationError("Invalid credentials")
+
+        formatted = format_user_error(error)
+
+        assert "Invalid credentials" in formatted
+        assert "Please check your credentials and try again" in formatted
+
+    def test_format_system_error(self):
+        """Test formatting system errors."""
+        error = SystemError("Internal failure")
+
+        formatted = format_user_error(error)
+
+        assert "Internal failure" in formatted
+        assert "An unexpected error occurred. Please try again later" in formatted
+
+    def test_format_configuration_error(self):
+        """Test formatting configuration errors."""
+        error = ConfigurationError("Missing database setting")
+
+        formatted = format_user_error(error)
+
+        assert "Missing database setting" in formatted
+        assert "Server configuration error" in formatted
+        assert "contact your administrator" in formatted
+
+    def test_format_rate_limit_error(self):
+        """Test formatting rate limit errors."""
+        error = RateLimitError("Too many requests")
+
+        formatted = format_user_error(error)
+
+        assert "Too many requests" in formatted
+        assert "Please wait a moment and try again" in formatted
+
 
 class TestLoggingConfiguration:
     """Test logging configuration and utilities."""

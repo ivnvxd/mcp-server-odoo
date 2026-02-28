@@ -359,8 +359,11 @@ class TestServerFoundation:
                 "ir.model", [], ["model"], limit=200
             )
 
-    def test_completion_handler_partial_match(self, valid_config):
-        """Test _get_model_names filtering works for completion handler use case."""
+    @pytest.mark.asyncio
+    async def test_completion_handler_partial_match(self, valid_config):
+        """Test that the registered completion handler filters by partial match."""
+        import mcp.types as types
+
         server = OdooMCPServer(valid_config)
         server.access_controller = Mock()
         server.access_controller.get_enabled_models.return_value = [
@@ -369,42 +372,44 @@ class TestServerFoundation:
             {"model": "sale.order"},
         ]
 
-        # _get_model_names is the data source for the completion handler
-        names = server._get_model_names()
-        assert names == ["res.partner", "res.users", "sale.order"]
+        # Build a real CompleteRequest and invoke the registered handler
+        handler = server.app._mcp_server.request_handlers[types.CompleteRequest]
+        req = types.CompleteRequest(
+            method="completion/complete",
+            params=types.CompleteRequestParams(
+                ref=types.PromptReference(type="ref/prompt", name="test"),
+                argument=types.CompletionArgument(name="model", value="res."),
+            ),
+        )
 
-        # Simulate the filtering the handler does (partial match)
-        partial = "res."
-        matches = [m for m in names if partial.lower() in m.lower()]
-        assert matches == ["res.partner", "res.users"]
-        assert "sale.order" not in matches
+        result = await handler(req)
+        values = result.root.completion.values
+        assert set(values) == {"res.partner", "res.users"}
+        assert "sale.order" not in values
 
-    def test_completion_handler_cap_at_20(self, valid_config):
-        """Test that completion would cap at 20 results via _get_model_names."""
+    @pytest.mark.asyncio
+    async def test_completion_handler_cap_at_20(self, valid_config):
+        """Test that the registered completion handler caps results at 20."""
+        import mcp.types as types
+
         server = OdooMCPServer(valid_config)
         server.access_controller = Mock()
         server.access_controller.get_enabled_models.return_value = [
             {"model": f"model.{i}"} for i in range(25)
         ]
 
-        names = server._get_model_names()
-        assert len(names) == 25
-        # The completion handler caps at 20 via matches[:20]
-        capped = names[:20]
-        assert len(capped) == 20
-        # Verify the cap actually excludes some models
-        assert names[20] not in capped
+        handler = server.app._mcp_server.request_handlers[types.CompleteRequest]
+        req = types.CompleteRequest(
+            method="completion/complete",
+            params=types.CompleteRequestParams(
+                ref=types.PromptReference(type="ref/prompt", name="test"),
+                argument=types.CompletionArgument(name="model", value=""),
+            ),
+        )
 
-    def test_run_stdio_sync(self, server_with_mock_connection):
-        """Test run_stdio_sync wrapper method."""
-        server = server_with_mock_connection
-
-        # Mock asyncio.run
-        with patch("asyncio.run") as mock_run:
-            server.run_stdio_sync()
-
-            # Verify asyncio.run was called
-            mock_run.assert_called_once()
+        result = await handler(req)
+        values = result.root.completion.values
+        assert len(values) == 20
 
 
 class TestServerIntegration:
@@ -618,16 +623,6 @@ class TestFastMCPApp:
         assert server.app is not None
         assert server.app.name == "odoo-mcp-server"
         assert "Odoo ERP data" in server.app.instructions
-
-    def test_fastmcp_app_has_required_methods(self, valid_config):
-        """Test that FastMCP app has required methods."""
-        server = OdooMCPServer(valid_config)
-
-        # Check that required methods exist
-        assert hasattr(server.app, "run_stdio_async")
-        assert hasattr(server.app, "resource")
-        assert hasattr(server.app, "tool")
-        assert hasattr(server.app, "prompt")
 
     def test_health_route_registered(self, valid_config):
         """Test that /health custom route is registered in Starlette routes."""

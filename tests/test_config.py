@@ -170,6 +170,26 @@ class TestLoadConfig:
         finally:
             os.unlink(env_file)
 
+    def test_locale_loaded_from_env(self, monkeypatch):
+        """Test that locale is loaded from ODOO_LOCALE env var."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_LOCALE", "fr_FR")
+
+        config = load_config()
+
+        assert config.locale == "fr_FR"
+
+    def test_max_smart_fields_loaded_from_env(self, monkeypatch):
+        """Test that max_smart_fields is loaded from ODOO_MCP_MAX_SMART_FIELDS env var."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_MCP_MAX_SMART_FIELDS", "25")
+
+        config = load_config()
+
+        assert config.max_smart_fields == 25
+
     def test_load_config_with_empty_strings(self, monkeypatch):
         """Test that empty strings are treated as None."""
         monkeypatch.setenv("ODOO_URL", "http://localhost:8069")

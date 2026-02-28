@@ -155,4 +155,4 @@ class TestErrorSanitizer:
         assert "search_count" not in sanitized
 
         # Should contain useful information
-        assert "Invalid field" in sanitized or "error" in sanitized.lower()
+        assert "Invalid field" in sanitized

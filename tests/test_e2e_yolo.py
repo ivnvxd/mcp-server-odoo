@@ -321,7 +321,7 @@ class TestYoloModeE2E:
                 offset=0,
                 order=None,
             )
-        assert "invalid_field_xyz" in str(exc_info.value) or "field" in str(exc_info.value).lower()
+        assert "invalid_field_xyz" in str(exc_info.value) or "Invalid field" in str(exc_info.value)
 
         # Test invalid record ID
         with pytest.raises(Exception) as exc_info:
@@ -330,7 +330,7 @@ class TestYoloModeE2E:
                 record_id=999999999,  # Very unlikely to exist
                 fields=["id", "name"],
             )
-        # Should indicate record not found
+        assert "not found" in str(exc_info.value).lower() or "999999999" in str(exc_info.value)
 
         # Test creating record with missing required fields
         with pytest.raises(Exception) as exc_info:
@@ -338,7 +338,7 @@ class TestYoloModeE2E:
                 model="res.users",  # Requires login field
                 values={"name": "Test User Without Login"},
             )
-        # Should get validation error from Odoo
+        assert str(exc_info.value), "Exception should have a message"
 
         connection.disconnect()
 

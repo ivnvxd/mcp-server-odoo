@@ -237,6 +237,40 @@ class TestOdooResourceHandler:
 
         assert "Connection error:" in str(exc_info.value)
 
+    @pytest.mark.asyncio
+    async def test_handle_record_retrieval_read_returns_empty(
+        self, resource_handler, mock_connection, mock_access_controller
+    ):
+        """Test NotFoundError when search finds ID but read returns empty list."""
+        # search finds the record ID, but read returns nothing
+        mock_connection.search.return_value = [1]
+        mock_connection.read.return_value = []
+
+        with pytest.raises(NotFoundError) as exc_info:
+            await resource_handler._handle_record_retrieval("res.partner", "1")
+
+        assert "Record not found" in str(exc_info.value)
+        assert "res.partner" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_handle_record_retrieval_fields_get_fallback(
+        self, resource_handler, mock_connection, mock_access_controller
+    ):
+        """Test fallback to reading all fields when fields_get raises an exception."""
+        mock_connection.search.return_value = [1]
+        # fields_get raises an exception, triggering the fallback path
+        mock_connection.fields_get.side_effect = Exception("fields_get unavailable")
+        mock_connection.read.return_value = [{"id": 1, "name": "Fallback Partner"}]
+
+        result = await resource_handler._handle_record_retrieval("res.partner", "1")
+
+        # read should have been called without a field list (fallback)
+        mock_connection.read.assert_called_once_with("res.partner", [1])
+
+        # Result should still contain the record data
+        assert "res.partner" in result
+        assert "Fallback Partner" in result
+
 
 class TestRegisterResources:
     """Test register_resources function."""

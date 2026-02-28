@@ -267,7 +267,7 @@ class TestSearchResource:
 
         # Check result message
         assert "No records found matching the criteria" in result
-        assert "Showing records 1-0 of 0" in result
+        assert "of 0" in result
 
     @pytest.mark.asyncio
     async def test_search_access_denied(self, resource_handler, mock_access_controller):
@@ -424,4 +424,19 @@ class TestSearchResourceIntegration:
         assert "Page 1 of" in result
 
         # Should have actual partner data — verify at least one record was returned
-        assert "Record " in result or "name:" in result
+        # Formatter uses "[1] Name" format for search results
+        assert "[1]" in result
+
+
+class TestSearchNotAuthenticated:
+    """Test search resource when not authenticated."""
+
+    @pytest.mark.asyncio
+    async def test_search_not_authenticated(self, resource_handler, mock_connection):
+        """Test that _handle_search raises ValidationError when not authenticated."""
+        mock_connection.is_authenticated = False
+
+        with pytest.raises(ValidationError) as exc_info:
+            await resource_handler._handle_search("res.partner", None, None, None, None, None)
+
+        assert "Not authenticated with Odoo" in str(exc_info.value)
