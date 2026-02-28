@@ -583,6 +583,45 @@ class TestMainEntry:
                 assert exit_code == 0
                 mock_server_class.assert_called_once()
 
+    def test_main_with_http_transport(self, monkeypatch):
+        """Test main with streamable-http transport."""
+        from mcp_server_odoo.__main__ import main
+
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test_key")
+        # Pre-set so main()'s os.environ writes are captured by monkeypatch
+        monkeypatch.setenv("ODOO_MCP_TRANSPORT", "stdio")
+        monkeypatch.setenv("ODOO_MCP_HOST", "localhost")
+        monkeypatch.setenv("ODOO_MCP_PORT", "8000")
+
+        with patch("mcp_server_odoo.__main__.OdooMCPServer") as mock_server_class:
+            mock_config = Mock()
+            mock_config.transport = "streamable-http"
+            mock_config.host = "localhost"
+            mock_config.port = 8000
+
+            mock_server = Mock()
+
+            async def mock_run_http(**kwargs):
+                pass
+
+            mock_server.run_http = mock_run_http
+            mock_server_class.return_value = mock_server
+
+            def mock_asyncio_run(coro):
+                loop = asyncio.new_event_loop()
+                try:
+                    return loop.run_until_complete(coro)
+                finally:
+                    loop.close()
+
+            with (
+                patch("mcp_server_odoo.__main__.load_config", return_value=mock_config),
+                patch("asyncio.run", side_effect=mock_asyncio_run),
+            ):
+                exit_code = main(["--transport", "streamable-http"])
+                assert exit_code == 0
+
 
 class TestFastMCPApp:
     """Test the FastMCP app configuration."""

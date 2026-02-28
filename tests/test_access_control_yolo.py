@@ -4,7 +4,6 @@ This module tests the AccessController class behavior in YOLO modes.
 """
 
 import os
-from unittest.mock import patch
 
 import pytest
 
@@ -182,22 +181,6 @@ class TestYoloModeAccessControl:
         controller.validate_model_access("res.partner", "create")  # Should not raise
         controller.validate_model_access("res.partner", "unlink")  # Should not raise
 
-    def test_no_api_calls_in_yolo_mode(self, config_yolo_read):
-        """Test that no API calls are made to MCP endpoints in YOLO mode."""
-        controller = AccessController(config_yolo_read)
-
-        # Mock _make_request to ensure it's never called
-        with patch.object(controller, "_make_request") as mock_request:
-            # These operations should not trigger API calls
-            controller.is_model_enabled("res.partner")
-            controller.get_model_permissions("res.partner")
-            controller.check_operation_allowed("res.partner", "read")
-            controller.filter_enabled_models(["res.partner"])
-            controller.get_enabled_models()
-
-            # Verify no API calls were made
-            mock_request.assert_not_called()
-
     def test_standard_and_yolo_controllers_independent(self, config_yolo_read):
         """Test that standard and YOLO controllers can coexist independently."""
         # Create standard mode config without API key
@@ -218,21 +201,6 @@ class TestYoloModeAccessControl:
 
         # Should work without API
         assert controller_yolo.is_model_enabled("res.partner") is True
-
-    def test_yolo_permissions_consistent(self, config_yolo_read):
-        """Test that YOLO mode returns consistent permissions without cache."""
-        controller = AccessController(config_yolo_read)
-
-        # Verify no API calls are made (cache is irrelevant in YOLO mode)
-        with patch.object(controller, "_make_request") as mock_request:
-            perms1 = controller.get_model_permissions("res.partner")
-            perms2 = controller.get_model_permissions("res.partner")
-
-            mock_request.assert_not_called()
-
-        # Should return consistent results
-        assert perms1.can_read == perms2.can_read
-        assert perms1.can_write == perms2.can_write
 
 
 if __name__ == "__main__":

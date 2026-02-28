@@ -129,6 +129,22 @@ class TestSearchSmartDefaults:
         tool_handler.connection.read.assert_called_once_with("res.partner", [1], None)
 
     @pytest.mark.asyncio
+    async def test_search_falls_back_when_fields_get_fails(self, tool_handler):
+        """Smart defaults should fall back to all fields when fields_get fails."""
+        tool_handler.connection.is_authenticated = True
+        tool_handler.connection.search_count.return_value = 1
+        tool_handler.connection.search.return_value = [1]
+        tool_handler.connection.fields_get.side_effect = Exception("Cannot get fields")
+        tool_handler.connection.read.return_value = [{"id": 1, "name": "Test"}]
+
+        result = await tool_handler._handle_search_tool("res.partner", [], None, 10, 0, None)
+
+        assert result["total"] == 1
+        # Should fall back to no field filtering
+        fields_arg = tool_handler.connection.read.call_args[0][2]
+        assert fields_arg is None
+
+    @pytest.mark.asyncio
     async def test_search_smart_defaults_with_datetime_formatting(self, tool_handler):
         """Test that datetime fields are formatted even with smart defaults."""
         # Setup mocks

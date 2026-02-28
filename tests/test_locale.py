@@ -62,7 +62,7 @@ class TestLocaleInjection:
         conn.execute_kw("res.partner", "search", [[]], {})
 
         passed_kwargs = mock_proxy.execute_kw.call_args[0][6]
-        assert "context" not in passed_kwargs or "lang" not in passed_kwargs.get("context", {})
+        assert "lang" not in passed_kwargs.get("context", {})
 
     def test_locale_preserves_existing_context(self, config_with_locale):
         conn = OdooConnection(config_with_locale)

@@ -167,7 +167,10 @@ class TestFixesIntegration:
         # Verify read was called without field filtering (__all__ disables smart fields)
         tool_handler.connection.read.assert_called_once()
         call_args = tool_handler.connection.read.call_args
-        assert call_args[0][2] is None or "__all__" not in call_args[0][2]
+        fields_passed = call_args[0][2]
+        assert fields_passed is None, (
+            f"Expected fields=None when __all__ is used, got {fields_passed}"
+        )
 
         # Should still format datetime
         assert result.record["write_date"] == "2025-06-06T13:50:23+00:00"

@@ -273,15 +273,6 @@ class TestOdooConnectionDisconnect:
         conn.disconnect()
         assert "Not connected to Odoo" in caplog.text
 
-    @pytest.mark.yolo
-    def test_disconnect_cleanup_on_del(self, test_config):
-        """Test cleanup on object deletion."""
-        conn = OdooConnection(test_config)
-        conn.connect()
-
-        # Delete should trigger disconnect
-        del conn
-
 
 class TestOdooConnectionHealth:
     """Test health checking."""
@@ -433,10 +424,11 @@ class TestOdooConnectionIntegration:
     def test_real_server_db_list(self, test_config):
         """Test listing databases from real server."""
         with create_connection(test_config) as conn:
-            # Note: This might fail if db listing is disabled
             try:
                 db_list = conn.db_proxy.list()
-                assert isinstance(db_list, list)
             except Exception as e:
-                # DB listing might be disabled for security
-                assert "Access Denied" in str(e) or "not allowed" in str(e)
+                if "Access Denied" in str(e):
+                    pytest.skip("Database listing is disabled on this server")
+                raise
+            assert isinstance(db_list, list)
+            assert len(db_list) > 0

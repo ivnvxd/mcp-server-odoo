@@ -12,6 +12,7 @@ import pytest
 
 from mcp_server_odoo.access_control import AccessController
 from mcp_server_odoo.config import OdooConfig
+from mcp_server_odoo.error_handling import ValidationError
 from mcp_server_odoo.odoo_connection import OdooConnection
 from mcp_server_odoo.tools import OdooToolHandler
 
@@ -107,7 +108,7 @@ class TestYoloModeE2E:
             assert get_result.record["id"] == first_record["id"]
 
         # 5. Attempt to create record - should fail
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await handler._handle_create_record_tool(
                 model="res.partner",
                 values={"name": "YOLO Test Partner - Should Fail"},
@@ -116,7 +117,7 @@ class TestYoloModeE2E:
 
         # 6. Attempt to update record - should fail
         if search_result["records"]:
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises(ValidationError) as exc_info:
                 await handler._handle_update_record_tool(
                     model="res.partner",
                     record_id=first_record["id"],
@@ -126,7 +127,7 @@ class TestYoloModeE2E:
 
         # 7. Attempt to delete record - should fail
         if search_result["records"]:
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises(ValidationError) as exc_info:
                 await handler._handle_delete_record_tool(
                     model="res.partner",
                     record_id=first_record["id"],
@@ -242,7 +243,7 @@ class TestYoloModeE2E:
         handler = OdooToolHandler(app, connection, access_controller, config_full_access)
 
         # Test standard models
-        standard_models = ["res.partner", "res.users", "res.company"]
+        standard_models = ["res.partner", "res.users", "res.company", "res.country"]
         for model in standard_models:
             result = await handler._handle_search_tool(
                 model=model,
@@ -253,7 +254,7 @@ class TestYoloModeE2E:
                 order=None,
             )
             assert "records" in result, f"Failed to access standard model: {model}"
-            assert result["total"] >= 0
+            assert result["total"] > 0, f"Expected records in {model}"
 
         # Test system models (usually restricted in standard mode)
         system_models = ["ir.model", "ir.model.fields", "ir.config_parameter"]
@@ -267,21 +268,6 @@ class TestYoloModeE2E:
                 order=None,
             )
             assert "records" in result, f"Failed to access system model: {model}"
-
-        # Test accounting models if available
-        try:
-            account_result = await handler._handle_search_tool(
-                model="account.account",
-                domain=[],
-                fields=["id", "name"],
-                limit=1,
-                offset=0,
-                order=None,
-            )
-            assert "records" in account_result
-        except Exception:
-            # Accounting module might not be installed
-            pass
 
         connection.disconnect()
 
@@ -297,7 +283,7 @@ class TestYoloModeE2E:
         handler = OdooToolHandler(app, connection, access_controller, config_full_access)
 
         # Test invalid model name
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await handler._handle_search_tool(
                 model="invalid.model.name",
                 domain=[],
@@ -306,14 +292,10 @@ class TestYoloModeE2E:
                 offset=0,
                 order=None,
             )
-        # Should get Odoo error, not MCP error
-        assert (
-            "invalid.model.name" in str(exc_info.value)
-            or "not found" in str(exc_info.value).lower()
-        )
+        assert "invalid.model.name" in str(exc_info.value)
 
         # Test invalid field name
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await handler._handle_search_tool(
                 model="res.partner",
                 domain=[],
@@ -322,19 +304,19 @@ class TestYoloModeE2E:
                 offset=0,
                 order=None,
             )
-        assert "invalid_field_xyz" in str(exc_info.value) or "Invalid field" in str(exc_info.value)
+        assert "invalid_field_xyz" in str(exc_info.value)
 
         # Test invalid record ID
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await handler._handle_get_record_tool(
                 model="res.partner",
                 record_id=999999999,  # Very unlikely to exist
                 fields=["id", "name"],
             )
-        assert "not found" in str(exc_info.value).lower() or "999999999" in str(exc_info.value)
+        assert "not found" in str(exc_info.value).lower()
 
         # Test creating record with missing required fields
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await handler._handle_create_record_tool(
                 model="res.users",  # Requires login field
                 values={"name": "Test User Without Login"},
