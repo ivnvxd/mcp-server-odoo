@@ -329,6 +329,50 @@ class TestRequestOptimizer:
         fields = optimizer.get_optimized_fields("res.partner", ["id", "display_name"])
         assert fields == ["id", "display_name"]
 
+    def test_get_optimized_fields_default_when_no_usage(self):
+        """Test that default fields are returned when no usage data exists."""
+        optimizer = RequestOptimizer()
+
+        # No usage data → should return common default fields
+        fields = optimizer.get_optimized_fields("res.partner", None)
+        assert fields == ["id", "display_name"]
+
+    def test_get_optimized_fields_uses_usage_data(self):
+        """Test that field optimization returns most-used fields based on tracking."""
+        optimizer = RequestOptimizer()
+
+        # Simulate usage data — record_field_usage tracks which fields are accessed
+        optimizer._field_usage["res.partner"] = {
+            "name": 50,
+            "email": 40,
+            "phone": 30,
+            "city": 20,
+            "zip": 10,
+            "rarely_used": 1,
+        }
+
+        fields = optimizer.get_optimized_fields("res.partner", None)
+
+        # Should return fields sorted by usage (most used first), up to 20
+        assert fields[0] == "name"  # Most used
+        assert fields[1] == "email"  # Second most used
+        assert len(fields) == 6  # All 6 fields (less than 20 limit)
+        assert "rarely_used" in fields  # Even rare fields included when under limit
+
+    def test_get_optimized_fields_limits_to_top_20(self):
+        """Test that optimization caps at 20 fields even with more usage data."""
+        optimizer = RequestOptimizer()
+
+        # Create 25 fields with usage data
+        optimizer._field_usage["res.partner"] = {f"field_{i}": 100 - i for i in range(25)}
+
+        fields = optimizer.get_optimized_fields("res.partner", None)
+        assert len(fields) == 20
+        # Top field should be first
+        assert fields[0] == "field_0"
+        # field_20 through field_24 should be excluded
+        assert "field_20" not in fields
+
     def test_should_batch_request(self):
         """Test batch request logic."""
         optimizer = RequestOptimizer()

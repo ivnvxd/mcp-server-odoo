@@ -235,7 +235,7 @@ class TestResourceOperations:
         result = await handler._handle_search("res.partner", None, None, 5, 0, None)
 
         assert "res.partner" in result
-        assert "Total records:" in result
+        assert "Showing records" in result
         # Must contain actual record data, not fake mock strings
         assert "Mock data" not in result
 
@@ -251,7 +251,7 @@ class TestResourceOperations:
 
         assert "res.partner" in result
         # Should mention record count from filtered results
-        assert "Total records:" in result
+        assert "Showing records" in result
 
     @pytest.mark.asyncio
     async def test_count_operation(self, connected_env):

@@ -95,10 +95,15 @@ class TestYoloModeTools:
         assert call_args[0][0] == "ir.model"  # Model name
         assert "transient" in str(call_args[0][1])  # Domain includes transient filter
 
-        # Check result structure
-        assert "yolo_mode" in result
-        assert "models" in result
-        assert "total" in result
+        # Check result structure and values
+        assert result["total"] == 3
+        assert len(result["models"]) == 3
+
+        # Verify model names from the mock actually appear in the result
+        model_names = [m["model"] for m in result["models"]]
+        assert "res.partner" in model_names
+        assert "product.product" in model_names
+        assert "sale.order" in model_names
 
         # Check YOLO mode metadata
         yolo_meta = result["yolo_mode"]
@@ -111,14 +116,13 @@ class TestYoloModeTools:
         assert yolo_meta["operations"]["create"] is False
         assert yolo_meta["operations"]["unlink"] is False
 
-        # Verify search_read was called with correct domain and fields
+        # Verify search_read was called with correct domain
         call_args = mock_connection.search_read.call_args
         assert call_args[0][0] == "ir.model"
         assert ("transient", "=", False) in call_args[0][1]
 
         # In YOLO mode, models should NOT have per-model operations (unlike standard mode)
-        models = result["models"]
-        for model in models:
+        for model in result["models"]:
             assert "operations" not in model
 
     @pytest.mark.asyncio
@@ -140,10 +144,14 @@ class TestYoloModeTools:
         # Call the method
         result = await handler._handle_list_models_tool()
 
-        # Check result structure
-        assert "yolo_mode" in result
-        assert "models" in result
-        assert "total" in result
+        # Check result structure and values
+        assert result["total"] == 2
+        assert len(result["models"]) == 2
+
+        # Verify model names from the mock actually appear in the result
+        model_names = [m["model"] for m in result["models"]]
+        assert "res.partner" in model_names
+        assert "account.move" in model_names
 
         # Check YOLO mode metadata
         yolo_meta = result["yolo_mode"]
@@ -201,16 +209,15 @@ class TestYoloModeTools:
         # Verify access controller was called
         mock_access_controller.get_enabled_models.assert_called_once()
 
-        # Check result structure
-        assert "models" in result
+        # Verify result contains the models with correct permissions
         models = result["models"]
         assert len(models) == 2
-
-        # Verify connection.search_read was NOT called (standard mode)
-        mock_connection.search_read.assert_not_called()
-
-        # Verify access_controller.get_enabled_models WAS called
-        mock_access_controller.get_enabled_models.assert_called_once()
+        for model in models:
+            assert "operations" in model
+            assert model["operations"]["read"] is True
+            assert model["operations"]["write"] is True
+            assert model["operations"]["create"] is False
+            assert model["operations"]["unlink"] is False
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_error_handling(
@@ -258,8 +265,10 @@ class TestYoloModeTools:
             mock_app, mock_connection, mock_access_controller, config_yolo_read
         )
 
-        # Call the method
-        await handler._handle_list_models_tool()
+        # Call the method and verify empty result is handled
+        result = await handler._handle_list_models_tool()
+        assert result["models"] == []
+        assert result["total"] == 0
 
         # Verify the domain passed to search_read
         call_args = mock_connection.search_read.call_args
@@ -299,8 +308,11 @@ class TestYoloModeTools:
             mock_app, mock_connection, mock_access_controller, config_yolo_read
         )
 
-        # Call the method
-        await handler._handle_list_models_tool()
+        # Call the method and verify result
+        result = await handler._handle_list_models_tool()
+        assert result["total"] == 1
+        assert len(result["models"]) == 1
+        assert result["models"][0]["model"] == "res.partner"
 
         # Check logs
         assert "YOLO mode (READ-ONLY)" in caplog.text

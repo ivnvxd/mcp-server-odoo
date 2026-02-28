@@ -21,55 +21,51 @@ class TestTransportIntegration:
         """Test stdio transport basic initialization and communication."""
         client = MCPTestClient()
 
-        try:
-            async with client.connect():
-                # Test basic operations
-                tools = await client.list_tools()
-                assert len(tools) > 0, "Expected at least one tool"
+        async with client.connect():
+            # Verify expected tools are registered
+            tools = await client.list_tools()
+            tool_names = {t.name for t in tools}
+            expected_tools = {"search_records", "get_record", "list_models"}
+            assert expected_tools.issubset(tool_names), (
+                f"Missing expected tools: {expected_tools - tool_names}"
+            )
 
-                await client.list_resources()
-                # Resources might be empty, that's ok for transport testing
-
-                # Test a basic tool call - list_models should work with proper auth
-                result = await client.call_tool("list_models", {})
-                assert result is not None, "Tool call should return a result"
-                # The result should be a proper MCP response
-                assert hasattr(result, "content"), "Tool result should have content"
-
-        except Exception as e:
-            # Log the actual error for debugging
-            import logging
-
-            logging.error(f"stdio transport test failed: {e}")
-            # Re-raise to fail the test
-            raise
+            # Test a tool call and verify content is meaningful
+            result = await client.call_tool("list_models", {})
+            assert hasattr(result, "content"), "Tool result should have content"
+            assert len(result.content) > 0, "Tool result should have non-empty content"
+            # Content text should contain model data (not an empty/error response)
+            content_text = result.content[0].text
+            assert "models" in content_text or "model" in content_text, (
+                f"list_models result should contain model data, got: {content_text[:200]}"
+            )
 
     @pytest.mark.asyncio
     async def test_stdio_transport_multiple_requests(self, odoo_server_required):
-        """Test stdio transport can handle multiple sequential requests."""
+        """Test stdio transport returns consistent results across sequential requests."""
         client = MCPTestClient()
 
-        try:
-            async with client.connect():
-                # Make multiple tool list requests
-                for i in range(3):
-                    tools = await client.list_tools()
-                    assert len(tools) > 0, f"Expected tools on request {i + 1}"
+        async with client.connect():
+            # Verify tool list is stable across requests
+            first_tools = await client.list_tools()
+            first_tool_names = {t.name for t in first_tools}
+            assert len(first_tool_names) > 0, "Expected tools on first request"
 
-                # Make multiple resource list requests
-                for i in range(3):
-                    resources = await client.list_resources()
-                    # Resources might be empty, that's ok - just testing transport stability
-                    assert resources is not None, (
-                        f"Resource list should not be None on request {i + 1}"
-                    )
+            for i in range(2):
+                tools = await client.list_tools()
+                tool_names = {t.name for t in tools}
+                assert tool_names == first_tool_names, (
+                    f"Tool list changed on request {i + 2}: {tool_names ^ first_tool_names}"
+                )
 
-        except Exception as e:
-            # Log the actual error for debugging
-            import logging
-
-            logging.error(f"stdio multiple requests test failed: {e}")
-            raise
+            # Verify resource list is stable across requests
+            first_resources = await client.list_resources()
+            for i in range(2):
+                resources = await client.list_resources()
+                assert len(resources) == len(first_resources), (
+                    f"Resource count changed on request {i + 2}: "
+                    f"{len(resources)} vs {len(first_resources)}"
+                )
 
     @pytest.mark.asyncio
     async def test_http_transport_basic_flow(self, odoo_server_required):
