@@ -217,12 +217,13 @@ class TestRealOdooServer:
         import urllib.request
 
         odoo_url = os.getenv("ODOO_URL", "http://localhost:8069")
-        try:
-            with urllib.request.urlopen(f"{odoo_url}/mcp/health", timeout=2) as response:
-                if response.status != 200:
-                    pytest.skip("Odoo /mcp/health endpoint not available")
-        except Exception:
-            pytest.skip("Odoo server not available")
+        database = os.getenv("ODOO_DB", "odoo")
+        req = urllib.request.Request(
+            f"{odoo_url}/mcp/health",
+            headers={"X-Odoo-Database": database},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            assert response.status == 200
 
         client = MCPTestClient()
         async with client.connect() as connected_client:

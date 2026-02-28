@@ -265,6 +265,71 @@ class TestSearchCount:
         assert args[5] == [[["active", "=", True]]]
 
 
+class TestSearchRead:
+    """Test OdooConnection.search_read() method."""
+
+    def test_search_read_builds_correct_execute_kw_call(self, connected_connection):
+        """search_read() should call execute_kw with 'search_read' method and domain."""
+        conn = connected_connection
+        domain = [["is_company", "=", True]]
+        expected = [{"id": 1, "name": "Test"}]
+        conn._object_proxy.execute_kw.return_value = expected
+
+        result = conn.search_read("res.partner", domain)
+
+        assert result == expected
+        conn._object_proxy.execute_kw.assert_called_once()
+        args = conn._object_proxy.execute_kw.call_args[0]
+        assert args[0] == "testdb"
+        assert args[1] == 2  # uid
+        assert args[2] == "admin"  # password
+        assert args[3] == "res.partner"
+        assert args[4] == "search_read"
+        assert args[5] == [domain]
+        assert args[6] == {}
+
+    def test_search_read_with_fields(self, connected_connection):
+        """search_read() with fields should pass them as kwarg."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.return_value = [{"id": 1, "name": "Test"}]
+
+        conn.search_read("res.partner", [], fields=["name", "email"])
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert kwargs["fields"] == ["name", "email"]
+
+    def test_search_read_without_fields(self, connected_connection):
+        """search_read() without fields should not pass 'fields' kwarg."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.search_read("res.partner", [])
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert "fields" not in kwargs
+
+    def test_search_read_with_limit_and_offset(self, connected_connection):
+        """search_read() should forward limit and offset to execute_kw kwargs."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.search_read("res.partner", [], limit=10, offset=20)
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert kwargs["limit"] == 10
+        assert kwargs["offset"] == 20
+
+    def test_search_read_propagates_xmlrpc_fault(self, connected_connection):
+        """search_read() should wrap XML-RPC faults as OdooConnectionError."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            1, "Access denied on res.partner"
+        )
+
+        with pytest.raises(OdooConnectionError, match="Operation failed"):
+            conn.search_read("res.partner", [])
+
+
 class TestExecuteKwErrorHandling:
     """Test execute_kw error handling."""
 

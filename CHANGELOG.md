@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Model autocomplete**: FastMCP completion handler returns matching model names when clients request autocomplete for `model` parameters in resource URIs
 
 ### Changed
-- **Tests**: Strengthen assertions across test suite — add CRUD tool tests, replace defensive guards with strict checks, restore timing and health-endpoint coverage
+- **Tests**: Overhaul test suite — replace fake MCP protocol simulators with real handler calls, mock only at the XML-RPC network boundary, add CRUD/tool/lifespan/completion coverage, remove example-only and mock-asserting tests
 
 ## [0.4.5] - 2026-02-27
 

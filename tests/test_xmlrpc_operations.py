@@ -167,7 +167,7 @@ class TestXMLRPCOperationsIntegration:
             # Search for companies
             partner_ids = conn.search("res.partner", [["is_company", "=", True]], limit=5)
 
-            assert isinstance(partner_ids, list)
+            assert len(partner_ids) > 0, "Expected at least one company partner"
             print(f"Found {len(partner_ids)} company partners")
 
     @skip_on_rate_limit
@@ -184,13 +184,13 @@ class TestXMLRPCOperationsIntegration:
             # Search for a partner
             partner_ids = conn.search("res.partner", [], limit=1)
 
-            if partner_ids:
-                # Read partner data
-                partners = conn.read("res.partner", partner_ids, ["name", "email", "is_company"])
+            assert partner_ids, "Expected at least one partner"
+            # Read partner data
+            partners = conn.read("res.partner", partner_ids, ["name", "email", "is_company"])
 
-                assert len(partners) == 1
-                assert "name" in partners[0]
-                print(f"Partner: {partners[0].get('name')}")
+            assert len(partners) == 1
+            assert "name" in partners[0]
+            print(f"Partner: {partners[0].get('name')}")
 
     @skip_on_rate_limit
     def test_real_search_read_partners(self, real_config):

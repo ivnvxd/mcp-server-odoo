@@ -328,10 +328,18 @@ class TestWriteToolsIntegration:
 
     @pytest.fixture
     def real_config(self):
-        """Load real configuration."""
-        from mcp_server_odoo.config import load_config
+        """Create config with YOLO full-access mode for write testing."""
+        import os
 
-        return load_config()
+        from mcp_server_odoo.config import OdooConfig
+
+        return OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            username=os.getenv("ODOO_USER", "admin"),
+            password=os.getenv("ODOO_PASSWORD", "admin"),
+            database=os.getenv("ODOO_DB"),
+            yolo_mode="true",
+        )
 
     @pytest.fixture
     def real_connection(self, real_config):
@@ -367,8 +375,6 @@ class TestWriteToolsIntegration:
     @pytest.mark.asyncio
     async def test_create_update_delete_cycle(self, real_config, real_tool_handler):
         """Test full create, update, delete cycle with real Odoo."""
-        if real_config.yolo_mode != "true":
-            pytest.skip("Write test requires ODOO_YOLO=true (not read-only)")
         handler = real_tool_handler
 
         # Create a test partner

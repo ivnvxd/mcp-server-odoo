@@ -338,7 +338,10 @@ class TestYoloModeE2E:
                 model="res.users",  # Requires login field
                 values={"name": "Test User Without Login"},
             )
-        assert str(exc_info.value), "Exception should have a message"
+        err_msg = str(exc_info.value).lower()
+        assert "required" in err_msg or "login" in err_msg, (
+            f"Expected error about missing required fields, got: {exc_info.value}"
+        )
 
         connection.disconnect()
 
@@ -436,69 +439,6 @@ class TestYoloModeE2E:
         connection.disconnect()
 
     @pytest.mark.asyncio
-    async def test_explicit_opt_in_requirement(self):
-        """Test that only 'true' enables full access, not other truthy values."""
-        # Test valid YOLO modes
-        valid_cases = [
-            ("true", True),  # Should enable full access
-            ("read", False),  # Should be read-only
-            ("off", False),  # Should be disabled (standard mode)
-        ]
-
-        for value, should_allow_write in valid_cases:
-            config = OdooConfig(
-                url=os.getenv("ODOO_URL", "http://localhost:8069"),
-                database=os.getenv("ODOO_DB"),
-                username=os.getenv("ODOO_USER", "admin"),
-                password=os.getenv("ODOO_PASSWORD", "admin"),
-                yolo_mode=value,
-            )
-
-            if value in ["true", "read"]:
-                # These enable YOLO mode
-                assert config.is_yolo_enabled
-
-                if value == "true":
-                    assert config.yolo_mode == "true"
-                    # Check permissions allow write
-                    access_controller = AccessController(config)
-                    allowed, _ = access_controller.check_operation_allowed("res.partner", "write")
-                    assert allowed == should_allow_write, (
-                        f"Value '{value}' should {'allow' if should_allow_write else 'not allow'} write"
-                    )
-                else:
-                    assert config.yolo_mode == "read"
-                    # Check permissions block write
-                    access_controller = AccessController(config)
-                    allowed, _ = access_controller.check_operation_allowed("res.partner", "write")
-                    assert not allowed, "Read mode should not allow write"
-            else:
-                # "off" mode
-                assert not config.is_yolo_enabled
-                assert config.yolo_mode == "off"
-
-        # Test invalid YOLO mode values - should raise ValueError
-        invalid_cases = [
-            "True",  # Wrong case
-            "1",  # Not accepted
-            "yes",  # Not accepted
-            "on",  # Not accepted
-            "false",  # Not accepted
-            "full",  # Not accepted
-            "",  # Empty string
-        ]
-
-        for value in invalid_cases:
-            with pytest.raises(ValueError, match="Invalid YOLO mode"):
-                OdooConfig(
-                    url="http://localhost:8069",
-                    database=os.getenv("ODOO_DB", "mcp-18"),
-                    username=os.getenv("ODOO_USER", "admin"),
-                    password=os.getenv("ODOO_PASSWORD", "admin"),
-                    yolo_mode=value,
-                )
-
-    @pytest.mark.asyncio
     async def test_no_mcp_module_required(self, config_full_access):
         """Test that YOLO mode works without MCP module installed in Odoo."""
         # This test verifies YOLO mode connects to standard endpoints
@@ -528,3 +468,56 @@ class TestYoloModeE2E:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
+
+
+class TestYoloOptInValidation:
+    """Unit tests for YOLO mode opt-in validation (no Odoo needed)."""
+
+    def test_explicit_opt_in_requirement(self):
+        """Test that only 'true' enables full access, not other truthy values."""
+        valid_cases = [
+            ("true", True),
+            ("read", False),
+            ("off", False),
+        ]
+
+        for value, should_allow_write in valid_cases:
+            config = OdooConfig(
+                url=os.getenv("ODOO_URL", "http://localhost:8069"),
+                database=os.getenv("ODOO_DB"),
+                username=os.getenv("ODOO_USER", "admin"),
+                password=os.getenv("ODOO_PASSWORD", "admin"),
+                yolo_mode=value,
+            )
+
+            if value in ["true", "read"]:
+                assert config.is_yolo_enabled
+
+                if value == "true":
+                    assert config.yolo_mode == "true"
+                    access_controller = AccessController(config)
+                    allowed, _ = access_controller.check_operation_allowed("res.partner", "write")
+                    assert allowed == should_allow_write, (
+                        f"Value '{value}' should"
+                        f" {'allow' if should_allow_write else 'not allow'} write"
+                    )
+                else:
+                    assert config.yolo_mode == "read"
+                    access_controller = AccessController(config)
+                    allowed, _ = access_controller.check_operation_allowed("res.partner", "write")
+                    assert not allowed, "Read mode should not allow write"
+            else:
+                assert not config.is_yolo_enabled
+                assert config.yolo_mode == "off"
+
+        invalid_cases = ["True", "1", "yes", "on", "false", "full", ""]
+
+        for value in invalid_cases:
+            with pytest.raises(ValueError, match="Invalid YOLO mode"):
+                OdooConfig(
+                    url="http://localhost:8069",
+                    database=os.getenv("ODOO_DB", "mcp-18"),
+                    username=os.getenv("ODOO_USER", "admin"),
+                    password=os.getenv("ODOO_PASSWORD", "admin"),
+                    yolo_mode=value,
+                )

@@ -231,15 +231,18 @@ class TestResourceQueryParameterHandling:
 class TestResourceRegistration:
     """Test that resources are actually registered with the FastMCP app."""
 
-    def test_resources_registered_with_fastmcp(self, resource_handler, fastmcp_app):
-        """Verify resources are registered by checking the app has resource handlers."""
-        # The resource handler should have registered URI patterns with the app
-        # during __init__. Verify by checking the app's internal resource registry.
-        assert fastmcp_app._resource_manager is not None
-
-        # Verify the handler can actually handle resource operations
-        # by testing a real async call rather than just checking hasattr
-        assert callable(getattr(resource_handler, "_handle_search", None))
-        assert callable(getattr(resource_handler, "_handle_count", None))
-        assert callable(getattr(resource_handler, "_handle_fields", None))
-        assert callable(getattr(resource_handler, "_handle_record_retrieval", None))
+    @pytest.mark.asyncio
+    async def test_resources_registered_with_fastmcp(self, resource_handler, fastmcp_app):
+        """Verify resources are registered by listing them from the FastMCP app."""
+        templates = await fastmcp_app.list_resource_templates()
+        template_uris = [t.uriTemplate for t in templates]
+        # The resource handler registers URI patterns during __init__
+        assert any("record" in uri for uri in template_uris), (
+            f"Expected a 'record' resource template, got: {template_uris}"
+        )
+        assert any("search" in uri for uri in template_uris), (
+            f"Expected a 'search' resource template, got: {template_uris}"
+        )
+        assert any("fields" in uri for uri in template_uris), (
+            f"Expected a 'fields' resource template, got: {template_uris}"
+        )

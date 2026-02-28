@@ -213,6 +213,105 @@ class TestAuthentication:
         assert connection_api_key.auth_method is None
 
 
+class TestAuthenticateOrchestration:
+    """Test authenticate() orchestration logic.
+
+    Mocks only _authenticate_api_key, _authenticate_password, and
+    auto_select_database — lets the orchestration in authenticate() run for real.
+    """
+
+    def test_authenticate_not_connected_raises(self):
+        """authenticate() should raise if not connected."""
+        config = OdooConfig(url="http://localhost:8069", api_key="key", database="testdb")
+        conn = OdooConnection(config)
+
+        with pytest.raises(OdooConnectionError, match="Not connected"):
+            conn.authenticate()
+
+    def test_authenticate_api_key_success(self):
+        """authenticate() should succeed when _authenticate_api_key returns True."""
+        config = OdooConfig(url="http://localhost:8069", api_key="key", database="testdb")
+        conn = OdooConnection(config)
+        conn._connected = True
+
+        with patch.object(conn, "_authenticate_api_key", return_value=True) as mock_api:
+            conn.authenticate("testdb")
+
+        mock_api.assert_called_once_with("testdb")
+
+    def test_authenticate_password_fallback(self):
+        """authenticate() should fall back to password when api_key fails."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="key",
+            username="admin",
+            password="admin",
+            database="testdb",
+        )
+        conn = OdooConnection(config)
+        conn._connected = True
+
+        with (
+            patch.object(conn, "_authenticate_api_key", return_value=False) as mock_api,
+            patch.object(conn, "_authenticate_password", return_value=True) as mock_pwd,
+        ):
+            conn.authenticate("testdb")
+
+        mock_api.assert_called_once_with("testdb")
+        mock_pwd.assert_called_once_with("testdb")
+
+    def test_authenticate_all_methods_fail(self):
+        """authenticate() should raise with mode hint when all methods fail."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="key",
+            username="admin",
+            password="admin",
+            database="testdb",
+        )
+        conn = OdooConnection(config)
+        conn._connected = True
+
+        with (
+            patch.object(conn, "_authenticate_api_key", return_value=False),
+            patch.object(conn, "_authenticate_password", return_value=False),
+        ):
+            with pytest.raises(OdooConnectionError, match="Authentication failed") as exc_info:
+                conn.authenticate("testdb")
+
+        assert "Standard mode" in str(exc_info.value)
+
+    def test_authenticate_with_explicit_database(self):
+        """authenticate() with explicit database should not call auto_select_database."""
+        config = OdooConfig(url="http://localhost:8069", api_key="key", database="default_db")
+        conn = OdooConnection(config)
+        conn._connected = True
+
+        with (
+            patch.object(conn, "_authenticate_api_key", return_value=True) as mock_api,
+            patch.object(conn, "auto_select_database") as mock_auto_db,
+        ):
+            conn.authenticate("mydb")
+
+        mock_auto_db.assert_not_called()
+        mock_api.assert_called_once_with("mydb")
+
+    def test_authenticate_no_credentials_configured(self):
+        """authenticate() should raise when no auth methods are available."""
+        config = OdooConfig(
+            url="http://localhost:8069", database="testdb", username="admin", password="admin"
+        )
+        conn = OdooConnection(config)
+        conn._connected = True
+        # Clear credentials after construction to simulate no methods available
+        config.api_key = None
+        config.username = None
+        config.password = None
+
+        with pytest.raises(OdooConnectionError, match="No authentication method configured"):
+            conn.authenticate("testdb")
+
+
 @pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 class TestAuthenticationIntegration:
     """Integration tests with real Odoo server."""
