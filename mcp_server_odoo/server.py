@@ -8,6 +8,7 @@ import contextlib
 from typing import Any, Dict, Optional
 
 from mcp.server import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .access_control import AccessController
 from .config import OdooConfig, get_config
@@ -57,11 +58,32 @@ class OdooMCPServer:
         self.resource_handler = None
         self.tool_handler = None
 
+        # Configure transport security for DNS rebinding protection
+        transport_security = None
+        if self.config.allowed_hosts:
+            # Build allowed_hosts with wildcard ports
+            allowed_hosts = [
+                f"{h}:*" if ":" not in h else h for h in self.config.allowed_hosts
+            ]
+            # Build allowed_origins from hosts
+            allowed_origins = []
+            for h in self.config.allowed_hosts:
+                base = h.split(":")[0] if ":" in h else h
+                allowed_origins.extend([f"http://{base}:*", f"https://{base}:*"])
+
+            transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=allowed_origins,
+            )
+
         # Create FastMCP instance with server metadata
         self.app = FastMCP(
             name="odoo-mcp-server",
             instructions="MCP server for accessing and managing Odoo ERP data through the Model Context Protocol",
             lifespan=self._odoo_lifespan,
+            host=self.config.host,
+            transport_security=transport_security,
         )
 
         @self.app.custom_route("/health", methods=["GET"])

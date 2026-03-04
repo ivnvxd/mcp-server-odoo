@@ -5,7 +5,7 @@ for connecting to Odoo via XML-RPC.
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Literal, Optional
 
@@ -39,6 +39,9 @@ class OdooConfig:
 
     # YOLO mode configuration
     yolo_mode: str = "off"  # "off", "read", or "true"
+
+    # Allowed hosts for DNS rebinding protection (HTTP transport)
+    allowed_hosts: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -218,6 +221,13 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
             # Invalid value - will be caught by validation
             return yolo_env
 
+    # Helper function to parse allowed hosts
+    def parse_allowed_hosts() -> list[str]:
+        hosts = os.getenv("ODOO_MCP_ALLOWED_HOSTS", "").strip()
+        if not hosts:
+            return []
+        return [h.strip() for h in hosts.split(",") if h.strip()]
+
     # Create configuration
     config = OdooConfig(
         url=os.getenv("ODOO_URL", "").strip(),
@@ -234,6 +244,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         port=get_int_env("ODOO_MCP_PORT", 8000),
         locale=os.getenv("ODOO_LOCALE", "").strip() or None,
         yolo_mode=get_yolo_mode(),
+        allowed_hosts=parse_allowed_hosts(),
     )
 
     return config
