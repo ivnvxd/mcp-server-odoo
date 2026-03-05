@@ -1,6 +1,6 @@
 """Tests for write operation tools."""
 
-from unittest.mock import Mock, call
+from unittest.mock import MagicMock, Mock, call
 
 import pytest
 
@@ -356,7 +356,10 @@ class TestWriteToolsIntegration:
     @pytest.fixture
     def real_tool_handler(self, real_app, real_connection, real_access_controller, real_config):
         """Create real tool handler."""
-        return register_tools(real_app, real_connection, real_access_controller, real_config)
+        # Wrap connection in mock server object (register_tools expects server with .connection)
+        mock_server = MagicMock()
+        mock_server.connection = real_connection
+        return register_tools(real_app, mock_server, real_access_controller, real_config)
 
     @pytest.mark.yolo
     @pytest.mark.asyncio

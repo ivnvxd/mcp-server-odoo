@@ -19,6 +19,13 @@ from mcp_server_odoo.tools import OdooToolHandler
 from .conftest import ODOO_SERVER_AVAILABLE
 
 
+def _wrap_connection_in_server(connection):
+    """Wrap an OdooConnection in a mock server object for handler compatibility."""
+    mock_server = MagicMock()
+    mock_server.connection = connection
+    return mock_server
+
+
 @pytest.mark.skipif(not ODOO_SERVER_AVAILABLE, reason="Odoo server not available")
 @pytest.mark.yolo
 class TestYoloModeE2E:
@@ -68,7 +75,9 @@ class TestYoloModeE2E:
         # Setup tool handler
         app = MagicMock()
         access_controller = AccessController(config_read_only)
-        handler = OdooToolHandler(app, connection, access_controller, config_read_only)
+        handler = OdooToolHandler(
+            app, _wrap_connection_in_server(connection), access_controller, config_read_only
+        )
 
         # 2. List models - should work and show indicator
         # YOLO mode returns raw dict, not ModelsResult
@@ -149,7 +158,9 @@ class TestYoloModeE2E:
         # Setup tool handler
         app = MagicMock()
         access_controller = AccessController(config_full_access)
-        handler = OdooToolHandler(app, connection, access_controller, config_full_access)
+        handler = OdooToolHandler(
+            app, _wrap_connection_in_server(connection), access_controller, config_full_access
+        )
 
         # 2. List models - should work and show warning
         # YOLO mode returns raw dict, not ModelsResult
@@ -240,7 +251,9 @@ class TestYoloModeE2E:
 
         app = MagicMock()
         access_controller = AccessController(config_full_access)
-        handler = OdooToolHandler(app, connection, access_controller, config_full_access)
+        handler = OdooToolHandler(
+            app, _wrap_connection_in_server(connection), access_controller, config_full_access
+        )
 
         # Test standard models
         standard_models = ["res.partner", "res.users", "res.company", "res.country"]
@@ -280,7 +293,9 @@ class TestYoloModeE2E:
 
         app = MagicMock()
         access_controller = AccessController(config_full_access)
-        handler = OdooToolHandler(app, connection, access_controller, config_full_access)
+        handler = OdooToolHandler(
+            app, _wrap_connection_in_server(connection), access_controller, config_full_access
+        )
 
         # Test invalid model name
         with pytest.raises(ValidationError) as exc_info:
@@ -338,7 +353,9 @@ class TestYoloModeE2E:
 
         app = MagicMock()
         access_controller = AccessController(config_read_only)
-        handler = OdooToolHandler(app, connection, access_controller, config_read_only)
+        handler = OdooToolHandler(
+            app, _wrap_connection_in_server(connection), access_controller, config_read_only
+        )
 
         # Check list_models indicator
         models_result = await handler._handle_list_models_tool()
@@ -355,7 +372,9 @@ class TestYoloModeE2E:
         connection.authenticate()
 
         access_controller = AccessController(config_full_access)
-        handler = OdooToolHandler(app, connection, access_controller, config_full_access)
+        handler = OdooToolHandler(
+            app, _wrap_connection_in_server(connection), access_controller, config_full_access
+        )
 
         # Check list_models indicator
         models_result = await handler._handle_list_models_tool()
@@ -381,7 +400,9 @@ class TestYoloModeE2E:
 
         app = MagicMock()
         access_controller = AccessController(config_full_access)
-        handler = OdooToolHandler(app, connection, access_controller, config_full_access)
+        handler = OdooToolHandler(
+            app, _wrap_connection_in_server(connection), access_controller, config_full_access
+        )
 
         # Measure list_models performance
         start_time = time.time()
