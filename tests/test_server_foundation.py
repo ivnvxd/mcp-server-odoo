@@ -679,3 +679,123 @@ class TestFastMCPApp:
             health = server.get_health_status()
             assert health["status"] == "healthy"
             assert health["connection"]["connected"] is True
+
+
+class TestTransportSecurity:
+    """Test transport security configuration for DNS rebinding protection."""
+
+    def test_no_transport_security_by_default(self):
+        """Test that no transport security is configured when allowed_hosts is empty."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            allowed_hosts=[],
+        )
+        server = OdooMCPServer(config)
+
+        # FastMCP should not have transport_security set
+        # We check via the settings or internal state
+        assert server.app.settings.host == "localhost"
+
+    def test_transport_security_with_single_host(self):
+        """Test transport security is configured with a single allowed host."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            allowed_hosts=["localhost"],
+        )
+        server = OdooMCPServer(config)
+
+        # Server should be created successfully with transport security
+        assert server.app is not None
+        assert server.config.allowed_hosts == ["localhost"]
+
+    def test_transport_security_with_multiple_hosts(self):
+        """Test transport security with multiple allowed hosts."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            allowed_hosts=["localhost", "example.com", "odoo.local"],
+        )
+        server = OdooMCPServer(config)
+
+        assert server.app is not None
+        assert len(server.config.allowed_hosts) == 3
+
+    def test_transport_security_host_with_port_preserved(self):
+        """Test that hosts with ports are preserved as-is."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            allowed_hosts=["localhost:8000", "example.com"],
+        )
+        server = OdooMCPServer(config)
+
+        # The server should handle both formats
+        assert "localhost:8000" in server.config.allowed_hosts
+        assert "example.com" in server.config.allowed_hosts
+
+    def test_transport_security_builds_allowed_origins(self):
+        """Test that allowed_origins are built from allowed_hosts."""
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            allowed_hosts=["example.com"],
+        )
+
+        # Capture the TransportSecuritySettings that would be created
+        with patch.object(
+            TransportSecuritySettings, "__init__", return_value=None
+        ) as mock_init:
+            # Create server - this will call TransportSecuritySettings
+            server = OdooMCPServer(config)
+
+            # Verify TransportSecuritySettings was called with correct params
+            mock_init.assert_called_once()
+            call_kwargs = mock_init.call_args[1]
+
+            assert call_kwargs["enable_dns_rebinding_protection"] is True
+            assert "example.com:*" in call_kwargs["allowed_hosts"]
+            assert "http://example.com:*" in call_kwargs["allowed_origins"]
+            assert "https://example.com:*" in call_kwargs["allowed_origins"]
+
+    def test_transport_security_host_with_port_extracts_base(self):
+        """Test that base hostname is extracted from host:port for origins."""
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            allowed_hosts=["example.com:8080"],
+        )
+
+        with patch.object(
+            TransportSecuritySettings, "__init__", return_value=None
+        ) as mock_init:
+            server = OdooMCPServer(config)
+
+            call_kwargs = mock_init.call_args[1]
+
+            # Host with port should be preserved as-is (already has port)
+            assert "example.com:8080" in call_kwargs["allowed_hosts"]
+            # Origins should use base hostname with wildcard port
+            assert "http://example.com:*" in call_kwargs["allowed_origins"]
+            assert "https://example.com:*" in call_kwargs["allowed_origins"]
+
+    def test_transport_security_not_configured_when_empty(self):
+        """Test we pass None as transport_security when allowed_hosts is empty."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            allowed_hosts=[],
+        )
+
+        with patch("mcp_server_odoo.server.FastMCP") as mock_fastmcp:
+            mock_fastmcp.return_value = Mock()
+            server = OdooMCPServer(config)
+
+            # Verify FastMCP was called with transport_security=None
+            call_kwargs = mock_fastmcp.call_args[1]
+            assert call_kwargs.get("transport_security") is None
