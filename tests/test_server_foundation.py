@@ -746,11 +746,9 @@ class TestTransportSecurity:
         )
 
         # Capture the TransportSecuritySettings that would be created
-        with patch.object(
-            TransportSecuritySettings, "__init__", return_value=None
-        ) as mock_init:
+        with patch.object(TransportSecuritySettings, "__init__", return_value=None) as mock_init:
             # Create server - this will call TransportSecuritySettings
-            server = OdooMCPServer(config)
+            OdooMCPServer(config)
 
             # Verify TransportSecuritySettings was called with correct params
             mock_init.assert_called_once()
@@ -771,10 +769,8 @@ class TestTransportSecurity:
             allowed_hosts=["example.com:8080"],
         )
 
-        with patch.object(
-            TransportSecuritySettings, "__init__", return_value=None
-        ) as mock_init:
-            server = OdooMCPServer(config)
+        with patch.object(TransportSecuritySettings, "__init__", return_value=None) as mock_init:
+            OdooMCPServer(config)
 
             call_kwargs = mock_init.call_args[1]
 
@@ -794,7 +790,7 @@ class TestTransportSecurity:
 
         with patch("mcp_server_odoo.server.FastMCP") as mock_fastmcp:
             mock_fastmcp.return_value = Mock()
-            server = OdooMCPServer(config)
+            OdooMCPServer(config)
 
             # Verify FastMCP was called with transport_security=None
             call_kwargs = mock_fastmcp.call_args[1]

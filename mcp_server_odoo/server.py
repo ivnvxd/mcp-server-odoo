@@ -62,9 +62,7 @@ class OdooMCPServer:
         transport_security = None
         if self.config.allowed_hosts:
             # Build allowed_hosts with wildcard ports
-            allowed_hosts = [
-                f"{h}:*" if ":" not in h else h for h in self.config.allowed_hosts
-            ]
+            allowed_hosts = [f"{h}:*" if ":" not in h else h for h in self.config.allowed_hosts]
             # Build allowed_origins from hosts
             allowed_origins = []
             for h in self.config.allowed_hosts:
