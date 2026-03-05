@@ -80,6 +80,38 @@ class TestOdooToolHandler:
         assert handler.access_controller is mock_access_controller
         assert handler.config is valid_config
 
+    def test_connection_property_returns_connection(self, handler, mock_connection):
+        """Test connection property returns connection when authenticated."""
+        conn = handler.connection
+        assert conn is mock_connection
+
+    def test_connection_property_raises_when_none(
+        self, mock_app, mock_access_controller, valid_config
+    ):
+        """Test connection property raises ValidationError when connection is None."""
+        mock_server = MagicMock()
+        mock_server.connection = None
+
+        handler = OdooToolHandler(mock_app, mock_server, mock_access_controller, valid_config)
+
+        with pytest.raises(ValidationError, match="Not authenticated with Odoo"):
+            _ = handler.connection
+
+    def test_connection_property_raises_when_not_authenticated(
+        self, mock_app, mock_access_controller, valid_config
+    ):
+        """Test connection property raises ValidationError when not authenticated."""
+        mock_connection = MagicMock(spec=OdooConnection)
+        mock_connection.is_authenticated = False
+
+        mock_server = MagicMock()
+        mock_server.connection = mock_connection
+
+        handler = OdooToolHandler(mock_app, mock_server, mock_access_controller, valid_config)
+
+        with pytest.raises(ValidationError, match="Not authenticated with Odoo"):
+            _ = handler.connection
+
     def test_tools_registered(self, handler, mock_app):
         """Test that all tools are registered with FastMCP."""
         expected_tools = {
