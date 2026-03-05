@@ -7,7 +7,7 @@ and functionality through the Model Context Protocol.
 import contextlib
 from typing import Any, Dict, Optional
 
-from mcp.server import FastMCP, TransportSecuritySettings
+from mcp.server import FastMCP
 
 from .access_control import AccessController
 from .config import OdooConfig, get_config
@@ -61,24 +61,6 @@ class OdooMCPServer:
         self._tools_registered = False
         self._resources_registered = False
 
-        # Configure transport security for DNS rebinding protection
-        transport_security = None
-        if self.config.allowed_hosts:
-            # Build allowed_hosts with wildcard ports
-            allowed_hosts = [
-                f"{h}:*" if ":" not in h else h for h in self.config.allowed_hosts
-            ]
-            # Build allowed_origins from hosts
-            allowed_origins = []
-            for h in self.config.allowed_hosts:
-                base = h.split(":")[0] if ":" in h else h
-                allowed_origins.extend([f"http://{base}:*", f"https://{base}:*"])
-
-            transport_security = TransportSecuritySettings(
-                enable_dns_rebinding_protection=True,
-                allowed_hosts=allowed_hosts,
-                allowed_origins=allowed_origins,
-            )
         # Create FastMCP instance with server metadata
         self.app = FastMCP(
             name="odoo-mcp-server",
@@ -210,9 +192,7 @@ class OdooMCPServer:
             return
         if self.connection and self.access_controller:
             # Pass server reference so handlers can access connection dynamically
-            self.tool_handler = register_tools(
-                self.app, self, self.access_controller, self.config
-            )
+            self.tool_handler = register_tools(self.app, self, self.access_controller, self.config)
             self._tools_registered = True
             logger.info("Registered MCP tools")
 

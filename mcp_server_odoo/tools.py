@@ -710,7 +710,9 @@ class OdooToolHandler:
                 if record_ids:
                     records = connection.read(model, record_ids, fields_to_fetch)
                     # Process datetime fields in each record
-                    records = [self._process_record_dates(record, model, connection) for record in records]
+                    records = [
+                        self._process_record_dates(record, model, connection) for record in records
+                    ]
                 await self._ctx_progress(ctx, 3, 3, f"Returning {len(records)} records")
 
                 return {

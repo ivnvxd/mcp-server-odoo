@@ -102,9 +102,7 @@ class TestOdooResourceHandler:
 
     def test_init(self, mock_app, mock_server, mock_access_controller, mock_config):
         """Test handler initialization."""
-        handler = OdooResourceHandler(
-            mock_app, mock_server, mock_access_controller, mock_config
-        )
+        handler = OdooResourceHandler(mock_app, mock_server, mock_access_controller, mock_config)
 
         assert handler.app == mock_app
         assert handler._server == mock_server
@@ -114,9 +112,7 @@ class TestOdooResourceHandler:
         # Check that resources were registered
         assert mock_app.resource.call_count >= 1
 
-    def test_connection_property_returns_connection(
-        self, resource_handler, mock_connection
-    ):
+    def test_connection_property_returns_connection(self, resource_handler, mock_connection):
         """Test connection property returns connection when authenticated."""
         conn = resource_handler.connection
         assert conn is mock_connection
@@ -128,9 +124,7 @@ class TestOdooResourceHandler:
         mock_server = Mock()
         mock_server.connection = None
 
-        handler = OdooResourceHandler(
-            mock_app, mock_server, mock_access_controller, mock_config
-        )
+        handler = OdooResourceHandler(mock_app, mock_server, mock_access_controller, mock_config)
 
         with pytest.raises(ValidationError, match="Not authenticated with Odoo"):
             _ = handler.connection
@@ -145,9 +139,7 @@ class TestOdooResourceHandler:
         mock_server = Mock()
         mock_server.connection = mock_connection
 
-        handler = OdooResourceHandler(
-            mock_app, mock_server, mock_access_controller, mock_config
-        )
+        handler = OdooResourceHandler(mock_app, mock_server, mock_access_controller, mock_config)
 
         with pytest.raises(ValidationError, match="Not authenticated with Odoo"):
             _ = handler.connection
@@ -341,9 +333,7 @@ class TestOdooResourceHandler:
 class TestRegisterResources:
     """Test register_resources function."""
 
-    def test_register_resources(
-        self, mock_app, mock_server, mock_access_controller, mock_config
-    ):
+    def test_register_resources(self, mock_app, mock_server, mock_access_controller, mock_config):
         """Test resource registration."""
         handler = register_resources(mock_app, mock_server, mock_access_controller, mock_config)
 
