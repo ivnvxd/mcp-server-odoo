@@ -57,6 +57,8 @@ def config():
 @pytest.fixture
 def connected_env(config):
     """Create a fully connected environment with real handlers."""
+    from unittest.mock import Mock
+
     conn = OdooConnection(config)
     conn.connect()
     conn.authenticate()
@@ -64,8 +66,12 @@ def connected_env(config):
     access_controller = AccessController(config)
     app = FastMCP("test-e2e")
 
-    resource_handler = OdooResourceHandler(app, conn, access_controller, config)
-    tool_handler = OdooToolHandler(app, conn, access_controller, config)
+    # Create mock server wrapper for the real connection
+    mock_server = Mock()
+    mock_server.connection = conn
+
+    resource_handler = OdooResourceHandler(app, mock_server, access_controller, config)
+    tool_handler = OdooToolHandler(app, mock_server, access_controller, config)
 
     yield {
         "config": config,

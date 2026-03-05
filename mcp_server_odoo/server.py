@@ -7,7 +7,7 @@ and functionality through the Model Context Protocol.
 import contextlib
 from typing import Any, Dict, Optional
 
-from mcp.server import FastMCP
+from mcp.server import FastMCP, TransportSecuritySettings
 
 from .access_control import AccessController
 from .config import OdooConfig, get_config
@@ -57,6 +57,28 @@ class OdooMCPServer:
         self.resource_handler = None
         self.tool_handler = None
 
+        # Registration flags to prevent multiple registrations (idempotency)
+        self._tools_registered = False
+        self._resources_registered = False
+
+        # Configure transport security for DNS rebinding protection
+        transport_security = None
+        if self.config.allowed_hosts:
+            # Build allowed_hosts with wildcard ports
+            allowed_hosts = [
+                f"{h}:*" if ":" not in h else h for h in self.config.allowed_hosts
+            ]
+            # Build allowed_origins from hosts
+            allowed_origins = []
+            for h in self.config.allowed_hosts:
+                base = h.split(":")[0] if ":" in h else h
+                allowed_origins.extend([f"http://{base}:*", f"https://{base}:*"])
+
+            transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=allowed_origins,
+            )
         # Create FastMCP instance with server metadata
         self.app = FastMCP(
             name="odoo-mcp-server",
@@ -140,7 +162,13 @@ class OdooMCPServer:
                 error_handler.handle_error(e, context=context)
 
     def _cleanup_connection(self):
-        """Clean up Odoo connection."""
+        """Clean up Odoo connection.
+
+        Note: We preserve tool_handler and resource_handler references because
+        they are still registered with FastMCP and will access the connection
+        dynamically via the server reference. Only the connection itself is
+        cleared and will be re-established on lifespan re-entry.
+        """
         if self.connection:
             try:
                 logger.info("Closing Odoo connection...")
@@ -148,26 +176,44 @@ class OdooMCPServer:
             except Exception as e:
                 logger.error(f"Error closing connection: {e}")
             finally:
-                # Always clear connection reference
+                # Clear connection reference - will be re-established on re-entry
                 self.connection = None
                 self.access_controller = None
-                self.resource_handler = None
-                self.tool_handler = None
+                # Note: Don't clear tool_handler/resource_handler - they're still
+                # registered with FastMCP and access connection via server reference
 
     def _register_resources(self):
-        """Register resource handlers after connection is established."""
+        """Register resource handlers after connection is established.
+
+        This method is idempotent - it will only register resources once.
+        On subsequent calls (e.g., lifespan re-entry), it skips registration.
+        """
+        if self._resources_registered:
+            logger.debug("Resources already registered, skipping")
+            return
         if self.connection and self.access_controller:
+            # Pass server reference so handlers can access connection dynamically
             self.resource_handler = register_resources(
-                self.app, self.connection, self.access_controller, self.config
+                self.app, self, self.access_controller, self.config
             )
+            self._resources_registered = True
             logger.info("Registered MCP resources")
 
     def _register_tools(self):
-        """Register tool handlers after connection is established."""
+        """Register tool handlers after connection is established.
+
+        This method is idempotent - it will only register tools once.
+        On subsequent calls (e.g., lifespan re-entry), it skips registration.
+        """
+        if self._tools_registered:
+            logger.debug("Tools already registered, skipping")
+            return
         if self.connection and self.access_controller:
+            # Pass server reference so handlers can access connection dynamically
             self.tool_handler = register_tools(
-                self.app, self.connection, self.access_controller, self.config
+                self.app, self, self.access_controller, self.config
             )
+            self._tools_registered = True
             logger.info("Registered MCP tools")
 
     async def run_stdio(self):

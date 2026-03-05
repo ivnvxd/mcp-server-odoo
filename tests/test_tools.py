@@ -43,6 +43,13 @@ class TestOdooToolHandler:
         return connection
 
     @pytest.fixture
+    def mock_server(self, mock_connection):
+        """Create a mock server with a connection attribute."""
+        server = MagicMock()
+        server.connection = mock_connection
+        return server
+
+    @pytest.fixture
     def mock_access_controller(self):
         """Create a mock AccessController."""
         controller = MagicMock(spec=AccessController)
@@ -60,16 +67,16 @@ class TestOdooToolHandler:
         )
 
     @pytest.fixture
-    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
+    def handler(self, mock_app, mock_server, mock_access_controller, valid_config):
         """Create an OdooToolHandler instance."""
-        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+        return OdooToolHandler(mock_app, mock_server, mock_access_controller, valid_config)
 
     def test_handler_initialization(
-        self, handler, mock_app, mock_connection, mock_access_controller, valid_config
+        self, handler, mock_app, mock_server, mock_access_controller, valid_config
     ):
         """Test handler is properly initialized with correct references."""
         assert handler.app is mock_app
-        assert handler.connection is mock_connection
+        assert handler._server is mock_server
         assert handler.access_controller is mock_access_controller
         assert handler.config is valid_config
 
@@ -854,6 +861,12 @@ class TestYoloListModels:
         return connection
 
     @pytest.fixture
+    def mock_server(self, mock_connection):
+        server = MagicMock()
+        server.connection = mock_connection
+        return server
+
+    @pytest.fixture
     def mock_access_controller(self):
         return MagicMock(spec=AccessController)
 
@@ -869,8 +882,8 @@ class TestYoloListModels:
         )
 
     @pytest.fixture
-    def handler(self, mock_app, mock_connection, mock_access_controller, yolo_config):
-        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, yolo_config)
+    def handler(self, mock_app, mock_server, mock_access_controller, yolo_config):
+        return OdooToolHandler(mock_app, mock_server, mock_access_controller, yolo_config)
 
     @pytest.mark.asyncio
     async def test_yolo_list_models_success(self, handler, mock_connection, mock_app, yolo_config):
@@ -906,7 +919,7 @@ class TestYoloListModels:
 
     @pytest.mark.asyncio
     async def test_yolo_list_models_full_access(
-        self, mock_app, mock_connection, mock_access_controller
+        self, mock_app, mock_connection, mock_server, mock_access_controller
     ):
         """Test list_models in YOLO 'true' mode reports full access operations."""
         config = OdooConfig(
@@ -916,7 +929,7 @@ class TestYoloListModels:
             database="test_db",
             yolo_mode="true",
         )
-        OdooToolHandler(mock_app, mock_connection, mock_access_controller, config)
+        OdooToolHandler(mock_app, mock_server, mock_access_controller, config)
 
         mock_connection.search_read.return_value = [
             {"model": "res.partner", "name": "Contact"},
@@ -972,6 +985,12 @@ class TestCreateRecordTool:
         return connection
 
     @pytest.fixture
+    def mock_server(self, mock_connection):
+        server = MagicMock()
+        server.connection = mock_connection
+        return server
+
+    @pytest.fixture
     def mock_access_controller(self):
         return MagicMock(spec=AccessController)
 
@@ -984,8 +1003,8 @@ class TestCreateRecordTool:
         )
 
     @pytest.fixture
-    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
-        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+    def handler(self, mock_app, mock_server, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_server, mock_access_controller, valid_config)
 
     @pytest.mark.asyncio
     async def test_create_record_success(self, handler, mock_connection, mock_app):
@@ -1070,6 +1089,12 @@ class TestUpdateRecordTool:
         return connection
 
     @pytest.fixture
+    def mock_server(self, mock_connection):
+        server = MagicMock()
+        server.connection = mock_connection
+        return server
+
+    @pytest.fixture
     def mock_access_controller(self):
         return MagicMock(spec=AccessController)
 
@@ -1082,8 +1107,8 @@ class TestUpdateRecordTool:
         )
 
     @pytest.fixture
-    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
-        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+    def handler(self, mock_app, mock_server, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_server, mock_access_controller, valid_config)
 
     @pytest.mark.asyncio
     async def test_update_record_success(self, handler, mock_connection, mock_app):
@@ -1177,6 +1202,12 @@ class TestDeleteRecordTool:
         return connection
 
     @pytest.fixture
+    def mock_server(self, mock_connection):
+        server = MagicMock()
+        server.connection = mock_connection
+        return server
+
+    @pytest.fixture
     def mock_access_controller(self):
         return MagicMock(spec=AccessController)
 
@@ -1189,8 +1220,8 @@ class TestDeleteRecordTool:
         )
 
     @pytest.fixture
-    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
-        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+    def handler(self, mock_app, mock_server, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_server, mock_access_controller, valid_config)
 
     @pytest.mark.asyncio
     async def test_delete_record_success(self, handler, mock_connection, mock_app):
@@ -1274,6 +1305,12 @@ class TestListModelsTool:
         return connection
 
     @pytest.fixture
+    def mock_server(self, mock_connection):
+        server = MagicMock()
+        server.connection = mock_connection
+        return server
+
+    @pytest.fixture
     def mock_access_controller(self):
         return MagicMock(spec=AccessController)
 
@@ -1298,8 +1335,8 @@ class TestListModelsTool:
         )
 
     @pytest.fixture
-    def yolo_handler(self, mock_app, mock_connection, mock_access_controller, yolo_read_config):
-        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, yolo_read_config)
+    def yolo_handler(self, mock_app, mock_server, mock_access_controller, yolo_read_config):
+        return OdooToolHandler(mock_app, mock_server, mock_access_controller, yolo_read_config)
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_read_mode(self, yolo_handler, mock_connection, mock_app):
@@ -1330,10 +1367,10 @@ class TestListModelsTool:
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_full_mode(
-        self, mock_app, mock_connection, mock_access_controller, yolo_full_config
+        self, mock_app, mock_server, mock_connection, mock_access_controller, yolo_full_config
     ):
         """Test list_models in YOLO full mode enables write operations."""
-        OdooToolHandler(mock_app, mock_connection, mock_access_controller, yolo_full_config)
+        OdooToolHandler(mock_app, mock_server, mock_access_controller, yolo_full_config)
         mock_connection.search_read.return_value = [
             {"model": "res.partner", "name": "Contact"},
         ]
@@ -1386,6 +1423,12 @@ class TestSearchRecordReturnValue:
         return connection
 
     @pytest.fixture
+    def mock_server(self, mock_connection):
+        server = MagicMock()
+        server.connection = mock_connection
+        return server
+
+    @pytest.fixture
     def mock_access_controller(self):
         return MagicMock(spec=AccessController)
 
@@ -1398,8 +1441,8 @@ class TestSearchRecordReturnValue:
         )
 
     @pytest.fixture
-    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
-        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+    def handler(self, mock_app, mock_server, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_server, mock_access_controller, valid_config)
 
     @pytest.mark.asyncio
     async def test_search_with_complex_domain_checks_result(
@@ -1459,6 +1502,12 @@ class TestToolEdgeCases:
         return connection
 
     @pytest.fixture
+    def mock_server(self, mock_connection):
+        server = MagicMock()
+        server.connection = mock_connection
+        return server
+
+    @pytest.fixture
     def mock_access_controller(self):
         return MagicMock(spec=AccessController)
 
@@ -1471,8 +1520,8 @@ class TestToolEdgeCases:
         )
 
     @pytest.fixture
-    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
-        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+    def handler(self, mock_app, mock_server, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_server, mock_access_controller, valid_config)
 
     @pytest.mark.asyncio
     async def test_list_models_access_controller_failure(

@@ -35,6 +35,14 @@ def mock_connection():
 
 
 @pytest.fixture
+def mock_server(mock_connection):
+    """Create a mock server with connection attribute."""
+    server = Mock()
+    server.connection = mock_connection
+    return server
+
+
+@pytest.fixture
 def mock_access_controller():
     """Create a mock access controller."""
     controller = Mock(spec=AccessController)
@@ -49,9 +57,9 @@ def fastmcp_app():
 
 
 @pytest.fixture
-def resource_handler(fastmcp_app, mock_connection, mock_access_controller, mock_config):
+def resource_handler(fastmcp_app, mock_server, mock_access_controller, mock_config):
     """Create a resource handler instance with real FastMCP app."""
-    return OdooResourceHandler(fastmcp_app, mock_connection, mock_access_controller, mock_config)
+    return OdooResourceHandler(fastmcp_app, mock_server, mock_access_controller, mock_config)
 
 
 class TestResourceQueryParameterHandling:
