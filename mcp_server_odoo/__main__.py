@@ -54,6 +54,8 @@ Optional environment variables:
   ODOO_MCP_TRANSPORT       Transport type: stdio or streamable-http (default: stdio)
   ODOO_MCP_HOST            Server host for HTTP transports (default: localhost)
   ODOO_MCP_PORT            Server port for HTTP transports (default: 8000)
+  ODOO_MCP_ALLOWED_HOSTS   Comma-separated list of allowed Host headers for
+                           DNS rebinding protection (e.g., odoo.example.com,localhost)
 
 For more information, visit: https://github.com/ivnvxd/mcp-server-odoo""",
     )
