@@ -7,7 +7,7 @@ actions like creating, updating, or deleting records.
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
@@ -32,6 +32,9 @@ from .schemas import (
     UpdateResult,
 )
 
+if TYPE_CHECKING:
+    from .server import OdooMCPServer
+
 logger = get_logger(__name__)
 
 
@@ -41,7 +44,7 @@ class OdooToolHandler:
     def __init__(
         self,
         app: FastMCP,
-        connection: OdooConnection,
+        server: "OdooMCPServer",
         access_controller: AccessController,
         config: OdooConfig,
     ):
@@ -49,17 +52,33 @@ class OdooToolHandler:
 
         Args:
             app: FastMCP application instance
-            connection: Odoo connection instance
+            server: OdooMCPServer instance (for dynamic connection access)
             access_controller: Access control instance
             config: Odoo configuration instance
         """
         self.app = app
-        self.connection = connection
+        self._server = server  # Store server reference for dynamic connection access
         self.access_controller = access_controller
         self.config = config
 
         # Register tools
         self._register_tools()
+
+    @property
+    def connection(self) -> OdooConnection:
+        """Get the current connection from the server.
+
+        This property provides dynamic access to the connection,
+        ensuring we always use the current connection even after
+        lifespan re-entry in HTTP transport.
+
+        Raises:
+            ValidationError: If not authenticated with Odoo
+        """
+        conn = self._server.connection
+        if not conn or not conn.is_authenticated:
+            raise ValidationError("Not authenticated with Odoo")
+        return conn
 
     def _format_datetime(self, value: str) -> str:
         """Format datetime values to ISO 8601 with timezone."""
@@ -84,8 +103,16 @@ class OdooToolHandler:
 
         return value
 
-    def _process_record_dates(self, record: Dict[str, Any], model: str) -> Dict[str, Any]:
-        """Process datetime fields in a record to ensure proper formatting."""
+    def _process_record_dates(
+        self, record: Dict[str, Any], model: str, connection: Optional[OdooConnection] = None
+    ) -> Dict[str, Any]:
+        """Process datetime fields in a record to ensure proper formatting.
+
+        Args:
+            record: The record data to process
+            model: The Odoo model name
+            connection: Optional connection to use (if not provided, uses self.connection)
+        """
         # Common datetime field names in Odoo
         known_datetime_fields = {
             "create_date",
@@ -107,7 +134,8 @@ class OdooToolHandler:
         # First try to get field metadata
         fields_info = None
         try:
-            fields_info = self.connection.fields_get(model)
+            conn = connection if connection is not None else self.connection
+            fields_info = conn.fields_get(model)
         except Exception:
             # Field metadata unavailable, will use fallback detection
             pass
@@ -260,18 +288,22 @@ class OdooToolHandler:
 
         return max(score, 0)
 
-    def _get_smart_default_fields(self, model: str) -> Optional[List[str]]:
+    def _get_smart_default_fields(
+        self, model: str, connection: Optional[OdooConnection] = None
+    ) -> Optional[List[str]]:
         """Get smart default fields for a model using field importance scoring.
 
         Args:
             model: The Odoo model name
+            connection: Optional connection to use (if not provided, uses self.connection)
 
         Returns:
             List of field names to include by default, or None if unable to determine
         """
         try:
             # Get all field definitions
-            fields_info = self.connection.fields_get(model)
+            conn = connection if connection is not None else self.connection
+            fields_info = conn.fields_get(model)
 
             # Score all fields by importance
             field_scores = []
@@ -574,9 +606,8 @@ class OdooToolHandler:
                 self.access_controller.validate_model_access(model, "read")
                 await self._ctx_info(ctx, f"Searching {model}...")
 
-                # Ensure we're connected
-                if not self.connection.is_authenticated:
-                    raise ValidationError("Not authenticated with Odoo")
+                # Access connection property (validates authentication)
+                connection = self.connection
 
                 # Handle domain parameter - can be string or list
                 parsed_domain = []
@@ -648,11 +679,11 @@ class OdooToolHandler:
                     limit = self.config.default_limit
 
                 # Get total count
-                total_count = self.connection.search_count(model, parsed_domain)
+                total_count = connection.search_count(model, parsed_domain)
                 await self._ctx_progress(ctx, 1, 3, f"Found {total_count} records")
 
                 # Search for records
-                record_ids = self.connection.search(
+                record_ids = connection.search(
                     model, parsed_domain, limit=limit, offset=offset, order=order
                 )
 
@@ -660,7 +691,7 @@ class OdooToolHandler:
                 fields_to_fetch = parsed_fields
                 if parsed_fields is None:
                     # Use smart field selection to avoid serialization issues
-                    fields_to_fetch = self._get_smart_default_fields(model)
+                    fields_to_fetch = self._get_smart_default_fields(model, connection)
                     await self._ctx_info(ctx, f"Using smart field defaults for {model}")
                     logger.debug(
                         f"Using smart defaults for {model} search: {len(fields_to_fetch) if fields_to_fetch else 'all'} fields"
@@ -677,9 +708,11 @@ class OdooToolHandler:
                 # Read records
                 records = []
                 if record_ids:
-                    records = self.connection.read(model, record_ids, fields_to_fetch)
+                    records = connection.read(model, record_ids, fields_to_fetch)
                     # Process datetime fields in each record
-                    records = [self._process_record_dates(record, model) for record in records]
+                    records = [
+                        self._process_record_dates(record, model, connection) for record in records
+                    ]
                 await self._ctx_progress(ctx, 3, 3, f"Returning {len(records)} records")
 
                 return {
@@ -713,9 +746,8 @@ class OdooToolHandler:
                 self.access_controller.validate_model_access(model, "read")
                 await self._ctx_info(ctx, f"Getting {model}/{record_id}...")
 
-                # Ensure we're connected
-                if not self.connection.is_authenticated:
-                    raise ValidationError("Not authenticated with Odoo")
+                # Access connection property (validates authentication)
+                connection = self.connection
 
                 # Determine which fields to fetch
                 fields_to_fetch = fields
@@ -725,7 +757,7 @@ class OdooToolHandler:
 
                 if fields is None:
                     # Use smart field selection
-                    fields_to_fetch = self._get_smart_default_fields(model)
+                    fields_to_fetch = self._get_smart_default_fields(model, connection)
                     use_smart_defaults = True
                     field_selection_method = "smart_defaults"
                     logger.debug(
@@ -741,19 +773,19 @@ class OdooToolHandler:
                     logger.debug(f"Fetching specific fields for {model}: {fields}")
 
                 # Read the record
-                records = self.connection.read(model, [record_id], fields_to_fetch)
+                records = connection.read(model, [record_id], fields_to_fetch)
 
                 if not records:
                     raise ValidationError(f"Record not found: {model} with ID {record_id}")
 
                 # Process datetime fields in the record
-                record = self._process_record_dates(records[0], model)
+                record = self._process_record_dates(records[0], model, connection)
 
                 # Build metadata when using smart defaults
                 metadata = None
                 if use_smart_defaults:
                     try:
-                        all_fields_info = self.connection.fields_get(model)
+                        all_fields_info = connection.fields_get(model)
                         total_fields = len(all_fields_info)
                     except Exception:
                         pass
@@ -1001,16 +1033,15 @@ class OdooToolHandler:
                 self.access_controller.validate_model_access(model, "create")
                 await self._ctx_info(ctx, f"Creating record in {model}...")
 
-                # Ensure we're connected
-                if not self.connection.is_authenticated:
-                    raise ValidationError("Not authenticated with Odoo")
+                # Access connection property (validates authentication)
+                connection = self.connection
 
                 # Validate required fields
                 if not values:
                     raise ValidationError("No values provided for record creation")
 
                 # Create the record
-                record_id = self.connection.create(model, values)
+                record_id = connection.create(model, values)
 
                 # Return only essential fields to minimize context usage
                 # Users can use get_record if they need more fields
@@ -1018,16 +1049,16 @@ class OdooToolHandler:
                 essential_fields = ["id", "display_name"]
 
                 # Read only the essential fields
-                records = self.connection.read(model, [record_id], essential_fields)
+                records = connection.read(model, [record_id], essential_fields)
                 if not records:
                     raise ValidationError(
                         f"Failed to read created record: {model} with ID {record_id}"
                     )
 
                 # Process dates in the minimal record
-                record = self._process_record_dates(records[0], model)
+                record = self._process_record_dates(records[0], model, connection)
 
-                record_url = self.connection.build_record_url(model, record_id)
+                record_url = connection.build_record_url(model, record_id)
 
                 return {
                     "success": True,
@@ -1061,21 +1092,20 @@ class OdooToolHandler:
                 self.access_controller.validate_model_access(model, "write")
                 await self._ctx_info(ctx, f"Updating {model}/{record_id}...")
 
-                # Ensure we're connected
-                if not self.connection.is_authenticated:
-                    raise ValidationError("Not authenticated with Odoo")
+                # Access connection property (validates authentication)
+                connection = self.connection
 
                 # Validate input
                 if not values:
                     raise ValidationError("No values provided for record update")
 
                 # Check if record exists (only fetch ID to verify existence)
-                existing = self.connection.read(model, [record_id], ["id"])
+                existing = connection.read(model, [record_id], ["id"])
                 if not existing:
                     raise NotFoundError(f"Record not found: {model} with ID {record_id}")
 
                 # Update the record
-                success = self.connection.write(model, [record_id], values)
+                success = connection.write(model, [record_id], values)
 
                 # Return only essential fields to minimize context usage
                 # Users can use get_record if they need more fields
@@ -1083,16 +1113,16 @@ class OdooToolHandler:
                 essential_fields = ["id", "display_name"]
 
                 # Read only the essential fields
-                records = self.connection.read(model, [record_id], essential_fields)
+                records = connection.read(model, [record_id], essential_fields)
                 if not records:
                     raise ValidationError(
                         f"Failed to read updated record: {model} with ID {record_id}"
                     )
 
                 # Process dates in the minimal record
-                record = self._process_record_dates(records[0], model)
+                record = self._process_record_dates(records[0], model, connection)
 
-                record_url = self.connection.build_record_url(model, record_id)
+                record_url = connection.build_record_url(model, record_id)
 
                 return {
                     "success": success,
@@ -1127,12 +1157,11 @@ class OdooToolHandler:
                 self.access_controller.validate_model_access(model, "unlink")
                 await self._ctx_info(ctx, f"Deleting {model}/{record_id}...")
 
-                # Ensure we're connected
-                if not self.connection.is_authenticated:
-                    raise ValidationError("Not authenticated with Odoo")
+                # Access connection property (validates authentication)
+                connection = self.connection
 
                 # Check if record exists and get display info
-                existing = self.connection.read(model, [record_id], ["id", "display_name"])
+                existing = connection.read(model, [record_id], ["id", "display_name"])
                 if not existing:
                     raise NotFoundError(f"Record not found: {model} with ID {record_id}")
 
@@ -1140,7 +1169,7 @@ class OdooToolHandler:
                 record_name = existing[0].get("display_name", f"ID {record_id}")
 
                 # Delete the record
-                success = self.connection.unlink(model, [record_id])
+                success = connection.unlink(model, [record_id])
 
                 return {
                     "success": success,
@@ -1165,7 +1194,7 @@ class OdooToolHandler:
 
 def register_tools(
     app: FastMCP,
-    connection: OdooConnection,
+    server: "OdooMCPServer",
     access_controller: AccessController,
     config: OdooConfig,
 ) -> OdooToolHandler:
@@ -1173,13 +1202,13 @@ def register_tools(
 
     Args:
         app: FastMCP application instance
-        connection: Odoo connection instance
+        server: OdooMCPServer instance (for dynamic connection access)
         access_controller: Access control instance
         config: Odoo configuration instance
 
     Returns:
         The tool handler instance
     """
-    handler = OdooToolHandler(app, connection, access_controller, config)
+    handler = OdooToolHandler(app, server, access_controller, config)
     logger.info("Registered Odoo MCP tools")
     return handler

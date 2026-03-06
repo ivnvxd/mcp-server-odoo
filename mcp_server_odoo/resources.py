@@ -5,7 +5,7 @@ standardized URIs using FastMCP decorators.
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.parse import unquote
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -26,6 +26,9 @@ from .uri_schema import (
     build_search_uri,
 )
 
+if TYPE_CHECKING:
+    from .server import OdooMCPServer
+
 logger = get_logger(__name__)
 
 
@@ -35,7 +38,7 @@ class OdooResourceHandler:
     def __init__(
         self,
         app: FastMCP,
-        connection: OdooConnection,
+        server: "OdooMCPServer",
         access_controller: AccessController,
         config: OdooConfig,
     ):
@@ -43,17 +46,33 @@ class OdooResourceHandler:
 
         Args:
             app: FastMCP application instance
-            connection: Odoo connection instance
+            server: OdooMCPServer instance (for dynamic connection access)
             access_controller: Access control instance
             config: Odoo configuration instance
         """
         self.app = app
-        self.connection = connection
+        self._server = server  # Store server reference for dynamic connection access
         self.access_controller = access_controller
         self.config = config
 
         # Register resources
         self._register_resources()
+
+    @property
+    def connection(self) -> OdooConnection:
+        """Get the current connection from the server.
+
+        This property provides dynamic access to the connection,
+        ensuring we always use the current connection even after
+        lifespan re-entry in HTTP transport.
+
+        Raises:
+            ValidationError: If not authenticated with Odoo
+        """
+        conn = self._server.connection
+        if not conn or not conn.is_authenticated:
+            raise ValidationError("Not authenticated with Odoo")
+        return conn
 
     async def _ctx_info(self, ctx, message: str):
         """Send info to MCP client context if available."""
@@ -196,45 +215,45 @@ class OdooResourceHandler:
                     logger.warning(f"Access denied for {model}.read: {e}")
                     raise PermissionError(f"Access denied: {e}", context=context) from e
 
-                # Ensure we're connected
-                if not self.connection.is_authenticated:
-                    raise ValidationError("Not authenticated with Odoo", context=context)
+                # Access connection property (validates authentication)
+                connection = self.connection
 
-            # Search for the record to check if it exists
-            record_ids = self.connection.search(model, [("id", "=", record_id_int)])
+                # Search for the record to check if it exists
+                record_ids = connection.search(model, [("id", "=", record_id_int)])
 
-            if not record_ids:
-                raise NotFoundError(
-                    f"Record not found: {model} with ID {record_id} does not exist", context=context
-                )
+                if not record_ids:
+                    raise NotFoundError(
+                        f"Record not found: {model} with ID {record_id} does not exist",
+                        context=context,
+                    )
 
-            # Read the record with smart field selection to avoid serialization issues
-            # Get field metadata to determine which fields to fetch
-            try:
-                fields_info = self.connection.fields_get(model)
-                # Filter out fields that might cause serialization issues
-                safe_fields = []
-                for field_name, field_info in fields_info.items():
-                    field_type = field_info.get("type", "")
-                    # Skip fields that commonly cause XML-RPC serialization issues
-                    # Expanded list to include html fields which often contain Markup objects
-                    problematic_types = ["binary", "serialized", "html"]
-                    if (
-                        field_type not in problematic_types
-                        and not field_name.startswith("__")
-                        and not field_name.startswith("_")
-                    ):  # Also skip private fields
-                        safe_fields.append(field_name)
+                # Read the record with smart field selection to avoid serialization issues
+                # Get field metadata to determine which fields to fetch
+                try:
+                    fields_info = connection.fields_get(model)
+                    # Filter out fields that might cause serialization issues
+                    safe_fields = []
+                    for field_name, field_info in fields_info.items():
+                        field_type = field_info.get("type", "")
+                        # Skip fields that commonly cause XML-RPC serialization issues
+                        # Expanded list to include html fields which often contain Markup objects
+                        problematic_types = ["binary", "serialized", "html"]
+                        if (
+                            field_type not in problematic_types
+                            and not field_name.startswith("__")
+                            and not field_name.startswith("_")
+                        ):  # Also skip private fields
+                            safe_fields.append(field_name)
 
-                if safe_fields:
-                    records = self.connection.read(model, record_ids, safe_fields)
-                else:
-                    # Fallback to all fields if we can't determine safe fields
-                    records = self.connection.read(model, record_ids)
-            except Exception as e:
-                logger.debug(f"Could not get field metadata, reading all fields: {e}")
-                # If we can't get field info, try to read all fields
-                records = self.connection.read(model, record_ids)
+                    if safe_fields:
+                        records = connection.read(model, record_ids, safe_fields)
+                    else:
+                        # Fallback to all fields if we can't determine safe fields
+                        records = connection.read(model, record_ids)
+                except Exception as e:
+                    logger.debug(f"Could not get field metadata, reading all fields: {e}")
+                    # If we can't get field info, try to read all fields
+                    records = connection.read(model, record_ids)
 
             if not records:
                 raise NotFoundError(f"Record not found: {model} with ID {record_id} does not exist")
@@ -293,9 +312,8 @@ class OdooResourceHandler:
                 logger.warning(f"Access denied for {model}.read: {e}")
                 raise PermissionError(f"Access denied: {e}") from e
 
-            # Ensure we're connected
-            if not self.connection.is_authenticated:
-                raise ValidationError("Not authenticated with Odoo")
+            # Access connection property (validates authentication)
+            connection = self.connection
 
             # Parse parameters
             parsed_domain = self._parse_domain(domain)
@@ -305,21 +323,21 @@ class OdooResourceHandler:
             order_value = self._parse_order(order)
 
             # Get total count for pagination
-            total_count = self.connection.search_count(model, parsed_domain)
+            total_count = connection.search_count(model, parsed_domain)
 
             # Perform search
-            record_ids = self.connection.search(
+            record_ids = connection.search(
                 model, parsed_domain, limit=limit_value, offset=offset_value, order=order_value
             )
 
             # Read records if any found
             records = []
             if record_ids:
-                records = self.connection.read(model, record_ids, fields_list)
+                records = connection.read(model, record_ids, fields_list)
 
             # Get field metadata for formatting
             try:
-                fields_metadata = self.connection.fields_get(model)
+                fields_metadata = connection.fields_get(model)
             except Exception as e:
                 logger.debug(f"Could not retrieve field metadata: {e}")
                 fields_metadata = None
@@ -533,9 +551,8 @@ class OdooResourceHandler:
                 logger.warning(f"Access denied for {model}.read: {e}")
                 raise PermissionError(f"Access denied: {e}") from e
 
-            # Ensure we're connected
-            if not self.connection.is_authenticated:
-                raise ValidationError("Not authenticated with Odoo")
+            # Access connection property (validates authentication)
+            connection = self.connection
 
             # Parse IDs
             id_list = self._parse_ids(ids)
@@ -545,7 +562,7 @@ class OdooResourceHandler:
             # Read records in batch with smart field selection to avoid serialization issues
             # Get field metadata to determine which fields to fetch
             try:
-                fields_info = self.connection.fields_get(model)
+                fields_info = connection.fields_get(model)
                 # Filter out fields that might cause serialization issues
                 safe_fields = []
                 for field_name, field_info in fields_info.items():
@@ -561,18 +578,18 @@ class OdooResourceHandler:
                         safe_fields.append(field_name)
 
                 if safe_fields:
-                    records = self.connection.read(model, id_list, safe_fields)
+                    records = connection.read(model, id_list, safe_fields)
                 else:
                     # Fallback to all fields if we can't determine safe fields
-                    records = self.connection.read(model, id_list)
+                    records = connection.read(model, id_list)
             except Exception as e:
                 logger.debug(f"Could not get field metadata, reading all fields: {e}")
                 # If we can't get field info, try to read all fields
-                records = self.connection.read(model, id_list)
+                records = connection.read(model, id_list)
 
             # Get field metadata for formatting
             try:
-                fields_metadata = self.connection.fields_get(model)
+                fields_metadata = connection.fields_get(model)
             except Exception as e:
                 logger.debug(f"Could not retrieve field metadata: {e}")
                 fields_metadata = None
@@ -619,15 +636,14 @@ class OdooResourceHandler:
                 logger.warning(f"Access denied for {model}.read: {e}")
                 raise PermissionError(f"Access denied: {e}") from e
 
-            # Ensure we're connected
-            if not self.connection.is_authenticated:
-                raise ValidationError("Not authenticated with Odoo")
+            # Access connection property (validates authentication)
+            connection = self.connection
 
             # Parse domain
             parsed_domain = self._parse_domain(domain)
 
             # Get count
-            count = self.connection.search_count(model, parsed_domain)
+            count = connection.search_count(model, parsed_domain)
 
             # Format result
             formatted_result = self._format_count_result(model, count, parsed_domain)
@@ -668,12 +684,11 @@ class OdooResourceHandler:
                 logger.warning(f"Access denied for {model}.read: {e}")
                 raise PermissionError(f"Access denied: {e}") from e
 
-            # Ensure we're connected
-            if not self.connection.is_authenticated:
-                raise ValidationError("Not authenticated with Odoo")
+            # Access connection property (validates authentication)
+            connection = self.connection
 
             # Get field definitions
-            fields = self.connection.fields_get(model)
+            fields = connection.fields_get(model)
 
             # Format result
             formatted_result = self._format_fields_result(model, fields)
@@ -873,7 +888,7 @@ class OdooResourceHandler:
 
 def register_resources(
     app: FastMCP,
-    connection: OdooConnection,
+    server: "OdooMCPServer",
     access_controller: AccessController,
     config: OdooConfig,
 ) -> OdooResourceHandler:
@@ -881,13 +896,13 @@ def register_resources(
 
     Args:
         app: FastMCP application instance
-        connection: Odoo connection instance
+        server: OdooMCPServer instance (for dynamic connection access)
         access_controller: Access control instance
         config: Odoo configuration instance
 
     Returns:
         The resource handler instance
     """
-    handler = OdooResourceHandler(app, connection, access_controller, config)
+    handler = OdooResourceHandler(app, server, access_controller, config)
     logger.info("Registered Odoo MCP resources")
     return handler

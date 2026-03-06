@@ -1,6 +1,6 @@
 """Tests for write operation tools."""
 
-from unittest.mock import Mock, call
+from unittest.mock import MagicMock, Mock, call
 
 import pytest
 
@@ -31,6 +31,13 @@ class TestWriteTools:
         return conn
 
     @pytest.fixture
+    def mock_server(self, mock_connection):
+        """Create mock server with connection attribute."""
+        server = Mock()
+        server.connection = mock_connection
+        return server
+
+    @pytest.fixture
     def mock_access_controller(self):
         """Create mock AccessController."""
         controller = Mock()
@@ -47,9 +54,9 @@ class TestWriteTools:
         return config
 
     @pytest.fixture
-    def tool_handler(self, mock_app, mock_connection, mock_access_controller, mock_config):
+    def tool_handler(self, mock_app, mock_server, mock_access_controller, mock_config):
         """Create OdooToolHandler instance."""
-        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, mock_config)
+        return OdooToolHandler(mock_app, mock_server, mock_access_controller, mock_config)
 
     @pytest.mark.asyncio
     async def test_create_record_success(self, tool_handler, mock_connection):
@@ -349,7 +356,10 @@ class TestWriteToolsIntegration:
     @pytest.fixture
     def real_tool_handler(self, real_app, real_connection, real_access_controller, real_config):
         """Create real tool handler."""
-        return register_tools(real_app, real_connection, real_access_controller, real_config)
+        # Wrap connection in mock server object (register_tools expects server with .connection)
+        mock_server = MagicMock()
+        mock_server.connection = real_connection
+        return register_tools(real_app, mock_server, real_access_controller, real_config)
 
     @pytest.mark.yolo
     @pytest.mark.asyncio
