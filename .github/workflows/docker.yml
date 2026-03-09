@@ -54,7 +54,7 @@ jobs:
           type=sha,enable=${{ github.event_name == 'workflow_dispatch' }}
 
     - name: Build and push
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: .
         platforms: linux/amd64,linux/arm64
