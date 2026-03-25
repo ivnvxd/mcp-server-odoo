@@ -240,7 +240,9 @@ class TestSmartFieldSelection:
         assert result.metadata is None
 
         # Should have called read with None (all fields)
-        tool_handler.connection.read.assert_called_once_with("res.partner", [1], None)
+        tool_handler.connection.read.assert_called_once_with(
+            "res.partner", [1], None, context=None
+        )
 
     @pytest.mark.asyncio
     async def test_get_record_with_specific_fields(self, tool_handler):
@@ -259,7 +261,9 @@ class TestSmartFieldSelection:
         assert result.metadata is None
 
         # Should have called read with specific fields
-        tool_handler.connection.read.assert_called_once_with("res.partner", [1], fields)
+        tool_handler.connection.read.assert_called_once_with(
+            "res.partner", [1], fields, context=None
+        )
 
     def test_field_selection(self, tool_handler):
         """Test that expected fields are selected by smart defaults."""

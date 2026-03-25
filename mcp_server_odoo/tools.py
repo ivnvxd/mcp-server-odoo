@@ -359,6 +359,7 @@ class OdooToolHandler:
             limit: int = 10,
             offset: int = 0,
             order: Optional[str] = None,
+            lang: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> SearchResult:
             """Search for records in an Odoo model.
@@ -377,12 +378,14 @@ class OdooToolHandler:
                 limit: Maximum number of records to return
                 offset: Number of records to skip
                 order: Sort order (e.g., 'name asc')
+                lang: Language code for translated fields (e.g., 'fi_FI', 'en_US').
+                    Overrides the global ODOO_LOCALE setting for this call.
 
             Returns:
                 Search results with records, total count, and pagination info
             """
             result = await self._handle_search_tool(
-                model, domain, fields, limit, offset, order, ctx
+                model, domain, fields, limit, offset, order, ctx, lang=lang
             )
             return SearchResult(**result)
 
@@ -399,6 +402,7 @@ class OdooToolHandler:
             model: str,
             record_id: int,
             fields: Optional[List[str]] = None,
+            lang: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> RecordResult:
             """Get a specific record by ID with smart field selection.
@@ -413,6 +417,8 @@ class OdooToolHandler:
                     - None (default): Returns smart selection of common fields
                     - ["field1", "field2", ...]: Returns only specified fields
                     - ["__all__"]: Returns ALL fields (warning: can be very large)
+                lang: Language code for translated fields (e.g., 'fi_FI', 'en_US').
+                    Overrides the global ODOO_LOCALE setting for this call.
 
             Workflow for field discovery:
             1. To see all available fields for a model, use the resource:
@@ -430,11 +436,14 @@ class OdooToolHandler:
                 # Get ALL fields (use with caution)
                 get_record("res.partner", 1, fields=["__all__"])
 
+                # Get Finnish translation of fields
+                get_record("ir.ui.view", 42, fields=["arch"], lang="fi_FI")
+
             Returns:
                 Record data with requested fields. When using smart defaults,
                 includes metadata with field statistics.
             """
-            return await self._handle_get_record_tool(model, record_id, fields, ctx)
+            return await self._handle_get_record_tool(model, record_id, fields, ctx, lang=lang)
 
         @self.app.tool(
             title="List Models",
@@ -489,6 +498,7 @@ class OdooToolHandler:
         async def create_record(
             model: str,
             values: Dict[str, Any],
+            lang: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> CreateResult:
             """Create a new record in an Odoo model.
@@ -496,11 +506,13 @@ class OdooToolHandler:
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
                 values: Field values for the new record
+                lang: Language code for translated fields (e.g., 'fi_FI', 'en_US').
+                    Overrides the global ODOO_LOCALE setting for this call.
 
             Returns:
                 Created record details with ID, URL, and confirmation.
             """
-            result = await self._handle_create_record_tool(model, values, ctx)
+            result = await self._handle_create_record_tool(model, values, ctx, lang=lang)
             return CreateResult(**result)
 
         @self.app.tool(
@@ -516,6 +528,7 @@ class OdooToolHandler:
             model: str,
             record_id: int,
             values: Dict[str, Any],
+            lang: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> UpdateResult:
             """Update an existing record.
@@ -524,11 +537,15 @@ class OdooToolHandler:
                 model: The Odoo model name (e.g., 'res.partner')
                 record_id: The record ID to update
                 values: Field values to update
+                lang: Language code for translated fields (e.g., 'fi_FI', 'en_US').
+                    Overrides the global ODOO_LOCALE setting for this call.
+                    Use this to write translations: update with lang='fi_FI' writes
+                    to the Finnish translation of translated fields.
 
             Returns:
                 Updated record details with confirmation.
             """
-            result = await self._handle_update_record_tool(model, record_id, values, ctx)
+            result = await self._handle_update_record_tool(model, record_id, values, ctx, lang=lang)
             return UpdateResult(**result)
 
         @self.app.tool(
@@ -566,6 +583,7 @@ class OdooToolHandler:
         offset: int,
         order: Optional[str],
         ctx=None,
+        lang: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Handle search tool request."""
         try:
@@ -675,9 +693,12 @@ class OdooToolHandler:
                     logger.debug(f"Fetching all fields for {model} search")
 
                 # Read records
+                lang_context = {"lang": lang} if lang else None
                 records = []
                 if record_ids:
-                    records = self.connection.read(model, record_ids, fields_to_fetch)
+                    records = self.connection.read(
+                        model, record_ids, fields_to_fetch, context=lang_context
+                    )
                     # Process datetime fields in each record
                     records = [self._process_record_dates(record, model) for record in records]
                 await self._ctx_progress(ctx, 3, 3, f"Returning {len(records)} records")
@@ -705,6 +726,7 @@ class OdooToolHandler:
         record_id: int,
         fields: Optional[List[str]],
         ctx=None,
+        lang: Optional[str] = None,
     ) -> RecordResult:
         """Handle get record tool request."""
         try:
@@ -741,7 +763,10 @@ class OdooToolHandler:
                     logger.debug(f"Fetching specific fields for {model}: {fields}")
 
                 # Read the record
-                records = self.connection.read(model, [record_id], fields_to_fetch)
+                lang_context = {"lang": lang} if lang else None
+                records = self.connection.read(
+                    model, [record_id], fields_to_fetch, context=lang_context
+                )
 
                 if not records:
                     raise ValidationError(f"Record not found: {model} with ID {record_id}")
@@ -993,6 +1018,7 @@ class OdooToolHandler:
         model: str,
         values: Dict[str, Any],
         ctx=None,
+        lang: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Handle create record tool request."""
         try:
@@ -1010,7 +1036,8 @@ class OdooToolHandler:
                     raise ValidationError("No values provided for record creation")
 
                 # Create the record
-                record_id = self.connection.create(model, values)
+                lang_context = {"lang": lang} if lang else None
+                record_id = self.connection.create(model, values, context=lang_context)
 
                 # Return only essential fields to minimize context usage
                 # Users can use get_record if they need more fields
@@ -1053,6 +1080,7 @@ class OdooToolHandler:
         record_id: int,
         values: Dict[str, Any],
         ctx=None,
+        lang: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Handle update record tool request."""
         try:
@@ -1075,7 +1103,10 @@ class OdooToolHandler:
                     raise NotFoundError(f"Record not found: {model} with ID {record_id}")
 
                 # Update the record
-                success = self.connection.write(model, [record_id], values)
+                lang_context = {"lang": lang} if lang else None
+                success = self.connection.write(
+                    model, [record_id], values, context=lang_context
+                )
 
                 # Return only essential fields to minimize context usage
                 # Users can use get_record if they need more fields

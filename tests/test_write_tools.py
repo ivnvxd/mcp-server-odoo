@@ -77,7 +77,7 @@ class TestWriteTools:
             == f"http://localhost:8069/web#id={created_id}&model={model}&view_type=form"
         )
         assert "Successfully created" in result["message"]
-        mock_connection.create.assert_called_once_with(model, values)
+        mock_connection.create.assert_called_once_with(model, values, context=None)
         mock_connection.read.assert_called_once_with(model, [created_id], ["id", "display_name"])
 
     @pytest.mark.asyncio
@@ -130,7 +130,7 @@ class TestWriteTools:
             == f"http://localhost:8069/web#id={record_id}&model={model}&view_type=form"
         )
         assert "Successfully updated" in result["message"]
-        mock_connection.write.assert_called_once_with(model, [record_id], values)
+        mock_connection.write.assert_called_once_with(model, [record_id], values, context=None)
         # Verify both read calls with correct parameters
         expected_calls = [
             call(model, [record_id], ["id"]),  # Existence check

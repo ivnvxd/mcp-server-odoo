@@ -938,7 +938,11 @@ class OdooConnection:
         return self.execute_kw(model, "search", [domain], kwargs)
 
     def read(
-        self, model: str, ids: List[int], fields: Optional[List[str]] = None
+        self,
+        model: str,
+        ids: List[int],
+        fields: Optional[List[str]] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Read records by IDs.
 
@@ -946,13 +950,16 @@ class OdooConnection:
             model: The Odoo model name
             ids: List of record IDs to read
             fields: List of field names to read (None for all fields)
+            context: Optional Odoo context (e.g., {"lang": "fi_FI"})
 
         Returns:
             List of dictionaries containing record data
         """
-        kwargs = {}
+        kwargs: Dict[str, Any] = {}
         if fields:
             kwargs["fields"] = fields
+        if context:
+            kwargs["context"] = context
 
         with self._performance_manager.monitor.track_operation(f"read_{model}"):
             records = self.execute_kw(model, "read", [ids], kwargs)
@@ -1025,12 +1032,18 @@ class OdooConnection:
         """
         return self.execute_kw(model, "search_count", [domain], {})
 
-    def create(self, model: str, values: Dict[str, Any]) -> int:
+    def create(
+        self,
+        model: str,
+        values: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> int:
         """Create a new record.
 
         Args:
             model: The Odoo model name
             values: Dictionary of field values for the new record
+            context: Optional Odoo context (e.g., {"lang": "fi_FI"})
 
         Returns:
             ID of the created record
@@ -1039,8 +1052,11 @@ class OdooConnection:
             OdooConnectionError: If creation fails
         """
         try:
+            kwargs: Dict[str, Any] = {}
+            if context:
+                kwargs["context"] = context
             with self._performance_manager.monitor.track_operation(f"create_{model}"):
-                record_id = self.execute_kw(model, "create", [values], {})
+                record_id = self.execute_kw(model, "create", [values], kwargs)
                 # Invalidate cache for this model
                 self._performance_manager.invalidate_record_cache(model)
                 logger.info(f"Created {model} record with ID {record_id}")
@@ -1049,13 +1065,20 @@ class OdooConnection:
             logger.error(f"Failed to create {model} record: {e}")
             raise
 
-    def write(self, model: str, ids: List[int], values: Dict[str, Any]) -> bool:
+    def write(
+        self,
+        model: str,
+        ids: List[int],
+        values: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Update existing records.
 
         Args:
             model: The Odoo model name
             ids: List of record IDs to update
             values: Dictionary of field values to update
+            context: Optional Odoo context (e.g., {"lang": "fi_FI"})
 
         Returns:
             True if update was successful
@@ -1064,8 +1087,11 @@ class OdooConnection:
             OdooConnectionError: If update fails
         """
         try:
+            kwargs: Dict[str, Any] = {}
+            if context:
+                kwargs["context"] = context
             with self._performance_manager.monitor.track_operation(f"write_{model}"):
-                result = self.execute_kw(model, "write", [ids, values], {})
+                result = self.execute_kw(model, "write", [ids, values], kwargs)
                 # Invalidate cache for updated records
                 for record_id in ids:
                     self._performance_manager.invalidate_record_cache(model, record_id)
