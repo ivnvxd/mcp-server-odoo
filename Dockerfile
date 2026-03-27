@@ -16,6 +16,11 @@ COPY --from=builder --chown=mcp:mcp /usr/local/bin/mcp-server-odoo /usr/local/bi
 
 ENV PYTHONUNBUFFERED=1
 
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10s \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
 LABEL org.opencontainers.image.title="mcp-server-odoo"
 LABEL org.opencontainers.image.description="MCP Server for Odoo ERP — connect AI assistants to Odoo via XML-RPC"
 LABEL org.opencontainers.image.url="https://github.com/ivnvxd/mcp-server-odoo"
@@ -24,4 +29,4 @@ LABEL org.opencontainers.image.licenses="MPL-2.0"
 
 USER mcp
 
-ENTRYPOINT ["mcp-server-odoo"]
+CMD ["mcp-server-odoo", "--transport", "streamable-http", "--host", "0.0.0.0"]

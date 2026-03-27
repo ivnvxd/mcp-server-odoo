@@ -79,6 +79,8 @@ class TestOdooToolHandler:
             "search_records",
             "get_record",
             "list_models",
+            "list_fields",
+            "count_records",
             "create_record",
             "update_record",
             "delete_record",

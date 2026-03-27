@@ -10,6 +10,8 @@ from typing import Any, Dict, Optional
 from mcp.server import FastMCP
 
 from .access_control import AccessController
+from .audit import AuditLogger
+from .auth import ANONYMOUS_AUTH, AuthMiddleware, create_auth_provider, set_current_auth_info
 from .config import OdooConfig, get_config
 from .error_handling import (
     ConfigurationError,
@@ -20,13 +22,14 @@ from .logging_config import get_logger, logging_config, perf_logger
 from .odoo_connection import OdooConnection, OdooConnectionError
 from .performance import PerformanceManager
 from .resources import register_resources
+from .security import ConfirmationManager, MutationPolicy, SecurityPolicy
 from .tools import register_tools
 
 # Set up logging
 logger = get_logger(__name__)
 
 # Server version
-SERVER_VERSION = "0.5.0"
+SERVER_VERSION = "0.6.0"
 
 
 class OdooMCPServer:
@@ -57,6 +60,13 @@ class OdooMCPServer:
         self.resource_handler = None
         self.tool_handler = None
 
+        # Initialize security components
+        self.security_policy = SecurityPolicy(self.config)
+        self.mutation_policy = MutationPolicy(self.config)
+        self.confirmation_manager = ConfirmationManager(self.config)
+        self.audit_logger = AuditLogger(self.config)
+        self.auth_provider = create_auth_provider(self.config)
+
         # Create FastMCP instance with server metadata
         self.app = FastMCP(
             name="odoo-mcp-server",
@@ -69,6 +79,21 @@ class OdooMCPServer:
             from starlette.responses import JSONResponse
 
             return JSONResponse(self.get_health_status())
+
+        @self.app.custom_route("/ready", methods=["GET"])
+        async def readiness_check(request):
+            from starlette.responses import JSONResponse
+
+            is_ready = bool(self.connection and self.connection.is_authenticated)
+            status_code = 200 if is_ready else 503
+            return JSONResponse(
+                {
+                    "ready": is_ready,
+                    "version": SERVER_VERSION,
+                    "auth_mode": self.config.auth_mode,
+                },
+                status_code=status_code,
+            )
 
         @self.app.completion()
         async def handle_completion(ref, argument, context):
@@ -84,7 +109,28 @@ class OdooMCPServer:
                 return Completion(values=matches[:20])
             return None
 
+        self._log_startup_posture()
         logger.info(f"Initialized Odoo MCP Server v{SERVER_VERSION}")
+
+    def _log_startup_posture(self):
+        """Log the security posture at startup."""
+        c = self.config
+        logger.info("=== Security Posture ===")
+        logger.info("  Auth mode: %s", c.auth_mode)
+        logger.info("  Transport: %s", c.transport)
+        if c.allowed_models:
+            logger.info("  Allowed models: %s", ", ".join(c.allowed_models))
+        else:
+            logger.info("  Allowed models: ALL (no restriction)")
+        logger.info("  Mutations enabled: %s", c.enable_mutations)
+        logger.info("  Deletes enabled: %s", c.enable_deletes)
+        logger.info("  Confirmation required: %s", c.require_confirmation_for_mutations)
+        logger.info("  Audit logging: %s", c.audit_log_enabled)
+        if c.admin_mode:
+            logger.warning("  ADMIN MODE: ENABLED (all safety checks bypassed)")
+        if c.cors_origins:
+            logger.info("  CORS origins: %s", ", ".join(c.cors_origins))
+        logger.info("========================")
 
     @contextlib.asynccontextmanager
     async def _odoo_lifespan(self, app: FastMCP):
@@ -166,13 +212,22 @@ class OdooMCPServer:
         """Register tool handlers after connection is established."""
         if self.connection and self.access_controller:
             self.tool_handler = register_tools(
-                self.app, self.connection, self.access_controller, self.config
+                self.app,
+                self.connection,
+                self.access_controller,
+                self.config,
+                security_policy=self.security_policy,
+                mutation_policy=self.mutation_policy,
+                confirmation_manager=self.confirmation_manager,
+                audit_logger=self.audit_logger,
             )
             logger.info("Registered MCP tools")
 
     async def run_stdio(self):
         """Run the server using stdio transport."""
         try:
+            # Set anonymous auth for local stdio
+            set_current_auth_info(ANONYMOUS_AUTH)
             logger.info("Starting MCP server with stdio transport...")
             await self.app.run_stdio_async()
         except KeyboardInterrupt:
@@ -184,10 +239,7 @@ class OdooMCPServer:
             error_handler.handle_error(e, context=context)
 
     def run_stdio_sync(self):
-        """Synchronous wrapper for run_stdio.
-
-        This is provided for compatibility with synchronous code.
-        """
+        """Synchronous wrapper for run_stdio."""
         import asyncio
 
         asyncio.run(self.run_stdio())
@@ -198,15 +250,48 @@ class OdooMCPServer:
     async def run_http(self, host: str = "localhost", port: int = 8000):
         """Run the server using streamable HTTP transport.
 
-        Args:
-            host: Host to bind to
-            port: Port to bind to
+        Wraps the FastMCP Starlette app with auth and CORS middleware,
+        then starts uvicorn directly.
         """
         try:
             logger.info(f"Starting MCP server with HTTP transport on {host}:{port}...")
             self.app.settings.host = host
             self.app.settings.port = port
-            await self.app.run_streamable_http_async()
+
+            # Get the Starlette ASGI app from FastMCP
+            starlette_app = self.app.streamable_http_app()
+
+            # Add CORS middleware if configured
+            if self.config.cors_origins:
+                from starlette.middleware.cors import CORSMiddleware
+
+                starlette_app.add_middleware(
+                    CORSMiddleware,
+                    allow_origins=self.config.cors_origins,
+                    allow_credentials=self.config.cors_allow_credentials,
+                    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+                    allow_headers=["*", "Mcp-Session-Id"],
+                )
+                logger.info("CORS enabled for origins: %s", self.config.cors_origins)
+
+            # Wrap with auth middleware if auth is enabled
+            if self.config.auth_mode != "none":
+                asgi_app = AuthMiddleware(starlette_app, self.auth_provider)
+                logger.info("Auth middleware enabled (mode: %s)", self.config.auth_mode)
+            else:
+                asgi_app = starlette_app
+
+            # Run with uvicorn
+            import uvicorn
+
+            config = uvicorn.Config(
+                asgi_app,
+                host=host,
+                port=port,
+                log_level=self.config.log_level.lower(),
+            )
+            server = uvicorn.Server(config)
+            await server.serve()
         except KeyboardInterrupt:
             logger.info("Server interrupted by user")
         except (OdooConnectionError, ConfigurationError):
@@ -216,30 +301,23 @@ class OdooMCPServer:
             error_handler.handle_error(e, context=context)
 
     def get_capabilities(self) -> Dict[str, Dict[str, bool]]:
-        """Get server capabilities.
-
-        Returns:
-            Dict with server capabilities
-        """
+        """Get server capabilities."""
         return {
             "capabilities": {
-                "resources": True,  # Exposes Odoo data as resources
-                "tools": True,  # Provides tools for Odoo operations
-                "prompts": False,  # Prompts will be added in later phases
+                "resources": True,
+                "tools": True,
+                "prompts": False,
             }
         }
 
     def get_health_status(self) -> Dict[str, Any]:
-        """Get server health status with error metrics.
-
-        Returns:
-            Dict with health status and metrics
-        """
+        """Get server health status."""
         is_connected = bool(self.connection is not None and self.connection.is_authenticated)
 
         return {
             "status": "healthy" if is_connected else "unhealthy",
             "version": SERVER_VERSION,
+            "auth_mode": self.config.auth_mode,
             "connection": {
                 "connected": is_connected,
             },
@@ -252,12 +330,19 @@ class OdooMCPServer:
         try:
             models = self.access_controller.get_enabled_models()
             if models:
-                return [m["model"] for m in models]
-            # YOLO mode returns [] meaning "all allowed" — query ir.model directly
-            if self.connection and self.connection.is_authenticated:
+                names = [m["model"] for m in models]
+            elif self.connection and self.connection.is_authenticated:
+                # YOLO mode returns [] meaning "all allowed"
                 records = self.connection.search_read("ir.model", [], ["model"], limit=200)
-                return [r["model"] for r in records]
-            return []
+                names = [r["model"] for r in records]
+            else:
+                return []
+
+            # Filter by security policy if allowlist is configured
+            allowed = self.security_policy.get_allowed_models_list()
+            if allowed:
+                names = [n for n in names if n in set(allowed)]
+            return names
         except Exception as e:
             logger.debug(f"Failed to get model names for autocomplete: {e}")
             return []

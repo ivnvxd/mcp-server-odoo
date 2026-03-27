@@ -4,10 +4,11 @@ This module handles loading and validation of environment variables
 for connecting to Odoo via XML-RPC.
 """
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
 
@@ -19,7 +20,7 @@ class OdooConfig:
     # Required fields
     url: str
 
-    # Authentication (one method required)
+    # Authentication to Odoo (one method required)
     api_key: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
@@ -40,6 +41,39 @@ class OdooConfig:
     # YOLO mode configuration
     yolo_mode: str = "off"  # "off", "read", or "true"
 
+    # --- MCP client authentication ---
+    auth_mode: str = "none"  # "none" | "api_key" | "oauth2"
+    mcp_api_keys: Optional[List[str]] = None
+    oauth2_issuer_url: Optional[str] = None
+    oauth2_audience: Optional[str] = None
+    oauth2_jwks_url: Optional[str] = None
+    oauth2_client_id: Optional[str] = None
+    oauth2_client_secret: Optional[str] = None
+    oauth2_required_scopes: Optional[List[str]] = None
+
+    # --- Safety guardrails ---
+    allowed_models: Optional[List[str]] = None
+    allowed_read_operations: Optional[List[str]] = None
+    allowed_write_operations: Optional[List[str]] = None
+    model_operation_map: Optional[Dict[str, List[str]]] = None
+    field_allowlists: Dict[str, List[str]] = field(default_factory=dict)
+    field_denylists: Dict[str, List[str]] = field(default_factory=dict)
+    max_records_per_query: int = 100
+    max_batch_size: int = 50
+    enable_mutations: bool = False
+    enable_deletes: bool = False
+    require_confirmation_for_mutations: bool = True
+
+    # --- CORS ---
+    cors_origins: Optional[List[str]] = None
+    cors_allow_credentials: bool = False
+
+    # --- Audit ---
+    audit_log_enabled: bool = True
+
+    # --- Admin mode (dangerous, disabled by default) ---
+    admin_mode: bool = False
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         # Validate URL
@@ -58,7 +92,7 @@ class OdooConfig:
                 f"Must be one of: {', '.join(valid_yolo_modes)}"
             )
 
-        # Validate authentication (relaxed for YOLO mode)
+        # Validate authentication to Odoo (relaxed for YOLO mode)
         has_api_key = bool(self.api_key)
         has_credentials = bool(self.username and self.password)
 
@@ -102,6 +136,48 @@ class OdooConfig:
         # Validate port
         if self.port <= 0 or self.port > 65535:
             raise ValueError("Port must be between 1 and 65535")
+
+        # Validate MCP client auth mode
+        valid_auth_modes = {"none", "api_key", "oauth2"}
+        if self.auth_mode not in valid_auth_modes:
+            raise ValueError(
+                f"Invalid auth mode: {self.auth_mode}. "
+                f"Must be one of: {', '.join(valid_auth_modes)}"
+            )
+
+        if self.auth_mode == "api_key":
+            if not self.mcp_api_keys:
+                raise ValueError(
+                    "ODOO_MCP_API_KEYS is required when auth_mode is 'api_key'. "
+                    "Provide one or more comma-separated API keys."
+                )
+
+        if self.auth_mode == "oauth2":
+            if not self.oauth2_issuer_url:
+                raise ValueError(
+                    "ODOO_MCP_OAUTH2_ISSUER_URL is required when auth_mode is 'oauth2'."
+                )
+            if not self.oauth2_audience:
+                raise ValueError("ODOO_MCP_OAUTH2_AUDIENCE is required when auth_mode is 'oauth2'.")
+
+        # Fail-safe: require allowed_models when auth is enabled for remote access
+        if self.auth_mode != "none" and not self.allowed_models and not self.admin_mode:
+            raise ValueError(
+                "ODOO_ALLOWED_MODELS is required when authentication is enabled (fail-safe). "
+                "Provide a comma-separated list of allowed Odoo model names, "
+                "or set ODOO_MCP_ADMIN_MODE=true to bypass (dangerous)."
+            )
+
+        # Validate mutation/delete consistency
+        if self.enable_deletes and not self.enable_mutations:
+            raise ValueError("ODOO_ENABLE_DELETES=true requires ODOO_ENABLE_MUTATIONS=true.")
+
+        # Validate max_records_per_query
+        if self.max_records_per_query <= 0:
+            raise ValueError("ODOO_MAX_RECORDS_PER_QUERY must be positive")
+
+        if self.max_batch_size <= 0:
+            raise ValueError("ODOO_MAX_BATCH_SIZE must be positive")
 
     @property
     def uses_api_key(self) -> bool:
@@ -218,6 +294,42 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
             # Invalid value - will be caught by validation
             return yolo_env
 
+    # Helper to parse comma-separated lists
+    def get_list_env(key: str, default: Optional[str] = None) -> Optional[List[str]]:
+        value = os.getenv(key, default or "").strip()
+        if not value:
+            return None
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    # Helper to parse bool
+    def get_bool_env(key: str, default: bool) -> bool:
+        value = os.getenv(key, "").strip().lower()
+        if not value:
+            return default
+        return value in ("true", "1", "yes")
+
+    # Helper to parse JSON dict
+    def get_json_dict_env(key: str) -> Optional[Dict[str, List[str]]]:
+        value = os.getenv(key, "").strip()
+        if not value:
+            return None
+        try:
+            parsed = json.loads(value)
+            if not isinstance(parsed, dict):
+                raise ValueError(f"{key} must be a JSON object")
+            return parsed
+        except json.JSONDecodeError:
+            raise ValueError(f"{key} must be valid JSON") from None
+
+    # Scan for field allowlists/denylists: ODOO_FIELD_ALLOWLIST_RES_PARTNER -> res.partner
+    def scan_field_lists(prefix: str) -> Dict[str, List[str]]:
+        result = {}
+        for key, value in os.environ.items():
+            if key.startswith(prefix) and value.strip():
+                model_part = key[len(prefix) :].lower().replace("_", ".")
+                result[model_part] = [f.strip() for f in value.split(",") if f.strip()]
+        return result
+
     # Create configuration
     config = OdooConfig(
         url=os.getenv("ODOO_URL", "").strip(),
@@ -234,6 +346,42 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         port=get_int_env("ODOO_MCP_PORT", 8000),
         locale=os.getenv("ODOO_LOCALE", "").strip() or None,
         yolo_mode=get_yolo_mode(),
+        # MCP client auth
+        auth_mode=os.getenv("ODOO_MCP_AUTH_MODE", "none").strip().lower(),
+        mcp_api_keys=get_list_env("ODOO_MCP_API_KEYS"),
+        oauth2_issuer_url=os.getenv("ODOO_MCP_OAUTH2_ISSUER_URL", "").strip() or None,
+        oauth2_audience=os.getenv("ODOO_MCP_OAUTH2_AUDIENCE", "").strip() or None,
+        oauth2_jwks_url=os.getenv("ODOO_MCP_OAUTH2_JWKS_URL", "").strip() or None,
+        oauth2_client_id=os.getenv("ODOO_MCP_OAUTH2_CLIENT_ID", "").strip() or None,
+        oauth2_client_secret=os.getenv("ODOO_MCP_OAUTH2_CLIENT_SECRET", "").strip() or None,
+        oauth2_required_scopes=get_list_env("ODOO_MCP_OAUTH2_SCOPES"),
+        # Safety guardrails
+        allowed_models=get_list_env("ODOO_ALLOWED_MODELS"),
+        allowed_read_operations=get_list_env(
+            "ODOO_ALLOWED_READ_OPERATIONS",
+            "search_read,read,fields_get,search_count",
+        ),
+        allowed_write_operations=get_list_env(
+            "ODOO_ALLOWED_WRITE_OPERATIONS",
+            "create,write",
+        ),
+        model_operation_map=get_json_dict_env("ODOO_MODEL_OPERATION_MAP"),
+        field_allowlists=scan_field_lists("ODOO_FIELD_ALLOWLIST_"),
+        field_denylists=scan_field_lists("ODOO_FIELD_DENYLIST_"),
+        max_records_per_query=get_int_env("ODOO_MAX_RECORDS_PER_QUERY", 100),
+        max_batch_size=get_int_env("ODOO_MAX_BATCH_SIZE", 50),
+        enable_mutations=get_bool_env("ODOO_ENABLE_MUTATIONS", False),
+        enable_deletes=get_bool_env("ODOO_ENABLE_DELETES", False),
+        require_confirmation_for_mutations=get_bool_env(
+            "ODOO_REQUIRE_CONFIRMATION_FOR_MUTATIONS", True
+        ),
+        # CORS
+        cors_origins=get_list_env("ODOO_MCP_CORS_ORIGINS"),
+        cors_allow_credentials=get_bool_env("ODOO_MCP_CORS_CREDENTIALS", False),
+        # Audit
+        audit_log_enabled=get_bool_env("ODOO_MCP_AUDIT_LOG", True),
+        # Admin mode
+        admin_mode=get_bool_env("ODOO_MCP_ADMIN_MODE", False),
     )
 
     return config

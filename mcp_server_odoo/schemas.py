@@ -156,3 +156,51 @@ class DeleteResult(BaseModel):
     deleted_id: int = Field(description="ID of the deleted record")
     deleted_name: str = Field(description="Display name of the deleted record")
     message: str = Field(description="Human-readable success message")
+
+
+# --- List Fields ---
+
+
+class FieldInfo(BaseModel):
+    """Information about a single Odoo model field."""
+
+    name: str = Field(description="Technical field name")
+    type: str = Field(description="Field type (char, integer, many2one, etc.)")
+    string: str = Field(description="Human-readable field label")
+    required: bool = Field(default=False, description="Whether the field is required")
+    readonly: bool = Field(default=False, description="Whether the field is read-only")
+    relation: Optional[str] = Field(default=None, description="Related model for relational fields")
+    help: Optional[str] = Field(default=None, description="Field help text")
+
+
+class FieldsResult(BaseModel):
+    """Result of listing fields for a model."""
+
+    model: str = Field(description="Odoo model name")
+    fields: List[FieldInfo] = Field(description="List of field definitions")
+    total: int = Field(description="Total number of fields")
+
+
+# --- Count Records ---
+
+
+class CountResult(BaseModel):
+    """Result of counting records."""
+
+    model: str = Field(description="Odoo model name")
+    count: int = Field(description="Number of records matching the domain")
+    domain: List[Any] = Field(default_factory=list, description="Domain filter used")
+
+
+# --- Confirmation Required ---
+
+
+class ConfirmationRequired(BaseModel):
+    """Response when a mutation requires confirmation."""
+
+    confirmation_required: bool = Field(default=True, description="Always true for this response")
+    confirmation_token: str = Field(description="Token to include in follow-up call to confirm")
+    operation: str = Field(description="The operation that requires confirmation")
+    model: str = Field(description="The model being modified")
+    summary: str = Field(description="Summary of what will happen")
+    message: str = Field(description="Human-readable instruction")

@@ -13,6 +13,8 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 from .access_control import AccessControlError, AccessController
+from .audit import AuditLogger
+from .auth import get_current_auth_info
 from .config import OdooConfig
 from .error_handling import (
     NotFoundError,
@@ -22,14 +24,23 @@ from .error_sanitizer import ErrorSanitizer
 from .logging_config import get_logger, perf_logger
 from .odoo_connection import OdooConnection, OdooConnectionError
 from .schemas import (
+    CountResult,
     CreateResult,
     DeleteResult,
+    FieldInfo,
     FieldSelectionMetadata,
+    FieldsResult,
     ModelsResult,
     RecordResult,
     ResourceTemplatesResult,
     SearchResult,
     UpdateResult,
+)
+from .security import (
+    ConfirmationManager,
+    MutationPolicy,
+    SecurityPolicy,
+    SecurityPolicyError,
 )
 
 logger = get_logger(__name__)
@@ -44,22 +55,29 @@ class OdooToolHandler:
         connection: OdooConnection,
         access_controller: AccessController,
         config: OdooConfig,
+        security_policy: Optional[SecurityPolicy] = None,
+        mutation_policy: Optional[MutationPolicy] = None,
+        confirmation_manager: Optional[ConfirmationManager] = None,
+        audit_logger: Optional[AuditLogger] = None,
     ):
-        """Initialize tool handler.
-
-        Args:
-            app: FastMCP application instance
-            connection: Odoo connection instance
-            access_controller: Access control instance
-            config: Odoo configuration instance
-        """
         self.app = app
         self.connection = connection
         self.access_controller = access_controller
         self.config = config
+        self.security_policy = security_policy
+        self.mutation_policy = mutation_policy
+        self.confirmation_manager = confirmation_manager
+        self.audit_logger = audit_logger
 
         # Register tools
         self._register_tools()
+
+    def _get_auth_context(self) -> tuple:
+        """Get current auth subject and mode for audit logging."""
+        auth_info = get_current_auth_info()
+        if auth_info:
+            return auth_info.subject, auth_info.auth_mode
+        return "unknown", "none"
 
     def _format_datetime(self, value: str) -> str:
         """Format datetime values to ISO 8601 with timezone."""
@@ -478,6 +496,55 @@ class OdooToolHandler:
             return ResourceTemplatesResult(**result)
 
         @self.app.tool(
+            title="List Fields",
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
+        )
+        async def list_fields(
+            model: str,
+            ctx: Optional[Context] = None,
+        ) -> FieldsResult:
+            """List all fields for an Odoo model with their types and properties.
+
+            Args:
+                model: The Odoo model name (e.g., 'res.partner')
+
+            Returns:
+                Field definitions including name, type, label, required status,
+                and relationship information.
+            """
+            return await self._handle_list_fields_tool(model, ctx)
+
+        @self.app.tool(
+            title="Count Records",
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=True,
+            ),
+        )
+        async def count_records(
+            model: str,
+            domain: Optional[Any] = None,
+            ctx: Optional[Context] = None,
+        ) -> CountResult:
+            """Count records matching a domain filter.
+
+            Args:
+                model: The Odoo model name (e.g., 'res.partner')
+                domain: Odoo domain filter (same format as search_records)
+
+            Returns:
+                Count of matching records.
+            """
+            return await self._handle_count_records_tool(model, domain, ctx)
+
+        @self.app.tool(
             title="Create Record",
             annotations=ToolAnnotations(
                 readOnlyHint=False,
@@ -489,6 +556,8 @@ class OdooToolHandler:
         async def create_record(
             model: str,
             values: Dict[str, Any],
+            dry_run: bool = False,
+            confirmation_token: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> CreateResult:
             """Create a new record in an Odoo model.
@@ -496,11 +565,15 @@ class OdooToolHandler:
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
                 values: Field values for the new record
+                dry_run: If true, validate without creating (default: false)
+                confirmation_token: Token from a previous confirmation-required response
 
             Returns:
                 Created record details with ID, URL, and confirmation.
             """
-            result = await self._handle_create_record_tool(model, values, ctx)
+            result = await self._handle_create_record_tool(
+                model, values, dry_run, confirmation_token, ctx
+            )
             return CreateResult(**result)
 
         @self.app.tool(
@@ -516,6 +589,8 @@ class OdooToolHandler:
             model: str,
             record_id: int,
             values: Dict[str, Any],
+            dry_run: bool = False,
+            confirmation_token: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> UpdateResult:
             """Update an existing record.
@@ -524,11 +599,15 @@ class OdooToolHandler:
                 model: The Odoo model name (e.g., 'res.partner')
                 record_id: The record ID to update
                 values: Field values to update
+                dry_run: If true, validate without updating (default: false)
+                confirmation_token: Token from a previous confirmation-required response
 
             Returns:
                 Updated record details with confirmation.
             """
-            result = await self._handle_update_record_tool(model, record_id, values, ctx)
+            result = await self._handle_update_record_tool(
+                model, record_id, values, dry_run, confirmation_token, ctx
+            )
             return UpdateResult(**result)
 
         @self.app.tool(
@@ -568,9 +647,15 @@ class OdooToolHandler:
         ctx=None,
     ) -> Dict[str, Any]:
         """Handle search tool request."""
+        subject, auth_mode = self._get_auth_context()
         try:
             with perf_logger.track_operation("tool_search", model=model):
-                # Check model access
+                # Security policy checks (local, fast)
+                if self.security_policy:
+                    self.security_policy.check_model_allowed(model)
+                    self.security_policy.check_operation_allowed(model, "search_read")
+
+                # Odoo-level access control
                 self.access_controller.validate_model_access(model, "read")
                 await self._ctx_info(ctx, f"Searching {model}...")
 
@@ -643,8 +728,10 @@ class OdooToolHandler:
                                 f"Invalid fields parameter. Expected JSON array or Python list, got: {fields[:100]}..."
                             ) from e
 
-                # Set defaults
-                if limit <= 0 or limit > self.config.max_limit:
+                # Clamp limits via security policy
+                if self.security_policy:
+                    limit = self.security_policy.clamp_limit(limit)
+                elif limit <= 0 or limit > self.config.max_limit:
                     limit = self.config.default_limit
 
                 # Get total count
@@ -674,6 +761,12 @@ class OdooToolHandler:
                     )
                     logger.debug(f"Fetching all fields for {model} search")
 
+                # Apply field filtering from security policy
+                if self.security_policy and fields_to_fetch:
+                    fields_to_fetch = self.security_policy.filter_read_fields(
+                        model, fields_to_fetch
+                    )
+
                 # Read records
                 records = []
                 if record_ids:
@@ -682,7 +775,7 @@ class OdooToolHandler:
                     records = [self._process_record_dates(record, model) for record in records]
                 await self._ctx_progress(ctx, 3, 3, f"Returning {len(records)} records")
 
-                return {
+                result = {
                     "records": records,
                     "total": total_count,
                     "limit": limit,
@@ -690,6 +783,21 @@ class OdooToolHandler:
                     "model": model,
                 }
 
+                # Audit log
+                if self.audit_logger:
+                    with self.audit_logger.track_tool_call(
+                        "search_records",
+                        subject,
+                        auth_mode,
+                        model=model,
+                        operation="read",
+                    ) as entry:
+                        entry.extra = {"count": len(records), "total": total_count}
+
+                return result
+
+        except SecurityPolicyError as e:
+            raise ValidationError(f"Security policy: {e}") from e
         except AccessControlError as e:
             raise ValidationError(f"Access denied: {e}") from e
         except OdooConnectionError as e:
@@ -707,9 +815,15 @@ class OdooToolHandler:
         ctx=None,
     ) -> RecordResult:
         """Handle get record tool request."""
+        subject, auth_mode = self._get_auth_context()
         try:
             with perf_logger.track_operation("tool_get_record", model=model):
-                # Check model access
+                # Security policy checks
+                if self.security_policy:
+                    self.security_policy.check_model_allowed(model)
+                    self.security_policy.check_operation_allowed(model, "read")
+
+                # Odoo-level access control
                 self.access_controller.validate_model_access(model, "read")
                 await self._ctx_info(ctx, f"Getting {model}/{record_id}...")
 
@@ -740,6 +854,12 @@ class OdooToolHandler:
                     # Specific fields requested
                     logger.debug(f"Fetching specific fields for {model}: {fields}")
 
+                # Apply field filtering from security policy
+                if self.security_policy and fields_to_fetch:
+                    fields_to_fetch = self.security_policy.filter_read_fields(
+                        model, fields_to_fetch
+                    )
+
                 # Read the record
                 records = self.connection.read(model, [record_id], fields_to_fetch)
 
@@ -765,12 +885,26 @@ class OdooToolHandler:
                         note=f"Limited fields returned for performance. Use fields=['__all__'] for all fields or see odoo://{model}/fields for available fields.",
                     )
 
+                # Audit log
+                if self.audit_logger:
+                    with self.audit_logger.track_tool_call(
+                        "get_record",
+                        subject,
+                        auth_mode,
+                        model=model,
+                        operation="read",
+                        record_ids=[record_id],
+                    ):
+                        pass
+
                 return RecordResult(record=record, metadata=metadata)
 
         except ValidationError:
             raise
         except NotFoundError as e:
             raise ValidationError(str(e)) from e
+        except SecurityPolicyError as e:
+            raise ValidationError(f"Security policy: {e}") from e
         except AccessControlError as e:
             raise ValidationError(f"Access denied: {e}") from e
         except OdooConnectionError as e:
@@ -992,12 +1126,24 @@ class OdooToolHandler:
         self,
         model: str,
         values: Dict[str, Any],
+        dry_run: bool = False,
+        confirmation_token: Optional[str] = None,
         ctx=None,
     ) -> Dict[str, Any]:
         """Handle create record tool request."""
+        subject, auth_mode = self._get_auth_context()
         try:
             with perf_logger.track_operation("tool_create_record", model=model):
-                # Check model access
+                # Security policy checks
+                if self.security_policy:
+                    self.security_policy.check_model_allowed(model)
+                    self.security_policy.check_operation_allowed(model, "create")
+
+                # Mutation policy check
+                if self.mutation_policy:
+                    self.mutation_policy.check_mutation_allowed("create", model)
+
+                # Odoo-level access control
                 self.access_controller.validate_model_access(model, "create")
                 await self._ctx_info(ctx, f"Creating record in {model}...")
 
@@ -1008,6 +1154,44 @@ class OdooToolHandler:
                 # Validate required fields
                 if not values:
                     raise ValidationError("No values provided for record creation")
+
+                # Filter write fields via security policy
+                if self.security_policy:
+                    values = self.security_policy.filter_write_fields(model, values)
+                    if not values:
+                        raise ValidationError(
+                            "No allowed fields remaining after security filtering"
+                        )
+
+                # Confirmation flow
+                if (
+                    self.confirmation_manager
+                    and self.confirmation_manager.requires_confirmation
+                    and not confirmation_token
+                ):
+                    summary = f"Create {model} with fields: {', '.join(values.keys())}"
+                    token = self.confirmation_manager.generate_token("create", model, summary)
+                    return {
+                        "success": False,
+                        "record": {},
+                        "url": "",
+                        "message": f"Confirmation required. Re-call with confirmation_token='{token}'",
+                        "confirmation_required": True,
+                        "confirmation_token": token,
+                    }
+
+                if confirmation_token and self.confirmation_manager:
+                    if not self.confirmation_manager.validate_token(confirmation_token):
+                        raise ValidationError("Invalid or expired confirmation token")
+
+                # Dry-run mode
+                if dry_run:
+                    return {
+                        "success": True,
+                        "record": {"dry_run": True, "values": values},
+                        "url": "",
+                        "message": f"Dry run: would create {model} with {len(values)} fields",
+                    }
 
                 # Create the record
                 record_id = self.connection.create(model, values)
@@ -1029,6 +1213,18 @@ class OdooToolHandler:
 
                 record_url = self.connection.build_record_url(model, record_id)
 
+                # Audit log
+                if self.audit_logger:
+                    with self.audit_logger.track_tool_call(
+                        "create_record",
+                        subject,
+                        auth_mode,
+                        model=model,
+                        operation="create",
+                        record_ids=[record_id],
+                    ):
+                        pass
+
                 return {
                     "success": True,
                     "record": record,
@@ -1038,6 +1234,8 @@ class OdooToolHandler:
 
         except ValidationError:
             raise
+        except SecurityPolicyError as e:
+            raise ValidationError(f"Security policy: {e}") from e
         except AccessControlError as e:
             raise ValidationError(f"Access denied: {e}") from e
         except OdooConnectionError as e:
@@ -1052,12 +1250,24 @@ class OdooToolHandler:
         model: str,
         record_id: int,
         values: Dict[str, Any],
+        dry_run: bool = False,
+        confirmation_token: Optional[str] = None,
         ctx=None,
     ) -> Dict[str, Any]:
         """Handle update record tool request."""
+        subject, auth_mode = self._get_auth_context()
         try:
             with perf_logger.track_operation("tool_update_record", model=model):
-                # Check model access
+                # Security policy checks
+                if self.security_policy:
+                    self.security_policy.check_model_allowed(model)
+                    self.security_policy.check_operation_allowed(model, "write")
+
+                # Mutation policy check
+                if self.mutation_policy:
+                    self.mutation_policy.check_mutation_allowed("write", model)
+
+                # Odoo-level access control
                 self.access_controller.validate_model_access(model, "write")
                 await self._ctx_info(ctx, f"Updating {model}/{record_id}...")
 
@@ -1068,6 +1278,42 @@ class OdooToolHandler:
                 # Validate input
                 if not values:
                     raise ValidationError("No values provided for record update")
+
+                # Filter write fields via security policy
+                if self.security_policy:
+                    values = self.security_policy.filter_write_fields(model, values)
+                    if not values:
+                        raise ValidationError(
+                            "No allowed fields remaining after security filtering"
+                        )
+
+                # Confirmation flow
+                if (
+                    self.confirmation_manager
+                    and self.confirmation_manager.requires_confirmation
+                    and not confirmation_token
+                ):
+                    summary = f"Update {model}/{record_id} fields: {', '.join(values.keys())}"
+                    token = self.confirmation_manager.generate_token("write", model, summary)
+                    return {
+                        "success": False,
+                        "record": {},
+                        "url": "",
+                        "message": f"Confirmation required. Re-call with confirmation_token='{token}'",
+                    }
+
+                if confirmation_token and self.confirmation_manager:
+                    if not self.confirmation_manager.validate_token(confirmation_token):
+                        raise ValidationError("Invalid or expired confirmation token")
+
+                # Dry-run mode
+                if dry_run:
+                    return {
+                        "success": True,
+                        "record": {"dry_run": True, "record_id": record_id, "values": values},
+                        "url": "",
+                        "message": f"Dry run: would update {model}/{record_id} with {len(values)} fields",
+                    }
 
                 # Check if record exists (only fetch ID to verify existence)
                 existing = self.connection.read(model, [record_id], ["id"])
@@ -1094,6 +1340,18 @@ class OdooToolHandler:
 
                 record_url = self.connection.build_record_url(model, record_id)
 
+                # Audit log
+                if self.audit_logger:
+                    with self.audit_logger.track_tool_call(
+                        "update_record",
+                        subject,
+                        auth_mode,
+                        model=model,
+                        operation="write",
+                        record_ids=[record_id],
+                    ):
+                        pass
+
                 return {
                     "success": success,
                     "record": record,
@@ -1105,6 +1363,8 @@ class OdooToolHandler:
             raise
         except NotFoundError as e:
             raise ValidationError(str(e)) from e
+        except SecurityPolicyError as e:
+            raise ValidationError(f"Security policy: {e}") from e
         except AccessControlError as e:
             raise ValidationError(f"Access denied: {e}") from e
         except OdooConnectionError as e:
@@ -1121,9 +1381,19 @@ class OdooToolHandler:
         ctx=None,
     ) -> Dict[str, Any]:
         """Handle delete record tool request."""
+        subject, auth_mode = self._get_auth_context()
         try:
             with perf_logger.track_operation("tool_delete_record", model=model):
-                # Check model access
+                # Security policy checks
+                if self.security_policy:
+                    self.security_policy.check_model_allowed(model)
+                    self.security_policy.check_operation_allowed(model, "unlink")
+
+                # Mutation + delete policy checks
+                if self.mutation_policy:
+                    self.mutation_policy.check_delete_allowed(model)
+
+                # Odoo-level access control
                 self.access_controller.validate_model_access(model, "unlink")
                 await self._ctx_info(ctx, f"Deleting {model}/{record_id}...")
 
@@ -1142,6 +1412,18 @@ class OdooToolHandler:
                 # Delete the record
                 success = self.connection.unlink(model, [record_id])
 
+                # Audit log
+                if self.audit_logger:
+                    with self.audit_logger.track_tool_call(
+                        "delete_record",
+                        subject,
+                        auth_mode,
+                        model=model,
+                        operation="unlink",
+                        record_ids=[record_id],
+                    ):
+                        pass
+
                 return {
                     "success": success,
                     "deleted_id": record_id,
@@ -1153,6 +1435,8 @@ class OdooToolHandler:
             raise
         except NotFoundError as e:
             raise ValidationError(str(e)) from e
+        except SecurityPolicyError as e:
+            raise ValidationError(f"Security policy: {e}") from e
         except AccessControlError as e:
             raise ValidationError(f"Access denied: {e}") from e
         except OdooConnectionError as e:
@@ -1162,24 +1446,156 @@ class OdooToolHandler:
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to delete record: {sanitized_msg}") from e
 
+    async def _handle_list_fields_tool(self, model: str, ctx=None) -> FieldsResult:
+        """Handle list fields tool request."""
+        subject, auth_mode = self._get_auth_context()
+        try:
+            with perf_logger.track_operation("tool_list_fields", model=model):
+                # Security policy checks
+                if self.security_policy:
+                    self.security_policy.check_model_allowed(model)
+                    self.security_policy.check_operation_allowed(model, "fields_get")
+
+                self.access_controller.validate_model_access(model, "read")
+                await self._ctx_info(ctx, f"Getting fields for {model}...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                fields_info = self.connection.fields_get(model)
+
+                fields_list = []
+                for name, info in fields_info.items():
+                    fields_list.append(
+                        FieldInfo(
+                            name=name,
+                            type=info.get("type", "unknown"),
+                            string=info.get("string", name),
+                            required=info.get("required", False),
+                            readonly=info.get("readonly", False),
+                            relation=info.get("relation"),
+                            help=info.get("help") or None,
+                        )
+                    )
+
+                # Apply field filtering
+                if self.security_policy:
+                    allowed = self.security_policy.filter_read_fields(
+                        model, [f.name for f in fields_list]
+                    )
+                    if allowed is not None:
+                        allowed_set = set(allowed)
+                        fields_list = [f for f in fields_list if f.name in allowed_set]
+
+                # Audit log
+                if self.audit_logger:
+                    with self.audit_logger.track_tool_call(
+                        "list_fields",
+                        subject,
+                        auth_mode,
+                        model=model,
+                        operation="fields_get",
+                    ):
+                        pass
+
+                return FieldsResult(
+                    model=model,
+                    fields=fields_list,
+                    total=len(fields_list),
+                )
+
+        except SecurityPolicyError as e:
+            raise ValidationError(f"Security policy: {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(f"Access denied: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in list_fields tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to list fields: {sanitized_msg}") from e
+
+    async def _handle_count_records_tool(
+        self, model: str, domain: Optional[Any], ctx=None
+    ) -> CountResult:
+        """Handle count records tool request."""
+        subject, auth_mode = self._get_auth_context()
+        try:
+            with perf_logger.track_operation("tool_count_records", model=model):
+                # Security policy checks
+                if self.security_policy:
+                    self.security_policy.check_model_allowed(model)
+                    self.security_policy.check_operation_allowed(model, "search_count")
+
+                self.access_controller.validate_model_access(model, "read")
+                await self._ctx_info(ctx, f"Counting records in {model}...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                # Parse domain
+                parsed_domain = []
+                if domain is not None:
+                    if isinstance(domain, str):
+                        try:
+                            parsed_domain = json.loads(domain)
+                        except json.JSONDecodeError:
+                            try:
+                                import ast
+
+                                parsed_domain = ast.literal_eval(domain)
+                            except (ValueError, SyntaxError) as e:
+                                raise ValidationError(f"Invalid domain: {domain[:100]}...") from e
+                    else:
+                        parsed_domain = domain
+
+                count = self.connection.search_count(model, parsed_domain)
+
+                # Audit log
+                if self.audit_logger:
+                    with self.audit_logger.track_tool_call(
+                        "count_records",
+                        subject,
+                        auth_mode,
+                        model=model,
+                        operation="search_count",
+                    ) as entry:
+                        entry.extra = {"count": count}
+
+                return CountResult(
+                    model=model,
+                    count=count,
+                    domain=parsed_domain,
+                )
+
+        except SecurityPolicyError as e:
+            raise ValidationError(f"Security policy: {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(f"Access denied: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in count_records tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to count records: {sanitized_msg}") from e
+
 
 def register_tools(
     app: FastMCP,
     connection: OdooConnection,
     access_controller: AccessController,
     config: OdooConfig,
+    security_policy: Optional[SecurityPolicy] = None,
+    mutation_policy: Optional[MutationPolicy] = None,
+    confirmation_manager: Optional[ConfirmationManager] = None,
+    audit_logger: Optional[AuditLogger] = None,
 ) -> OdooToolHandler:
-    """Register all Odoo tools with the FastMCP app.
-
-    Args:
-        app: FastMCP application instance
-        connection: Odoo connection instance
-        access_controller: Access control instance
-        config: Odoo configuration instance
-
-    Returns:
-        The tool handler instance
-    """
-    handler = OdooToolHandler(app, connection, access_controller, config)
+    """Register all Odoo tools with the FastMCP app."""
+    handler = OdooToolHandler(
+        app,
+        connection,
+        access_controller,
+        config,
+        security_policy=security_policy,
+        mutation_policy=mutation_policy,
+        confirmation_manager=confirmation_manager,
+        audit_logger=audit_logger,
+    )
     logger.info("Registered Odoo MCP tools")
     return handler

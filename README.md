@@ -1,830 +1,388 @@
-# MCP Server for Odoo
+# MCP Server for Odoo (Production Fork)
 
 [![CI](https://github.com/ivnvxd/mcp-server-odoo/actions/workflows/ci.yml/badge.svg)](https://github.com/ivnvxd/mcp-server-odoo/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/ivnvxd/mcp-server-odoo/branch/main/graph/badge.svg)](https://codecov.io/gh/ivnvxd/mcp-server-odoo)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![Checked with ty](https://img.shields.io/badge/checked%20with-ty-blue?labelColor=orange)](https://github.com/astral-sh/ty)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 
-An MCP server that enables AI assistants like Claude to interact with Odoo ERP systems. Access business data, search records, create new entries, update existing data, and manage your Odoo instance through natural language.
+A production-oriented remote MCP server for Odoo ERP, designed to work with **ChatGPT Apps**, **Microsoft Copilot Studio**, and any MCP-compatible client over HTTPS.
 
-**Works with any Odoo instance!** Use [YOLO mode](#yolo-mode-developmenttesting-only-) for quick testing and demos with any standard Odoo installation. For enterprise security, access controls, and production use, install the [Odoo MCP module](https://apps.odoo.com/apps/modules/19.0/mcp_server).
+This is a security-hardened fork of [ivnvxd/mcp-server-odoo](https://github.com/ivnvxd/mcp-server-odoo) (v0.5.0). It adds OAuth 2.0 authentication, config-driven safety guardrails, audit logging, and deployment-ready artifacts while preserving full backward compatibility with the upstream project.
+
+## Why This Fork Exists
+
+The upstream project is excellent for local use with Claude Desktop. This fork adds what's needed to expose the server **remotely over HTTPS** as a production service:
+
+- **Client authentication** (OAuth 2.0, API keys) so not anyone can call your Odoo
+- **Model allowlists** so you control exactly which Odoo models are exposed
+- **Field-level filtering** to hide sensitive fields
+- **Mutation controls** so the default mode is read-only
+- **Audit logging** for compliance and debugging
+- **CORS support** for browser-based MCP clients
+- **Docker Compose** for easy deployment
+
+**No Odoo module required.** This server uses YOLO mode (direct XML-RPC) because we cannot install modules in our customer's Odoo environment.
 
 ## Features
 
-- 🔍 **Search and retrieve** any Odoo record (customers, products, invoices, etc.)
-- ✨ **Create new records** with field validation and permission checks
-- ✏️ **Update existing data** with smart field handling
-- 🗑️ **Delete records** respecting model-level permissions
-- 🔢 **Count records** matching specific criteria
-- 📋 **Inspect model fields** to understand data structure
-- 🔐 **Secure access** with API key or username/password authentication
-- 🎯 **Smart pagination** for large datasets
-- 🧠 **Smart field selection** — automatically picks the most relevant fields per model
-- 💬 **LLM-optimized output** with hierarchical text formatting
-- 🌍 **Multi-language support** — get responses in your preferred language
-- 🚀 **YOLO Mode** for quick access with any Odoo instance (no module required)
+- **Remote MCP endpoint** over HTTP with CORS support
+- **OAuth 2.0** (Entra ID, Auth0, Keycloak) and **API key** authentication
+- **Config-driven safety**: model allowlists, field filtering, mutation controls
+- **Audit logging** for all tool calls (structured JSON)
+- **9 MCP tools**: search, get, list_models, list_fields, count, create, update, delete, list_resource_templates
+- **Smart field selection** with automatic relevance scoring
+- **Dry-run mode** for write operations
+- **Confirmation tokens** for mutation safety
+- **Health and readiness endpoints** (`/health`, `/ready`)
+- **Docker and docker-compose** deployment
+- **Backward compatible** with upstream stdio transport
 
-## Installation
+## Quick Start
 
-### Prerequisites
-
-- Python 3.10 or higher
-- Access to an Odoo instance:
-  - **Standard mode** (production): Version 16.0+ with the [Odoo MCP module](https://apps.odoo.com/apps/modules/19.0/mcp_server) installed
-  - **YOLO mode** (testing/demos): Any Odoo version with XML-RPC enabled (no module required)
-
-### Install UV First
-
-The MCP server runs on your **local computer** (where Claude Desktop is installed), not on your Odoo server. You need to install UV on your local machine:
-
-<details>
-<summary>macOS/Linux</summary>
+### Local Development (stdio)
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-</details>
+# Install and run
+uvx mcp-server-odoo
 
-<details>
-<summary>Windows</summary>
-
-```powershell
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-</details>
-
-After installation, restart your terminal to ensure UV is in your PATH.
-
-### Installing via MCP Settings (Recommended)
-
-Add this configuration to your MCP settings:
-
-```json
-{
-  "mcpServers": {
-    "odoo": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
-      "env": {
-        "ODOO_URL": "https://your-odoo-instance.com",
-        "ODOO_API_KEY": "your-api-key-here"
-      }
-    }
-  }
-}
-```
-
-<details>
-<summary>Claude Desktop</summary>
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "odoo": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
-      "env": {
-        "ODOO_URL": "https://your-odoo-instance.com",
-        "ODOO_API_KEY": "your-api-key-here",
-        "ODOO_DB": "your-database-name"
-      }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary>Claude Code</summary>
-
-Add to `.mcp.json` in your project root:
-
-```json
-{
-  "mcpServers": {
-    "odoo": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
-      "env": {
-        "ODOO_URL": "https://your-odoo-instance.com",
-        "ODOO_API_KEY": "your-api-key-here",
-        "ODOO_DB": "your-database-name"
-      }
-    }
-  }
-}
-```
-
-Or use the CLI:
-
-```bash
-claude mcp add odoo \
-  --env ODOO_URL=https://your-odoo-instance.com \
-  --env ODOO_API_KEY=your-api-key-here \
-  --env ODOO_DB=your-database-name \
-  -- uvx mcp-server-odoo
-```
-</details>
-
-<details>
-<summary>Cursor</summary>
-
-Add to `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "odoo": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
-      "env": {
-        "ODOO_URL": "https://your-odoo-instance.com",
-        "ODOO_API_KEY": "your-api-key-here",
-        "ODOO_DB": "your-database-name"
-      }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary>VS Code (with GitHub Copilot)</summary>
-
-Add to `.vscode/mcp.json` in your workspace:
-
-```json
-{
-  "servers": {
-    "odoo": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
-      "env": {
-        "ODOO_URL": "https://your-odoo-instance.com",
-        "ODOO_API_KEY": "your-api-key-here",
-        "ODOO_DB": "your-database-name"
-      }
-    }
-  }
-}
-```
-
-> **Note:** VS Code uses `"servers"` as the root key, not `"mcpServers"`.
-</details>
-
-<details>
-<summary>Windsurf</summary>
-
-Add to `~/.codeium/windsurf/mcp_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "odoo": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
-      "env": {
-        "ODOO_URL": "https://your-odoo-instance.com",
-        "ODOO_API_KEY": "your-api-key-here",
-        "ODOO_DB": "your-database-name"
-      }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary>Zed</summary>
-
-Add to `~/.config/zed/settings.json`:
-
-```json
-{
-  "context_servers": {
-    "odoo": {
-      "command": {
-        "path": "uvx",
-        "args": ["mcp-server-odoo"],
-        "env": {
-          "ODOO_URL": "https://your-odoo-instance.com",
-          "ODOO_API_KEY": "your-api-key-here",
-          "ODOO_DB": "your-database-name"
-        }
-      }
-    }
-  }
-}
-```
-</details>
-
-### Alternative Installation Methods
-
-<details>
-<summary>Using Docker</summary>
-
-Run with Docker — no Python installation required:
-
-```json
-{
-  "mcpServers": {
-    "odoo": {
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "ODOO_URL=http://host.docker.internal:8069",
-        "-e", "ODOO_API_KEY=your-api-key-here",
-        "ivnvxd/mcp-server-odoo"
-      ]
-    }
-  }
-}
-```
-
-> **Note:** Use `host.docker.internal` instead of `localhost` to connect to Odoo running on the host machine.
-
-For HTTP transport:
-
-```bash
-docker run --rm -p 8000:8000 \
-  -e ODOO_URL=http://host.docker.internal:8069 \
-  -e ODOO_API_KEY=your-api-key-here \
-  ivnvxd/mcp-server-odoo --transport streamable-http --host 0.0.0.0
-```
-
-The image is also available on GHCR: `ghcr.io/ivnvxd/mcp-server-odoo`
-</details>
-
-<details>
-<summary>Using pip</summary>
-
-```bash
-# Install globally
-pip install mcp-server-odoo
-
-# Or use pipx for isolated environment
-pipx install mcp-server-odoo
-```
-
-Then use `mcp-server-odoo` as the command in your MCP configuration.
-</details>
-
-<details>
-<summary>From source</summary>
-
-```bash
-git clone https://github.com/ivnvxd/mcp-server-odoo.git
-cd mcp-server-odoo
-pip install -e .
-```
-
-Then use the full path to the package in your MCP configuration.
-</details>
-
-## Configuration
-
-### Environment Variables
-
-The server requires the following environment variables:
-
-| Variable | Required | Description | Example |
-|----------|----------|-------------|---------|
-| `ODOO_URL` | Yes | Your Odoo instance URL | `https://mycompany.odoo.com` |
-| `ODOO_API_KEY` | Yes* | API key for authentication | `0ef5b399e9ee9c11b053dfb6eeba8de473c29fcd` |
-| `ODOO_USER` | Yes* | Username (if not using API key) | `admin` |
-| `ODOO_PASSWORD` | Yes* | Password (if not using API key) | `admin` |
-| `ODOO_DB` | No | Database name (auto-detected if not set) | `mycompany` |
-| `ODOO_LOCALE` | No | Language/locale for Odoo responses | `es_ES`, `fr_FR`, `de_DE` |
-| `ODOO_YOLO` | No | YOLO mode - bypasses MCP security (⚠️ DEV ONLY) | `off`, `read`, `true` |
-
-*Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required.
-
-**Notes:**
-- If database listing is restricted on your server, you must specify `ODOO_DB`
-- API key authentication is recommended for better security
-- The server also loads environment variables from a `.env` file in the working directory
-
-#### Advanced Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ODOO_MCP_DEFAULT_LIMIT` | `10` | Default number of records returned per search |
-| `ODOO_MCP_MAX_LIMIT` | `100` | Maximum allowed record limit per request |
-| `ODOO_MCP_MAX_SMART_FIELDS` | `15` | Maximum fields returned by smart field selection |
-| `ODOO_MCP_LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
-| `ODOO_MCP_LOG_JSON` | `false` | Enable structured JSON log output |
-| `ODOO_MCP_LOG_FILE` | — | Path for rotating log file (10 MB, 5 backups) |
-| `ODOO_MCP_TRANSPORT` | `stdio` | Transport type (`stdio`, `streamable-http`) |
-| `ODOO_MCP_HOST` | `localhost` | Host to bind for HTTP transport |
-| `ODOO_MCP_PORT` | `8000` | Port to bind for HTTP transport |
-
-### Transport Options
-
-The server supports multiple transport protocols for different use cases:
-
-#### 1. **stdio** (Default)
-Standard input/output transport - used by desktop AI applications like Claude Desktop.
-
-```bash
-# Default transport - no additional configuration needed
+# Or with environment variables
+ODOO_URL=http://localhost:8069 \
+ODOO_USER=admin \
+ODOO_PASSWORD=admin \
+ODOO_YOLO=read \
 uvx mcp-server-odoo
 ```
 
-#### 2. **streamable-http**
-Standard HTTP transport for REST API-style access and remote connectivity.
+### Remote Server (HTTP)
 
 ```bash
-# Run with HTTP transport
-uvx mcp-server-odoo --transport streamable-http --host 0.0.0.0 --port 8000
-
-# Or use environment variables
-export ODOO_MCP_TRANSPORT=streamable-http
-export ODOO_MCP_HOST=0.0.0.0
-export ODOO_MCP_PORT=8000
-uvx mcp-server-odoo
+ODOO_URL=http://your-odoo:8069 \
+ODOO_USER=admin \
+ODOO_PASSWORD=admin \
+ODOO_YOLO=read \
+ODOO_MCP_TRANSPORT=streamable-http \
+ODOO_MCP_HOST=0.0.0.0 \
+ODOO_MCP_AUTH_MODE=api_key \
+ODOO_MCP_API_KEYS=your-secret-key \
+ODOO_ALLOWED_MODELS=res.partner,res.company \
+uv run mcp-server-odoo
 ```
 
-The HTTP endpoint will be available at: `http://localhost:8000/mcp/`
+### Docker Compose
 
-> **Note**: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication. Requires MCP library v1.9.4 or higher for proper session management.
-
-<details>
-<summary>Running streamable-http transport for remote access</summary>
-
-```json
-{
-  "mcpServers": {
-    "odoo-remote": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo", "--transport", "streamable-http", "--port", "8080"],
-      "env": {
-        "ODOO_URL": "https://your-odoo-instance.com",
-        "ODOO_API_KEY": "your-api-key-here",
-        "ODOO_DB": "your-database-name"
-      }
-    }
-  }
-}
+```bash
+cp .env.example .env
+# Edit .env with your settings
+docker compose up -d
 ```
-</details>
 
-### Setting up Odoo
+## Deployment Modes
 
-1. **Install the MCP module**:
-   - Download the [mcp_server](https://apps.odoo.com/apps/modules/19.0/mcp_server) module
-   - Install it in your Odoo instance
-   - Navigate to Settings > MCP Server
+| Mode | Transport | Auth | Use Case |
+|------|-----------|------|----------|
+| **Local dev** | stdio | none | Claude Desktop, local testing |
+| **Remote (API key)** | streamable-http | api_key | Internal tools, smoke tests |
+| **Remote (OAuth)** | streamable-http | oauth2 | ChatGPT Apps, Copilot Studio |
+| **Admin** | any | any | Trusted internal admin (dangerous) |
 
-2. **Enable models for MCP access**:
-   - Go to Settings > MCP Server > Enabled Models
-   - Add models you want to access (e.g., res.partner, product.product)
-   - Configure permissions (read, write, create, delete) per model
+## Authentication
 
-3. **Generate an API key**:
-   - Go to Settings > Users & Companies > Users
-   - Select your user
-   - Under the "API Keys" tab, create a new key
-   - Copy the key for your MCP configuration
+### No Auth (Local Only)
 
-### YOLO Mode (Development/Testing Only) ⚠️
-
-YOLO mode allows the MCP server to connect directly to any standard Odoo instance **without requiring the MCP module**. This mode bypasses all MCP security controls and is intended **ONLY for development, testing, and demos**.
-
-**🚨 WARNING: Never use YOLO mode in production environments!**
-
-#### YOLO Mode Levels
-
-1. **Read-Only Mode** (`ODOO_YOLO=read`):
-   - Allows all read operations (search, read, count)
-   - Blocks all write operations (create, update, delete)
-   - Safe for demos and testing
-   - Shows "READ-ONLY" indicators in responses
-
-2. **Full Access Mode** (`ODOO_YOLO=true`):
-   - Allows ALL operations without restrictions
-   - Full CRUD access to all models
-   - **EXTREMELY DANGEROUS** - use only in isolated environments
-   - Shows "FULL ACCESS" warnings in responses
-
-#### YOLO Mode Configuration
-
-<details>
-<summary>Read-Only YOLO Mode (safer for demos)</summary>
-
-```json
-{
-  "mcpServers": {
-    "odoo-demo": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
-      "env": {
-        "ODOO_URL": "http://localhost:8069",
-        "ODOO_USER": "admin",
-        "ODOO_PASSWORD": "admin",
-        "ODOO_DB": "demo",
-        "ODOO_YOLO": "read"
-      }
-    }
-  }
-}
+```env
+ODOO_MCP_AUTH_MODE=none
 ```
-</details>
 
-<details>
-<summary>Full Access YOLO Mode (⚠️ use with extreme caution)</summary>
+Only appropriate for `stdio` transport. A warning is logged if used with HTTP.
 
-```json
-{
-  "mcpServers": {
-    "odoo-test": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
-      "env": {
-        "ODOO_URL": "http://localhost:8069",
-        "ODOO_USER": "admin",
-        "ODOO_PASSWORD": "admin",
-        "ODOO_DB": "test",
-        "ODOO_YOLO": "true"
-      }
-    }
-  }
-}
+### API Key Auth
+
+```env
+ODOO_MCP_AUTH_MODE=api_key
+ODOO_MCP_API_KEYS=key1,key2
+ODOO_ALLOWED_MODELS=res.partner,res.company
 ```
-</details>
 
-#### When to Use YOLO Mode
+Clients send `X-API-Key: key1` header. Multiple keys supported for rotation.
 
-✅ **Appropriate Uses:**
-- Local development with test data
-- Quick demos with non-sensitive data
-- Testing MCP clients before installing the MCP module
-- Prototyping in isolated environments
+### OAuth 2.0
 
-❌ **Never Use For:**
-- Production environments
-- Instances with real customer data
-- Shared development servers
-- Any environment with sensitive information
+```env
+ODOO_MCP_AUTH_MODE=oauth2
+ODOO_MCP_OAUTH2_ISSUER_URL=https://login.microsoftonline.com/{tenant-id}/v2.0
+ODOO_MCP_OAUTH2_AUDIENCE=api://your-app-id
+ODOO_MCP_OAUTH2_JWKS_URL=https://login.microsoftonline.com/{tenant-id}/discovery/v2.0/keys
+ODOO_ALLOWED_MODELS=res.partner,res.company
+```
 
-#### YOLO Mode Security Notes
+Compatible with:
+- **Microsoft Entra ID** (Azure AD)
+- **Auth0**
+- **Keycloak**
+- Any OIDC provider with JWKS
 
-- Connects directly to Odoo's standard XML-RPC endpoints
-- Bypasses all MCP access controls and model restrictions
-- No rate limiting is applied
-- All operations are logged but not restricted
-- Model listing shows 200+ models instead of just enabled ones
+Clients send `Authorization: Bearer <token>` header.
 
-## Usage Examples
+## Security Model
 
-Once configured, you can ask Claude:
+### Model Allowlist
 
-**Search & Retrieve:**
-- "Show me all customers from Spain"
-- "Find products with stock below 10 units"
-- "List today's sales orders over $1000"
-- "Search for unpaid invoices from last month"
-- "Count how many active employees we have"
-- "Show me the contact information for Microsoft"
+```env
+# Only these models are accessible
+ODOO_ALLOWED_MODELS=res.partner,res.company,sale.order,project.task
+```
 
-**Create & Manage:**
-- "Create a new customer contact for Acme Corporation"
-- "Add a new product called 'Premium Widget' with price $99.99"
-- "Create a calendar event for tomorrow at 2 PM"
-- "Update the phone number for customer John Doe to +1-555-0123"
-- "Change the status of order SO/2024/001 to confirmed"
-- "Delete the test contact we created earlier"
+**Required** when auth is enabled (fail-safe). Requests to non-allowed models are rejected.
+
+### Per-Model Operation Control
+
+```env
+# JSON: restrict operations per model
+ODOO_MODEL_OPERATION_MAP={"res.partner":["read","create"],"sale.order":["read"]}
+```
+
+### Field-Level Controls
+
+```env
+# Only expose these fields for res.partner
+ODOO_FIELD_ALLOWLIST_RES_PARTNER=name,email,phone,company_id,street,city,country_id
+
+# Hide sensitive fields
+ODOO_FIELD_DENYLIST_RES_PARTNER=password_crypt,oauth_access_token
+```
+
+Model names use underscores: `res.partner` -> `RES_PARTNER`.
+
+### Mutation Controls
+
+```env
+# Default: read-only (mutations disabled)
+ODOO_ENABLE_MUTATIONS=false
+
+# Enable writes (creates and updates)
+ODOO_ENABLE_MUTATIONS=true
+
+# Enable deletes (requires mutations enabled)
+ODOO_ENABLE_DELETES=true
+
+# Require confirmation token for writes
+ODOO_REQUIRE_CONFIRMATION_FOR_MUTATIONS=true
+```
+
+### Record Limits
+
+```env
+ODOO_MAX_RECORDS_PER_QUERY=100
+ODOO_MAX_BATCH_SIZE=50
+```
+
+### Admin Mode
+
+```env
+# DANGEROUS: bypasses ALL safety checks
+ODOO_MCP_ADMIN_MODE=true
+```
+
+Admin mode disables model allowlists, field filtering, and mutation controls. Only use for trusted internal scenarios with enhanced audit logging.
 
 ## Available Tools
 
-### `search_records`
-Search for records in any Odoo model with filters.
+### Read Tools (always available)
+
+| Tool | Description |
+|------|-------------|
+| `search_records` | Search with domain filters, pagination, smart field selection |
+| `get_record` | Get a single record by ID |
+| `list_models` | List all accessible models with permissions |
+| `list_fields` | List field definitions for a model |
+| `count_records` | Count records matching a domain |
+| `list_resource_templates` | List available resource URI patterns |
+
+### Write Tools (disabled by default)
+
+| Tool | Description |
+|------|-------------|
+| `create_record` | Create a new record (supports dry-run) |
+| `update_record` | Update an existing record (supports dry-run) |
+| `delete_record` | Delete a record (requires `ODOO_ENABLE_DELETES=true`) |
+
+Write tools support:
+- **Dry-run mode**: `dry_run=true` validates without executing
+- **Confirmation tokens**: When enabled, first call returns a token; second call with token executes
+
+## Audit Logging
+
+All tool calls are logged as structured JSON:
 
 ```json
 {
+  "timestamp": "2024-01-15T10:30:00Z",
+  "correlation_id": "a1b2c3d4e5f6g7h8",
+  "subject": "api_key_0",
+  "auth_mode": "api_key",
+  "tool_name": "search_records",
   "model": "res.partner",
-  "domain": [["is_company", "=", true], ["country_id.code", "=", "ES"]],
-  "fields": ["name", "email", "phone"],
-  "limit": 10
+  "operation": "read",
+  "record_ids": null,
+  "success": true,
+  "duration_ms": 42.5
 }
 ```
 
-**Field Selection Options:**
-- Omit `fields` or set to `null`: Returns smart selection of common fields
-- Specify field list: Returns only those specific fields
-- Use `["__all__"]`: Returns all fields (use with caution)
+Sensitive field values are never logged. Disable with `ODOO_MCP_AUDIT_LOG=false`.
 
-### `get_record`
-Retrieve a specific record by ID.
+## Connecting from ChatGPT
 
-```json
-{
-  "model": "res.partner",
-  "record_id": 42,
-  "fields": ["name", "email", "street", "city"]
-}
-```
+1. Deploy the server with HTTPS (e.g., behind nginx/Cloudflare tunnel)
+2. Configure OAuth 2.0 with your identity provider
+3. In ChatGPT developer settings, add the MCP endpoint:
+   - URL: `https://your-server.example.com/mcp`
+   - Auth: OAuth 2.0 with your provider settings
+4. The server exposes safe read tools by default
 
-**Field Selection Options:**
-- Omit `fields` or set to `null`: Returns smart selection of common fields with metadata
-- Specify field list: Returns only those specific fields
-- Use `["__all__"]`: Returns all fields without metadata
+## Connecting from Microsoft Copilot Studio
 
-### `list_models`
-List all models enabled for MCP access.
-
-```json
-{}
-```
-
-### `list_resource_templates`
-List available resource URI templates and their patterns.
-
-```json
-{}
-```
-
-### `create_record`
-Create a new record in Odoo.
-
-```json
-{
-  "model": "res.partner",
-  "values": {
-    "name": "New Customer",
-    "email": "customer@example.com",
-    "is_company": true
-  }
-}
-```
-
-### `update_record`
-Update an existing record.
-
-```json
-{
-  "model": "res.partner",
-  "record_id": 42,
-  "values": {
-    "phone": "+1234567890",
-    "website": "https://example.com"
-  }
-}
-```
-
-### `delete_record`
-Delete a record from Odoo.
-
-```json
-{
-  "model": "res.partner",
-  "record_id": 42
-}
-```
-
-### Smart Field Selection
-
-When you omit the `fields` parameter (or set it to `null`), the server automatically selects the most relevant fields for each model using a scoring algorithm:
-
-- **Essential fields** like `id`, `name`, `display_name`, and `active` are always included
-- **Business-relevant fields** (state, amount, email, phone, partner, etc.) are prioritized
-- **Technical fields** (message threads, activity tracking, website metadata) are excluded
-- **Expensive fields** (binary, HTML, large text, computed non-stored) are skipped
-
-The default limit is 15 fields per request. Responses include metadata showing which fields were returned and how many total fields are available. You can adjust the limit with `ODOO_MCP_MAX_SMART_FIELDS` or bypass it entirely with `fields: ["__all__"]`.
-
-## Resources
-
-The server also provides direct access to Odoo data through resource URIs:
-
-| URI Pattern | Description |
-|------------|-------------|
-| `odoo://{model}/record/{id}` | Retrieve a specific record by ID |
-| `odoo://{model}/search` | Search records with default settings (first 10 records) |
-| `odoo://{model}/count` | Count all records in a model |
-| `odoo://{model}/fields` | Get field definitions and metadata for a model |
-
-**Examples:**
-- `odoo://res.partner/record/1` — Get partner with ID 1
-- `odoo://product.product/search` — List first 10 products
-- `odoo://res.partner/count` — Count all partners
-- `odoo://product.product/fields` — Show all fields for products
-
-> **Note:** Resource URIs don't support query parameters (like `?domain=...`). For filtering, pagination, and field selection, use the `search_records` tool instead.
-
-## How It Works
-
-```
-AI Assistant (Claude, Copilot, etc.)
-        ↓ MCP Protocol (stdio or HTTP)
-   mcp-server-odoo
-        ↓ XML-RPC
-   Odoo Instance
-```
-
-The server translates MCP tool calls into Odoo XML-RPC requests. It handles authentication, access control, field selection, data formatting, and error handling — presenting Odoo data in an LLM-friendly hierarchical text format.
-
-## Security
-
-- Always use HTTPS in production environments
-- Keep your API keys secure and rotate them regularly
-- Configure model access carefully - only enable necessary models
-- The MCP module respects Odoo's built-in access rights and record rules
-- Each API key is linked to a specific user with their permissions
-
-## Troubleshooting
-
-<details>
-<summary>Connection Issues</summary>
-
-If you're getting connection errors:
-1. Verify your Odoo URL is correct and accessible
-2. Check that the MCP module is installed: visit `https://your-odoo.com/mcp/health`
-3. Ensure your firewall allows connections to Odoo
-</details>
-
-<details>
-<summary>Authentication Errors</summary>
-
-If authentication fails:
-1. Verify your API key is active in Odoo
-2. Check that the user has appropriate permissions
-3. Try regenerating the API key
-4. For username/password auth, ensure 2FA is not enabled
-</details>
-
-<details>
-<summary>Model Access Errors</summary>
-
-If you can't access certain models:
-1. Go to Settings > MCP Server > Enabled Models in Odoo
-2. Ensure the model is in the list and has appropriate permissions
-3. Check that your user has access to that model in Odoo's security settings
-</details>
-
-<details>
-<summary>"spawn uvx ENOENT" Error</summary>
-
-This error means UV is not installed or not in your PATH:
-
-**Solution 1: Install UV** (see Installation section above)
-
-**Solution 2: macOS PATH Issue**
-Claude Desktop on macOS doesn't inherit your shell's PATH. Try:
-1. Quit Claude Desktop completely (Cmd+Q)
-2. Open Terminal
-3. Launch Claude from Terminal:
-   ```bash
-   open -a "Claude"
+1. Deploy the server with HTTPS
+2. Configure OAuth 2.0 with Microsoft Entra ID:
+   ```env
+   ODOO_MCP_AUTH_MODE=oauth2
+   ODOO_MCP_OAUTH2_ISSUER_URL=https://login.microsoftonline.com/{tenant}/v2.0
+   ODOO_MCP_OAUTH2_AUDIENCE=api://your-app-registration-id
    ```
+3. In Copilot Studio, add the MCP server as a custom connector
+4. Configure the connection with your Entra ID app registration
 
-**Solution 3: Use Full Path**
-Find UV location and use full path:
+## Odoo Configuration
+
+### YOLO Mode (No Module Required)
+
+```env
+ODOO_URL=http://your-odoo:8069
+ODOO_USER=admin
+ODOO_PASSWORD=admin
+ODOO_YOLO=read    # read-only (recommended)
+# ODOO_YOLO=true  # full CRUD (use with mutation controls!)
+```
+
+### With Odoo MCP Module
+
+```env
+ODOO_URL=http://your-odoo:8069
+ODOO_API_KEY=your-odoo-api-key
+# ODOO_YOLO=off   # default, uses MCP module endpoints
+```
+
+## Docker
+
+### Build and Run
+
 ```bash
-which uvx
-# Example output: /Users/yourname/.local/bin/uvx
+docker build -t mcp-server-odoo .
+docker run -p 8000:8000 --env-file .env mcp-server-odoo
 ```
 
-Then update your config:
-```json
-{
-  "command": "/Users/yourname/.local/bin/uvx",
-  "args": ["mcp-server-odoo"]
-}
-```
-</details>
+### Docker Compose
 
-<details>
-<summary>Database Configuration Issues</summary>
-
-If you see "Access Denied" when listing databases:
-- This is normal - some Odoo instances restrict database listing for security
-- Make sure to specify `ODOO_DB` in your configuration
-- The server will use your specified database without validation
-
-Example configuration:
-```json
-{
-  "env": {
-    "ODOO_URL": "https://your-odoo.com",
-    "ODOO_API_KEY": "your-key",
-    "ODOO_DB": "your-database-name"
-  }
-}
-```
-Note: `ODOO_DB` is required if database listing is restricted on your server.
-</details>
-
-<details>
-<summary>"SSL: CERTIFICATE_VERIFY_FAILED" Error</summary>
-
-This error occurs when Python cannot verify SSL certificates, often on macOS or corporate networks.
-
-**Solution**: Add SSL certificate path to your environment configuration:
-
-```json
-{
-  "env": {
-    "ODOO_URL": "https://your-odoo.com",
-    "ODOO_API_KEY": "your-key",
-    "SSL_CERT_FILE": "/etc/ssl/cert.pem"
-  }
-}
+```bash
+docker compose up -d
+curl http://localhost:8000/health
+curl http://localhost:8000/ready
 ```
 
-This tells Python where to find the system's SSL certificate bundle for HTTPS connections. The path `/etc/ssl/cert.pem` is the standard location on most systems.
-</details>
+## Endpoints
 
-<details>
-<summary>Debug Mode</summary>
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/mcp` | POST | Required | MCP protocol endpoint |
+| `/health` | GET | None | Health check (connection status) |
+| `/ready` | GET | None | Readiness check (fully initialized) |
 
-Enable debug logging for more information:
+## Configuration Reference
 
-```json
-{
-  "env": {
-    "ODOO_URL": "https://your-odoo.com",
-    "ODOO_API_KEY": "your-key",
-    "ODOO_MCP_LOG_LEVEL": "DEBUG"
-  }
-}
+See [`.env.example`](.env.example) for the full list of environment variables with documentation.
+
+### Key Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ODOO_URL` | (required) | Odoo server URL |
+| `ODOO_MCP_AUTH_MODE` | `none` | `none`, `api_key`, or `oauth2` |
+| `ODOO_ALLOWED_MODELS` | (none) | Comma-separated allowed models |
+| `ODOO_ENABLE_MUTATIONS` | `false` | Enable write operations |
+| `ODOO_ENABLE_DELETES` | `false` | Enable delete operations |
+| `ODOO_MCP_TRANSPORT` | `stdio` | `stdio` or `streamable-http` |
+| `ODOO_MCP_CORS_ORIGINS` | (none) | Allowed CORS origins |
+| `ODOO_MCP_AUDIT_LOG` | `true` | Enable audit logging |
+| `ODOO_MCP_ADMIN_MODE` | `false` | Bypass all safety checks (dangerous) |
+
+## Secure Allowlist Example
+
+A production-safe configuration for a CRM use case:
+
+```env
+# Odoo connection
+ODOO_URL=https://your-odoo.example.com
+ODOO_USER=mcp-service
+ODOO_PASSWORD=strong-service-password
+ODOO_YOLO=read
+
+# Transport
+ODOO_MCP_TRANSPORT=streamable-http
+ODOO_MCP_HOST=0.0.0.0
+ODOO_MCP_PORT=8000
+
+# Authentication
+ODOO_MCP_AUTH_MODE=api_key
+ODOO_MCP_API_KEYS=your-secret-api-key-here
+
+# Safety
+ODOO_ALLOWED_MODELS=res.partner,res.company,crm.lead
+ODOO_FIELD_ALLOWLIST_RES_PARTNER=name,email,phone,company_id,city,country_id
+ODOO_FIELD_DENYLIST_RES_PARTNER=password_crypt,oauth_access_token
+ODOO_MAX_RECORDS_PER_QUERY=50
+ODOO_ENABLE_MUTATIONS=false
+ODOO_ENABLE_DELETES=false
+
+# CORS (if needed)
+ODOO_MCP_CORS_ORIGINS=https://chat.openai.com
+
+# Logging
+ODOO_MCP_LOG_JSON=true
+ODOO_MCP_AUDIT_LOG=true
 ```
-</details>
+
+## Migration from Upstream
+
+This fork is fully backward compatible. Existing setups work without changes:
+
+- All original environment variables are preserved
+- stdio transport works identically
+- YOLO mode works identically
+- New safety features are opt-in (activate only when configured)
+
+**Breaking changes when upgrading with new auth:**
+- Setting `ODOO_MCP_AUTH_MODE=api_key` or `oauth2` requires `ODOO_ALLOWED_MODELS` to be set (fail-safe)
+- Setting `ODOO_ENABLE_DELETES=true` requires `ODOO_ENABLE_MUTATIONS=true`
 
 ## Development
 
-<details>
-<summary>Running from source</summary>
-
 ```bash
-# Clone the repository
-git clone https://github.com/ivnvxd/mcp-server-odoo.git
+# Clone and install
+git clone https://github.com/svenvanderwegen/mcp-server-odoo.git
 cd mcp-server-odoo
-
-# Install in development mode
-pip install -e ".[dev]"
+uv sync --extra dev
 
 # Run tests
-pytest --cov
+uv run pytest -m "not yolo and not mcp" -v
 
-# Run the server
-python -m mcp_server_odoo
-
-# Check version
-python -m mcp_server_odoo --version
-```
-</details>
-
-<details>
-<summary>Testing with MCP Inspector</summary>
-
-```bash
-# Using uvx
-npx @modelcontextprotocol/inspector uvx mcp-server-odoo
-
-# Using local installation
-npx @modelcontextprotocol/inspector python -m mcp_server_odoo
-```
-</details>
-
-## Testing
-
-### Running Tests
-
-```bash
-# Unit tests (no Odoo needed)
-uv run pytest -m "not yolo and not mcp" --cov
-
-# YOLO integration tests (vanilla Odoo, no MCP module)
-uv run pytest -m "yolo" -v
-
-# MCP integration tests (Odoo + MCP module installed)
-uv run pytest -m "mcp" -v
-
-# All tests
-uv run pytest --cov
-
-# Run specific test categories
-uv run pytest tests/test_tools.py -v
-uv run pytest tests/test_server_foundation.py -v
+# Lint
+uv run ruff check .
+uv run ruff format --check .
 ```
 
 ## License
 
-This project is licensed under the Mozilla Public License 2.0 (MPL-2.0) - see the [LICENSE](LICENSE) file for details.
+MPL-2.0 (same as upstream)
 
-## Contributing
+## Acknowledgments
 
-Contributions are very welcome! Please see the [CONTRIBUTING](CONTRIBUTING.md) guide for details.
-
-## Support
-
-Thank you for using this project! If you find it helpful and would like to support my work, kindly consider buying me a coffee. Your support is greatly appreciated!
-
-<a href="https://www.buymeacoffee.com/ivnvxd" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
-
-And do not forget to give the project a star if you like it! :star:
+Based on [mcp-server-odoo](https://github.com/ivnvxd/mcp-server-odoo) by Andrey Ivanov.
