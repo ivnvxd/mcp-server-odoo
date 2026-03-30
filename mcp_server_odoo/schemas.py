@@ -156,3 +156,39 @@ class DeleteResult(BaseModel):
     deleted_id: int = Field(description="ID of the deleted record")
     deleted_name: str = Field(description="Display name of the deleted record")
     message: str = Field(description="Human-readable success message")
+
+
+# --- View Translations ---
+
+
+class TranslationEntry(BaseModel):
+    """A single translation term with source and translated value."""
+
+    lang: str = Field(description="Language code (e.g., 'fi_FI')")
+    source: str = Field(description="Source term in en_US")
+    value: str = Field(description="Translated term (empty string if not yet translated)")
+
+
+class ViewTranslationsResult(BaseModel):
+    """Result of reading view translations."""
+
+    translations: List[Any] = Field(
+        description="Translation terms with source and translated values"
+    )
+    translation_type: str = Field(description="Type of translation field (text/char)")
+    translation_show_source: bool = Field(
+        description="Whether source terms are available"
+    )
+    view_info: Dict[str, Any] = Field(
+        description="View metadata (name, key, write_date)"
+    )
+
+
+class UpdateViewTranslationResult(BaseModel):
+    """Result of updating view translations."""
+
+    success: bool = Field(description="Whether the translation update succeeded")
+    updated_langs: List[str] = Field(
+        description="Language codes that were updated"
+    )
+    message: str = Field(description="Human-readable success message")
