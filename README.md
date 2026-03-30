@@ -26,6 +26,10 @@ An MCP server that enables AI assistants like Claude to interact with Odoo ERP s
 - 🌍 **Multi-language support** — get responses in your preferred language
 - 🚀 **YOLO Mode** for quick access with any Odoo instance (no module required)
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/ivnvxd-mcp-server-odoo).
+
 ## Installation
 
 ### Prerequisites
