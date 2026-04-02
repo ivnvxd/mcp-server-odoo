@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.access_control import AccessController
+from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.error_handling import ValidationError
 from mcp_server_odoo.odoo_connection import OdooConnection
 from mcp_server_odoo.tools import OdooToolHandler
@@ -78,7 +78,13 @@ class TestViewTranslationTools:
         )
         # Mock read for view metadata
         mock_connection.read.return_value = [
-            {"id": 42, "name": "Test View", "key": "website.test_view", "write_date": "2026-03-28 10:00:00", "write_uid": [9, "Admin"]}
+            {
+                "id": 42,
+                "name": "Test View",
+                "key": "website.test_view",
+                "write_date": "2026-03-28 10:00:00",
+                "write_uid": [9, "Admin"],
+            }
         ]
 
         read_view_translations = mock_app._tools["read_view_translations"]
@@ -92,8 +98,7 @@ class TestViewTranslationTools:
 
         # Verify execute_kw was called correctly
         mock_connection.execute_kw.assert_called_once_with(
-            "ir.ui.view", "get_field_translations",
-            [[42], "arch_db"], {"langs": ["en_US", "fi_FI"]}
+            "ir.ui.view", "get_field_translations", [[42], "arch_db"], {"langs": ["en_US", "fi_FI"]}
         )
 
     @pytest.mark.asyncio
@@ -104,20 +109,27 @@ class TestViewTranslationTools:
             {"translation_type": "text", "translation_show_source": True},
         )
         mock_connection.read.return_value = [
-            {"id": 10, "name": "View", "key": "website.view", "write_date": "2026-03-28", "write_uid": [1, "Admin"]}
+            {
+                "id": 10,
+                "name": "View",
+                "key": "website.view",
+                "write_date": "2026-03-28",
+                "write_uid": [1, "Admin"],
+            }
         ]
 
         read_view_translations = mock_app._tools["read_view_translations"]
-        result = await read_view_translations(view_id=10)
+        await read_view_translations(view_id=10)
 
         # Should not pass langs kwarg when None
         mock_connection.execute_kw.assert_called_once_with(
-            "ir.ui.view", "get_field_translations",
-            [[10], "arch_db"], {}
+            "ir.ui.view", "get_field_translations", [[10], "arch_db"], {}
         )
 
     @pytest.mark.asyncio
-    async def test_read_view_translations_not_authenticated(self, handler, mock_connection, mock_app):
+    async def test_read_view_translations_not_authenticated(
+        self, handler, mock_connection, mock_app
+    ):
         """Test read_view_translations when not authenticated."""
         mock_connection.is_authenticated = False
 
@@ -142,9 +154,10 @@ class TestViewTranslationTools:
         assert "fi_FI" in result.message
 
         mock_connection.execute_kw.assert_called_once_with(
-            "ir.ui.view", "update_field_translations",
+            "ir.ui.view",
+            "update_field_translations",
             [[42], "arch_db", {"fi_FI": {"Contact Us": "Ota yhteytta", "Learn More": "Lue lisaa"}}],
-            {}
+            {},
         )
 
     @pytest.mark.asyncio
@@ -172,14 +185,18 @@ class TestViewTranslationTools:
             await update_view_translation(view_id=42, translations={})
 
     @pytest.mark.asyncio
-    async def test_update_view_translation_invalid_structure(self, handler, mock_connection, mock_app):
+    async def test_update_view_translation_invalid_structure(
+        self, handler, mock_connection, mock_app
+    ):
         """Test update_view_translation with invalid translation structure."""
         update_view_translation = mock_app._tools["update_view_translation"]
         with pytest.raises(ValidationError, match="must be a dict"):
             await update_view_translation(view_id=42, translations={"fi_FI": "not a dict"})
 
     @pytest.mark.asyncio
-    async def test_update_view_translation_not_authenticated(self, handler, mock_connection, mock_app):
+    async def test_update_view_translation_not_authenticated(
+        self, handler, mock_connection, mock_app
+    ):
         """Test update_view_translation when not authenticated."""
         mock_connection.is_authenticated = False
 

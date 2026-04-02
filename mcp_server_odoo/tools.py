@@ -1172,9 +1172,7 @@ class OdooToolHandler:
 
                 # Update the record
                 lang_context = {"lang": lang} if lang else None
-                success = self.connection.write(
-                    model, [record_id], values, context=lang_context
-                )
+                success = self.connection.write(model, [record_id], values, context=lang_context)
 
                 # Return only essential fields to minimize context usage
                 # Users can use get_record if they need more fields
@@ -1307,9 +1305,7 @@ class OdooToolHandler:
                 return {
                     "translations": translations_data,
                     "translation_type": context_data.get("translation_type", "text"),
-                    "translation_show_source": context_data.get(
-                        "translation_show_source", True
-                    ),
+                    "translation_show_source": context_data.get("translation_show_source", True),
                     "view_info": view_info,
                 }
 
@@ -1318,9 +1314,7 @@ class OdooToolHandler:
         except Exception as e:
             logger.error(f"Error in read_view_translations tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
-            raise ValidationError(
-                f"Failed to read view translations: {sanitized_msg}"
-            ) from e
+            raise ValidationError(f"Failed to read view translations: {sanitized_msg}") from e
 
     async def _handle_update_view_translation(
         self,
@@ -1330,9 +1324,7 @@ class OdooToolHandler:
     ) -> Dict[str, Any]:
         """Handle update view translation tool request."""
         try:
-            with perf_logger.track_operation(
-                "tool_update_view_translation", model="ir.ui.view"
-            ):
+            with perf_logger.track_operation("tool_update_view_translation", model="ir.ui.view"):
                 await self._ctx_info(ctx, f"Updating translations for view {view_id}...")
 
                 if not self.connection.is_authenticated:
@@ -1382,9 +1374,7 @@ class OdooToolHandler:
         except Exception as e:
             logger.error(f"Error in update_view_translation tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
-            raise ValidationError(
-                f"Failed to update view translation: {sanitized_msg}"
-            ) from e
+            raise ValidationError(f"Failed to update view translation: {sanitized_msg}") from e
 
 
 def register_tools(

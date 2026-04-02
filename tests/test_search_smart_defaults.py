@@ -128,9 +128,7 @@ class TestSearchSmartDefaults:
         await handler("res.partner", [], ["__all__"], 10, 0, None)
 
         # Verify None was passed to read (which means all fields)
-        tool_handler.connection.read.assert_called_once_with(
-            "res.partner", [1], None, context=None
-        )
+        tool_handler.connection.read.assert_called_once_with("res.partner", [1], None, context=None)
 
     @pytest.mark.asyncio
     async def test_search_falls_back_when_fields_get_fails(self, tool_handler):

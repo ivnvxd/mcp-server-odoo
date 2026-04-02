@@ -240,9 +240,7 @@ class TestSmartFieldSelection:
         assert result.metadata is None
 
         # Should have called read with None (all fields)
-        tool_handler.connection.read.assert_called_once_with(
-            "res.partner", [1], None, context=None
-        )
+        tool_handler.connection.read.assert_called_once_with("res.partner", [1], None, context=None)
 
     @pytest.mark.asyncio
     async def test_get_record_with_specific_fields(self, tool_handler):

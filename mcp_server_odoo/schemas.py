@@ -176,19 +176,13 @@ class ViewTranslationsResult(BaseModel):
         description="Translation terms with source and translated values"
     )
     translation_type: str = Field(description="Type of translation field (text/char)")
-    translation_show_source: bool = Field(
-        description="Whether source terms are available"
-    )
-    view_info: Dict[str, Any] = Field(
-        description="View metadata (name, key, write_date)"
-    )
+    translation_show_source: bool = Field(description="Whether source terms are available")
+    view_info: Dict[str, Any] = Field(description="View metadata (name, key, write_date)")
 
 
 class UpdateViewTranslationResult(BaseModel):
     """Result of updating view translations."""
 
     success: bool = Field(description="Whether the translation update succeeded")
-    updated_langs: List[str] = Field(
-        description="Language codes that were updated"
-    )
+    updated_langs: List[str] = Field(description="Language codes that were updated")
     message: str = Field(description="Human-readable success message")
