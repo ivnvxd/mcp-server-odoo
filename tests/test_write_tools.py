@@ -28,6 +28,7 @@ class TestWriteTools:
         conn.build_record_url.side_effect = lambda model, record_id: (
             f"http://localhost:8069/web#id={record_id}&model={model}&view_type=form"
         )
+        conn.performance_manager = Mock()
         return conn
 
     @pytest.fixture
@@ -301,6 +302,62 @@ class TestWriteTools:
         assert "create_record" in decorated_functions
         assert "update_record" in decorated_functions
         assert "delete_record" in decorated_functions
+        assert "call_model_method" in decorated_functions
+
+    @pytest.mark.asyncio
+    async def test_call_model_method_success(self, tool_handler, mock_connection):
+        """Test execute_kw call with JSON string arguments."""
+        mock_connection.execute_kw.return_value = {"type": "ir.actions.act_window_close"}
+
+        result = await tool_handler._handle_call_model_method_tool(
+            "account.move",
+            "action_post",
+            "[[99]]",
+            None,
+        )
+
+        assert result["success"] is True
+        assert result["result"] == {"type": "ir.actions.act_window_close"}
+        mock_connection.execute_kw.assert_called_once_with(
+            "account.move", "action_post", [[99]], {}
+        )
+        mock_connection.performance_manager.invalidate_record_cache.assert_called_once_with(
+            "account.move"
+        )
+
+    @pytest.mark.asyncio
+    async def test_call_model_method_with_kwargs(self, tool_handler, mock_connection):
+        mock_connection.execute_kw.return_value = True
+
+        result = await tool_handler._handle_call_model_method_tool(
+            "sale.order",
+            "action_confirm",
+            [[1]],
+            {"context": {"lang": "en_US"}},
+        )
+
+        assert result["success"] is True
+        mock_connection.execute_kw.assert_called_once_with(
+            "sale.order", "action_confirm", [[1]], {"context": {"lang": "en_US"}}
+        )
+
+    @pytest.mark.asyncio
+    async def test_call_model_method_calls_validate_model_access(
+        self, tool_handler, mock_access_controller, mock_connection
+    ):
+        await tool_handler._handle_call_model_method_tool(
+            "account.move", "action_post", [[1]], None
+        )
+        mock_access_controller.validate_model_access.assert_called_once_with(
+            "account.move", "write"
+        )
+
+    @pytest.mark.asyncio
+    async def test_call_model_method_rejects_private(self, tool_handler):
+        with pytest.raises(ValidationError, match="private method"):
+            await tool_handler._handle_call_model_method_tool(
+                "res.partner", "_private", [], None
+            )
 
 
 class TestWriteToolsIntegration:

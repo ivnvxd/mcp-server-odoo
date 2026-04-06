@@ -82,6 +82,7 @@ class TestOdooToolHandler:
             "create_record",
             "update_record",
             "delete_record",
+            "call_model_method",
             "list_resource_templates",
         }
         assert set(mock_app._tools.keys()) == expected_tools
@@ -1247,6 +1248,92 @@ class TestDeleteRecordTool:
         delete_record = mock_app._tools["delete_record"]
         with pytest.raises(ValidationError, match="Connection error"):
             await delete_record(model="res.partner", record_id=1)
+
+
+class TestCallModelMethodTool:
+    """Test cases for call_model_method tool."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=FastMCP)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        return connection
+
+    @pytest.fixture
+    def mock_access_controller(self):
+        return MagicMock(spec=AccessController)
+
+    @pytest.fixture
+    def valid_config(self):
+        return OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            database="test_db",
+        )
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+
+    @pytest.mark.asyncio
+    async def test_call_model_method_success(self, handler, mock_connection, mock_app):
+        """Test call_model_method invokes execute_kw and invalidates cache."""
+        mock_connection.execute_kw.return_value = True
+        pm = MagicMock()
+        mock_connection.performance_manager = pm
+
+        call_model_method = mock_app._tools["call_model_method"]
+        result = await call_model_method(
+            model="account.move",
+            method="action_post",
+            arguments=[[42]],
+        )
+
+        assert result.success is True
+        assert result.result is True
+        mock_access_controller = handler.access_controller
+        mock_access_controller.validate_model_access.assert_called_with("account.move", "write")
+        mock_connection.execute_kw.assert_called_once_with(
+            "account.move", "action_post", [[42]], {}
+        )
+        pm.invalidate_record_cache.assert_called_once_with("account.move")
+
+    @pytest.mark.asyncio
+    async def test_call_model_method_access_denied(self, handler, mock_access_controller, mock_app):
+        """Test call_model_method checks 'write' permission."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError("denied")
+        call_model_method = mock_app._tools["call_model_method"]
+        with pytest.raises(ValidationError, match="Access denied"):
+            await call_model_method(model="sale.order", method="action_confirm", arguments=[[1]])
+
+    @pytest.mark.asyncio
+    async def test_call_model_method_private_method(self, handler, mock_app):
+        """Private methods (leading underscore) are rejected."""
+        call_model_method = mock_app._tools["call_model_method"]
+        with pytest.raises(ValidationError, match="private method"):
+            await call_model_method(model="res.partner", method="_compute_name", arguments=[])
+
+    @pytest.mark.asyncio
+    async def test_call_model_method_not_authenticated(self, handler, mock_connection, mock_app):
+        mock_connection.is_authenticated = False
+        call_model_method = mock_app._tools["call_model_method"]
+        with pytest.raises(ValidationError, match="Not authenticated"):
+            await call_model_method(model="res.partner", method="action_archive", arguments=[[1]])
 
 
 class TestListModelsTool:

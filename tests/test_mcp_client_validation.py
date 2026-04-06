@@ -29,6 +29,7 @@ EXPECTED_TOOLS = {
     "create_record",
     "update_record",
     "delete_record",
+    "call_model_method",
     "list_resource_templates",
 }
 

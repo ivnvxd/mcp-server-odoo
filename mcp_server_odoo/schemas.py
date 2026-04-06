@@ -156,3 +156,17 @@ class DeleteResult(BaseModel):
     deleted_id: int = Field(description="ID of the deleted record")
     deleted_name: str = Field(description="Display name of the deleted record")
     message: str = Field(description="Human-readable success message")
+
+
+# --- Call model method (execute_kw) ---
+
+
+class CallModelMethodResult(BaseModel):
+    """Result of invoking a public Odoo model method via XML-RPC execute_kw."""
+
+    success: bool = Field(description="Whether Odoo executed the method without RPC fault")
+    result: Any = Field(
+        default=None,
+        description="Return value from Odoo (type depends on the method; may be null)",
+    )
+    message: str = Field(description="Human-readable summary of the call")

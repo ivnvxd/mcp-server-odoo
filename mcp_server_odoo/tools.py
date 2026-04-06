@@ -5,6 +5,7 @@ Tools are different from resources - they can have side effects and perform
 actions like creating, updating, or deleting records.
 """
 
+import ast
 import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,7 @@ from .error_sanitizer import ErrorSanitizer
 from .logging_config import get_logger, perf_logger
 from .odoo_connection import OdooConnection, OdooConnectionError
 from .schemas import (
+    CallModelMethodResult,
     CreateResult,
     DeleteResult,
     FieldSelectionMetadata,
@@ -340,6 +342,60 @@ class OdooToolHandler:
             except Exception:
                 logger.debug(f"Failed to report progress: {progress}/{total}")
 
+    def _parse_execute_kw_arguments(self, arguments: Optional[Any]) -> List[Any]:
+        """Coerce execute_kw positional arguments to a list (XML-RPC expects a list)."""
+        if arguments is None:
+            return []
+        if isinstance(arguments, list):
+            return arguments
+        if isinstance(arguments, str):
+            try:
+                parsed = json.loads(arguments)
+            except json.JSONDecodeError:
+                try:
+                    parsed = ast.literal_eval(arguments)
+                except (ValueError, SyntaxError) as e:
+                    raise ValidationError(
+                        f"Invalid arguments parameter. Expected JSON array or Python list, "
+                        f"got: {arguments[:100]}..."
+                    ) from e
+            if not isinstance(parsed, list):
+                raise ValidationError(
+                    f"arguments must be a list, got {type(parsed).__name__}"
+                )
+            return parsed
+        raise ValidationError(
+            f"arguments must be a list or a string representation of a list, "
+            f"got {type(arguments).__name__}"
+        )
+
+    def _parse_execute_kw_kwargs(self, keyword_arguments: Optional[Any]) -> Dict[str, Any]:
+        """Coerce execute_kw keyword arguments to a dict."""
+        if keyword_arguments is None:
+            return {}
+        if isinstance(keyword_arguments, dict):
+            return keyword_arguments
+        if isinstance(keyword_arguments, str):
+            try:
+                parsed = json.loads(keyword_arguments)
+            except json.JSONDecodeError:
+                try:
+                    parsed = ast.literal_eval(keyword_arguments)
+                except (ValueError, SyntaxError) as e:
+                    raise ValidationError(
+                        f"Invalid keyword_arguments parameter. Expected JSON object or Python dict, "
+                        f"got: {keyword_arguments[:100]}..."
+                    ) from e
+            if not isinstance(parsed, dict):
+                raise ValidationError(
+                    f"keyword_arguments must be a dict, got {type(parsed).__name__}"
+                )
+            return parsed
+        raise ValidationError(
+            f"keyword_arguments must be a dict or a string representation of a dict, "
+            f"got {type(keyword_arguments).__name__}"
+        )
+
     def _register_tools(self):
         """Register all tool handlers with FastMCP."""
 
@@ -556,6 +612,56 @@ class OdooToolHandler:
             """
             result = await self._handle_delete_record_tool(model, record_id, ctx)
             return DeleteResult(**result)
+
+        @self.app.tool(
+            title="Call Model Method",
+            annotations=ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=False,
+                openWorldHint=True,
+            ),
+        )
+        async def call_model_method(
+            model: str,
+            method: str,
+            arguments: Optional[Any] = None,
+            keyword_arguments: Optional[Any] = None,
+            ctx: Optional[Context] = None,
+        ) -> CallModelMethodResult:
+            """Call a public Odoo model method via XML-RPC execute_kw.
+
+            Use this for workflow actions not covered by create/update/delete, such as posting a
+            journal entry or invoice (`action_post` on `account.move`), confirming a sale order,
+            or other `@api` methods exposed over RPC.
+
+            Requires the same MCP **write** permission as `update_record` on the model (standard
+            mode). Odoo still enforces record rules and model access for the authenticated user.
+            YOLO read-only mode blocks this tool.
+
+            Args:
+                model: Technical model name (e.g. `account.move`)
+                method: Method name on the model (e.g. `action_post`). Private methods (`_*`) are
+                    rejected.
+                arguments: Positional argument list passed to Odoo `execute_kw`, as a list or JSON
+                    string. For typical recordset methods the first element is the list of record
+                    ids, e.g. `[[42]]` to run on id 42. Default `[]` when omitted.
+                keyword_arguments: Optional dict (or JSON object string) of keyword arguments for
+                    `execute_kw` (merged with server locale context like other calls).
+
+            Examples:
+                Post invoice 42: model=`account.move`, method=`action_post`, arguments=`[[42]]`
+                Confirm SO 7: model=`sale.order`, method=`action_confirm`, arguments=`[[7]]`
+
+            Returns:
+                The method's return value in `result` (bool, dict, list, etc., depending on Odoo).
+
+            Prefer `create_record`, `update_record`, and `delete_record` when they are sufficient.
+            """
+            result = await self._handle_call_model_method_tool(
+                model, method, arguments, keyword_arguments, ctx
+            )
+            return CallModelMethodResult(**result)
 
     async def _handle_search_tool(
         self,
@@ -1161,6 +1267,58 @@ class OdooToolHandler:
             logger.error(f"Error in delete_record tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to delete record: {sanitized_msg}") from e
+
+    async def _handle_call_model_method_tool(
+        self,
+        model: str,
+        method: str,
+        arguments: Optional[Any],
+        keyword_arguments: Optional[Any],
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle call_model_method tool request."""
+        try:
+            with perf_logger.track_operation("tool_call_model_method", model=model):
+                model = model.strip()
+                method = method.strip()
+                if not model:
+                    raise ValidationError("model must not be empty")
+                if not method:
+                    raise ValidationError("method must not be empty")
+                if method.startswith("_"):
+                    raise ValidationError(
+                        f"Refusing to call private method '{method}'. Only public RPC methods are allowed."
+                    )
+
+                self.access_controller.validate_model_access(model, "write")
+                await self._ctx_info(ctx, f"Calling {model}.{method}(...)")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                args_list = self._parse_execute_kw_arguments(arguments)
+                kwargs_dict = self._parse_execute_kw_kwargs(keyword_arguments)
+
+                rpc_result = self.connection.execute_kw(model, method, args_list, kwargs_dict)
+
+                self.connection.performance_manager.invalidate_record_cache(model)
+
+                return {
+                    "success": True,
+                    "result": rpc_result,
+                    "message": f"Successfully called {model}.{method}",
+                }
+
+        except ValidationError:
+            raise
+        except AccessControlError as e:
+            raise ValidationError(f"Access denied: {e}") from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in call_model_method tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to call model method: {sanitized_msg}") from e
 
 
 def register_tools(
