@@ -644,8 +644,10 @@ class OdooToolHandler:
                             ) from e
 
                 # Set defaults
-                if limit <= 0 or limit > self.config.max_limit:
+                if limit <= 0:
                     limit = self.config.default_limit
+                elif limit > self.config.max_limit:
+                    limit = self.config.max_limit
 
                 # Get total count
                 total_count = self.connection.search_count(model, parsed_domain)
