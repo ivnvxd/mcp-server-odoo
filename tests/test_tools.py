@@ -83,6 +83,8 @@ class TestOdooToolHandler:
             "update_record",
             "delete_record",
             "list_resource_templates",
+            "read_view_translations",
+            "update_view_translation",
         }
         assert set(mock_app._tools.keys()) == expected_tools
 
@@ -337,7 +339,9 @@ class TestOdooToolHandler:
         assert result.total == 1
 
         # Verify fields were parsed correctly
-        mock_connection.read.assert_called_with("res.partner", [15], ["name", "is_company", "id"])
+        mock_connection.read.assert_called_with(
+            "res.partner", [15], ["name", "is_company", "id"], context=None
+        )
 
     @pytest.mark.asyncio
     async def test_search_records_with_complex_domain(
@@ -402,7 +406,9 @@ class TestOdooToolHandler:
 
         # Verify calls
         mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "read")
-        mock_connection.read.assert_called_once_with("res.partner", [123], ["name", "email"])
+        mock_connection.read.assert_called_once_with(
+            "res.partner", [123], ["name", "email"], context=None
+        )
 
     @pytest.mark.asyncio
     async def test_get_record_not_found(
@@ -1007,7 +1013,9 @@ class TestCreateRecordTool:
         assert result.url == "http://localhost:8069/odoo/res.partner/42"
         assert "42" in result.message
 
-        mock_connection.create.assert_called_once_with("res.partner", {"name": "New Partner"})
+        mock_connection.create.assert_called_once_with(
+            "res.partner", {"name": "New Partner"}, context=None
+        )
         mock_connection.read.assert_called_once_with("res.partner", [42], ["id", "display_name"])
 
     @pytest.mark.asyncio
@@ -1116,7 +1124,7 @@ class TestUpdateRecordTool:
         mock_connection.read.assert_any_call("res.partner", [10], ["id"])
         mock_connection.read.assert_any_call("res.partner", [10], ["id", "display_name"])
         mock_connection.write.assert_called_once_with(
-            "res.partner", [10], {"name": "Updated Partner"}
+            "res.partner", [10], {"name": "Updated Partner"}, context=None
         )
 
     @pytest.mark.asyncio

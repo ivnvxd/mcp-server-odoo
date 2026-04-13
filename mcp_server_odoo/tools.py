@@ -30,6 +30,8 @@ from .schemas import (
     ResourceTemplatesResult,
     SearchResult,
     UpdateResult,
+    UpdateViewTranslationResult,
+    ViewTranslationsResult,
 )
 
 logger = get_logger(__name__)
@@ -359,6 +361,7 @@ class OdooToolHandler:
             limit: int = 10,
             offset: int = 0,
             order: Optional[str] = None,
+            lang: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> SearchResult:
             """Search for records in an Odoo model.
@@ -377,12 +380,14 @@ class OdooToolHandler:
                 limit: Maximum number of records to return
                 offset: Number of records to skip
                 order: Sort order (e.g., 'name asc')
+                lang: Language code for translated fields (e.g., 'fi_FI', 'en_US').
+                    Overrides the global ODOO_LOCALE setting for this call.
 
             Returns:
                 Search results with records, total count, and pagination info
             """
             result = await self._handle_search_tool(
-                model, domain, fields, limit, offset, order, ctx
+                model, domain, fields, limit, offset, order, ctx, lang=lang
             )
             return SearchResult(**result)
 
@@ -399,6 +404,7 @@ class OdooToolHandler:
             model: str,
             record_id: int,
             fields: Optional[List[str]] = None,
+            lang: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> RecordResult:
             """Get a specific record by ID with smart field selection.
@@ -413,6 +419,8 @@ class OdooToolHandler:
                     - None (default): Returns smart selection of common fields
                     - ["field1", "field2", ...]: Returns only specified fields
                     - ["__all__"]: Returns ALL fields (warning: can be very large)
+                lang: Language code for translated fields (e.g., 'fi_FI', 'en_US').
+                    Overrides the global ODOO_LOCALE setting for this call.
 
             Workflow for field discovery:
             1. To see all available fields for a model, use the resource:
@@ -430,11 +438,14 @@ class OdooToolHandler:
                 # Get ALL fields (use with caution)
                 get_record("res.partner", 1, fields=["__all__"])
 
+                # Get Finnish translation of fields
+                get_record("ir.ui.view", 42, fields=["arch"], lang="fi_FI")
+
             Returns:
                 Record data with requested fields. When using smart defaults,
                 includes metadata with field statistics.
             """
-            return await self._handle_get_record_tool(model, record_id, fields, ctx)
+            return await self._handle_get_record_tool(model, record_id, fields, ctx, lang=lang)
 
         @self.app.tool(
             title="List Models",
@@ -489,6 +500,7 @@ class OdooToolHandler:
         async def create_record(
             model: str,
             values: Dict[str, Any],
+            lang: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> CreateResult:
             """Create a new record in an Odoo model.
@@ -496,11 +508,13 @@ class OdooToolHandler:
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
                 values: Field values for the new record
+                lang: Language code for translated fields (e.g., 'fi_FI', 'en_US').
+                    Overrides the global ODOO_LOCALE setting for this call.
 
             Returns:
                 Created record details with ID, URL, and confirmation.
             """
-            result = await self._handle_create_record_tool(model, values, ctx)
+            result = await self._handle_create_record_tool(model, values, ctx, lang=lang)
             return CreateResult(**result)
 
         @self.app.tool(
@@ -516,6 +530,7 @@ class OdooToolHandler:
             model: str,
             record_id: int,
             values: Dict[str, Any],
+            lang: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> UpdateResult:
             """Update an existing record.
@@ -524,11 +539,15 @@ class OdooToolHandler:
                 model: The Odoo model name (e.g., 'res.partner')
                 record_id: The record ID to update
                 values: Field values to update
+                lang: Language code for translated fields (e.g., 'fi_FI', 'en_US').
+                    Overrides the global ODOO_LOCALE setting for this call.
+                    Use this to write translations: update with lang='fi_FI' writes
+                    to the Finnish translation of translated fields.
 
             Returns:
                 Updated record details with confirmation.
             """
-            result = await self._handle_update_record_tool(model, record_id, values, ctx)
+            result = await self._handle_update_record_tool(model, record_id, values, ctx, lang=lang)
             return UpdateResult(**result)
 
         @self.app.tool(
@@ -557,6 +576,72 @@ class OdooToolHandler:
             result = await self._handle_delete_record_tool(model, record_id, ctx)
             return DeleteResult(**result)
 
+        @self.app.tool(
+            title="Read View Translations",
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
+        )
+        async def read_view_translations(
+            view_id: int,
+            langs: Optional[List[str]] = None,
+            ctx: Optional[Context] = None,
+        ) -> ViewTranslationsResult:
+            """Read per-language translations of a website view's arch content.
+
+            Returns all translatable terms with their source (en_US) text and
+            translated values for each requested language. Use this to inspect
+            current translations before updating them with update_view_translation.
+
+            Args:
+                view_id: ID of the ir.ui.view record
+                langs: Language codes to include (e.g., ['en_US', 'fi_FI']).
+                    If omitted, returns all installed languages.
+
+            Returns:
+                Translation terms with source and translated values, plus view metadata.
+            """
+            result = await self._handle_read_view_translations(view_id, langs, ctx)
+            return ViewTranslationsResult(**result)
+
+        @self.app.tool(
+            title="Update View Translation",
+            annotations=ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
+        )
+        async def update_view_translation(
+            view_id: int,
+            translations: Dict[str, Dict[str, str]],
+            ctx: Optional[Context] = None,
+        ) -> UpdateViewTranslationResult:
+            """Safely update translations for specific terms in a view's arch content.
+
+            Updates ONLY the specified language(s) and terms without affecting
+            other languages or unspecified terms. This is the safe way to edit
+            multilingual website content -- unlike update_record which can corrupt
+            other language versions when writing to translated fields like arch.
+
+            Use read_view_translations first to see available source terms.
+
+            Args:
+                view_id: ID of the ir.ui.view record
+                translations: Per-language translation updates.
+                    Format: {lang: {source_term: new_translation}}
+                    Example: {"fi_FI": {"Contact Us": "Ota yhteytta", "Learn More": "Lue lisaa"}}
+
+            Returns:
+                Success status and list of updated languages.
+            """
+            result = await self._handle_update_view_translation(view_id, translations, ctx)
+            return UpdateViewTranslationResult(**result)
+
     async def _handle_search_tool(
         self,
         model: str,
@@ -566,6 +651,7 @@ class OdooToolHandler:
         offset: int,
         order: Optional[str],
         ctx=None,
+        lang: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Handle search tool request."""
         try:
@@ -677,9 +763,12 @@ class OdooToolHandler:
                     logger.debug(f"Fetching all fields for {model} search")
 
                 # Read records
+                lang_context = {"lang": lang} if lang else None
                 records = []
                 if record_ids:
-                    records = self.connection.read(model, record_ids, fields_to_fetch)
+                    records = self.connection.read(
+                        model, record_ids, fields_to_fetch, context=lang_context
+                    )
                     # Process datetime fields in each record
                     records = [self._process_record_dates(record, model) for record in records]
                 await self._ctx_progress(ctx, 3, 3, f"Returning {len(records)} records")
@@ -707,6 +796,7 @@ class OdooToolHandler:
         record_id: int,
         fields: Optional[List[str]],
         ctx=None,
+        lang: Optional[str] = None,
     ) -> RecordResult:
         """Handle get record tool request."""
         try:
@@ -743,7 +833,10 @@ class OdooToolHandler:
                     logger.debug(f"Fetching specific fields for {model}: {fields}")
 
                 # Read the record
-                records = self.connection.read(model, [record_id], fields_to_fetch)
+                lang_context = {"lang": lang} if lang else None
+                records = self.connection.read(
+                    model, [record_id], fields_to_fetch, context=lang_context
+                )
 
                 if not records:
                     raise ValidationError(f"Record not found: {model} with ID {record_id}")
@@ -995,6 +1088,7 @@ class OdooToolHandler:
         model: str,
         values: Dict[str, Any],
         ctx=None,
+        lang: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Handle create record tool request."""
         try:
@@ -1012,7 +1106,8 @@ class OdooToolHandler:
                     raise ValidationError("No values provided for record creation")
 
                 # Create the record
-                record_id = self.connection.create(model, values)
+                lang_context = {"lang": lang} if lang else None
+                record_id = self.connection.create(model, values, context=lang_context)
 
                 # Return only essential fields to minimize context usage
                 # Users can use get_record if they need more fields
@@ -1055,6 +1150,7 @@ class OdooToolHandler:
         record_id: int,
         values: Dict[str, Any],
         ctx=None,
+        lang: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Handle update record tool request."""
         try:
@@ -1077,7 +1173,8 @@ class OdooToolHandler:
                     raise NotFoundError(f"Record not found: {model} with ID {record_id}")
 
                 # Update the record
-                success = self.connection.write(model, [record_id], values)
+                lang_context = {"lang": lang} if lang else None
+                success = self.connection.write(model, [record_id], values, context=lang_context)
 
                 # Return only essential fields to minimize context usage
                 # Users can use get_record if they need more fields
@@ -1163,6 +1260,123 @@ class OdooToolHandler:
             logger.error(f"Error in delete_record tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to delete record: {sanitized_msg}") from e
+
+    async def _handle_read_view_translations(
+        self,
+        view_id: int,
+        langs: Optional[List[str]],
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle read view translations tool request."""
+        try:
+            with perf_logger.track_operation("tool_read_view_translations", model="ir.ui.view"):
+                await self._ctx_info(ctx, f"Reading translations for view {view_id}...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                # Call get_field_translations via execute_kw
+                # Method signature: get_field_translations(self, field_name, langs=None)
+                # As non-@api.model, ids go in args[0]
+                kwargs = {}
+                if langs:
+                    kwargs["langs"] = langs
+                result = self.connection.execute_kw(
+                    "ir.ui.view",
+                    "get_field_translations",
+                    [[view_id], "arch_db"],
+                    kwargs,
+                )
+
+                # result is (translations_list, context_dict)
+                translations_data = result[0] if isinstance(result, (list, tuple)) else []
+                context_data = (
+                    result[1] if isinstance(result, (list, tuple)) and len(result) > 1 else {}
+                )
+
+                # Read view metadata
+                view_records = self.connection.read(
+                    "ir.ui.view",
+                    [view_id],
+                    ["name", "key", "write_date", "write_uid"],
+                )
+                view_info = view_records[0] if view_records else {}
+
+                await self._ctx_info(ctx, f"Found {len(translations_data)} translation entries")
+
+                return {
+                    "translations": translations_data,
+                    "translation_type": context_data.get("translation_type", "text"),
+                    "translation_show_source": context_data.get("translation_show_source", True),
+                    "view_info": view_info,
+                }
+
+        except ValidationError:
+            raise
+        except Exception as e:
+            logger.error(f"Error in read_view_translations tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to read view translations: {sanitized_msg}") from e
+
+    async def _handle_update_view_translation(
+        self,
+        view_id: int,
+        translations: Dict[str, Dict[str, str]],
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle update view translation tool request."""
+        try:
+            with perf_logger.track_operation("tool_update_view_translation", model="ir.ui.view"):
+                await self._ctx_info(ctx, f"Updating translations for view {view_id}...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                if not translations:
+                    raise ValidationError("No translations provided")
+
+                # Validate translation structure
+                for lang, terms in translations.items():
+                    if not isinstance(terms, dict):
+                        raise ValidationError(
+                            f"Translations for '{lang}' must be a dict of "
+                            f"{{source_term: new_translation}}, "
+                            f"got {type(terms).__name__}"
+                        )
+
+                # Call update_field_translations via execute_kw
+                # Method signature: update_field_translations(self, field_name, translations, source_lang='')
+                result = self.connection.execute_kw(
+                    "ir.ui.view",
+                    "update_field_translations",
+                    [[view_id], "arch_db", translations],
+                    {},
+                )
+
+                updated_langs = list(translations.keys())
+                total_terms = sum(len(terms) for terms in translations.values())
+
+                await self._ctx_info(
+                    ctx,
+                    f"Updated {total_terms} terms in {len(updated_langs)} language(s): "
+                    f"{', '.join(updated_langs)}",
+                )
+
+                return {
+                    "success": bool(result),
+                    "updated_langs": updated_langs,
+                    "message": (
+                        f"Successfully updated {total_terms} translation term(s) "
+                        f"for language(s): {', '.join(updated_langs)}"
+                    ),
+                }
+
+        except ValidationError:
+            raise
+        except Exception as e:
+            logger.error(f"Error in update_view_translation tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to update view translation: {sanitized_msg}") from e
 
 
 def register_tools(

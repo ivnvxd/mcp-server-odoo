@@ -186,7 +186,7 @@ class TestFixesIntegration:
 
         # Verify read was called with the specific fields
         tool_handler.connection.read.assert_called_once_with(
-            "res.partner", [1], ["name", "vat", "create_date"]
+            "res.partner", [1], ["name", "vat", "create_date"], context=None
         )
 
         # Should still format datetime

@@ -98,7 +98,9 @@ class TestSearchSmartDefaults:
         await handler("res.partner", [], fields, 10, 0, None)
 
         # Verify specified fields were used
-        tool_handler.connection.read.assert_called_once_with("res.partner", [1], fields)
+        tool_handler.connection.read.assert_called_once_with(
+            "res.partner", [1], fields, context=None
+        )
 
     @pytest.mark.asyncio
     async def test_search_with_all_fields(self, tool_handler):
@@ -126,7 +128,7 @@ class TestSearchSmartDefaults:
         await handler("res.partner", [], ["__all__"], 10, 0, None)
 
         # Verify None was passed to read (which means all fields)
-        tool_handler.connection.read.assert_called_once_with("res.partner", [1], None)
+        tool_handler.connection.read.assert_called_once_with("res.partner", [1], None, context=None)
 
     @pytest.mark.asyncio
     async def test_search_falls_back_when_fields_get_fails(self, tool_handler):
