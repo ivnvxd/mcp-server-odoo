@@ -400,3 +400,91 @@ class TestYoloMode:
             monkeypatch.setenv("ODOO_YOLO", value)
             config = load_config()
             assert config.yolo_mode == "true"
+
+
+class TestAllowedHosts:
+    """Test allowed hosts configuration for DNS rebinding protection."""
+
+    def test_allowed_hosts_default_empty(self):
+        """Test allowed_hosts defaults to empty list."""
+        config = OdooConfig(url="http://localhost:8069", api_key="test")
+        assert config.allowed_hosts == []
+
+    def test_allowed_hosts_set_directly(self):
+        """Test allowed_hosts can be set directly."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test",
+            allowed_hosts=["localhost", "example.com"],
+        )
+        assert config.allowed_hosts == ["localhost", "example.com"]
+
+    def test_allowed_hosts_from_env_single(self, monkeypatch):
+        """Test loading single allowed host from environment."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_MCP_ALLOWED_HOSTS", "localhost")
+
+        config = load_config()
+
+        assert config.allowed_hosts == ["localhost"]
+
+    def test_allowed_hosts_from_env_multiple(self, monkeypatch):
+        """Test loading multiple allowed hosts from environment."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_MCP_ALLOWED_HOSTS", "localhost,example.com,odoo.local")
+
+        config = load_config()
+
+        assert config.allowed_hosts == ["localhost", "example.com", "odoo.local"]
+
+    def test_allowed_hosts_from_env_with_whitespace(self, monkeypatch):
+        """Test that whitespace is trimmed from allowed hosts."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_MCP_ALLOWED_HOSTS", " localhost , example.com , odoo.local ")
+
+        config = load_config()
+
+        assert config.allowed_hosts == ["localhost", "example.com", "odoo.local"]
+
+    def test_allowed_hosts_from_env_empty_string(self, monkeypatch):
+        """Test that empty string results in empty list."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_MCP_ALLOWED_HOSTS", "")
+
+        config = load_config()
+
+        assert config.allowed_hosts == []
+
+    def test_allowed_hosts_from_env_whitespace_only(self, monkeypatch):
+        """Test that whitespace-only string results in empty list."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_MCP_ALLOWED_HOSTS", "   ")
+
+        config = load_config()
+
+        assert config.allowed_hosts == []
+
+    def test_allowed_hosts_skips_empty_entries(self, monkeypatch):
+        """Test that empty entries between commas are skipped."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_MCP_ALLOWED_HOSTS", "localhost,,example.com,  ,odoo.local")
+
+        config = load_config()
+
+        assert config.allowed_hosts == ["localhost", "example.com", "odoo.local"]
+
+    def test_allowed_hosts_with_ports(self, monkeypatch):
+        """Test allowed hosts can include port numbers."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_MCP_ALLOWED_HOSTS", "localhost:8000,example.com:443")
+
+        config = load_config()
+
+        assert config.allowed_hosts == ["localhost:8000", "example.com:443"]
