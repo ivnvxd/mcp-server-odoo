@@ -56,6 +56,13 @@ class TestYoloModeTools:
         return mock
 
     @pytest.fixture
+    def mock_server(self, mock_connection):
+        """Create mock server with connection attribute."""
+        server = MagicMock()
+        server.connection = mock_connection
+        return server
+
+    @pytest.fixture
     def mock_access_controller(self):
         """Create mock AccessController."""
         mock = MagicMock()
@@ -71,7 +78,7 @@ class TestYoloModeTools:
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_read_mode(
-        self, config_yolo_read, mock_connection, mock_access_controller, mock_app
+        self, config_yolo_read, mock_connection, mock_server, mock_access_controller, mock_app
     ):
         """Test list_models in read-only YOLO mode."""
         # Setup mock data
@@ -82,9 +89,7 @@ class TestYoloModeTools:
         ]
 
         # Create handler
-        handler = OdooToolHandler(
-            mock_app, mock_connection, mock_access_controller, config_yolo_read
-        )
+        handler = OdooToolHandler(mock_app, mock_server, mock_access_controller, config_yolo_read)
 
         # Call the method
         result = await handler._handle_list_models_tool()
@@ -127,7 +132,7 @@ class TestYoloModeTools:
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_full_mode(
-        self, config_yolo_full, mock_connection, mock_access_controller, mock_app
+        self, config_yolo_full, mock_connection, mock_server, mock_access_controller, mock_app
     ):
         """Test list_models in full access YOLO mode."""
         # Setup mock data
@@ -137,9 +142,7 @@ class TestYoloModeTools:
         ]
 
         # Create handler
-        handler = OdooToolHandler(
-            mock_app, mock_connection, mock_access_controller, config_yolo_full
-        )
+        handler = OdooToolHandler(mock_app, mock_server, mock_access_controller, config_yolo_full)
 
         # Call the method
         result = await handler._handle_list_models_tool()
@@ -176,7 +179,7 @@ class TestYoloModeTools:
 
     @pytest.mark.asyncio
     async def test_list_models_standard_mode(
-        self, config_standard, mock_connection, mock_access_controller, mock_app
+        self, config_standard, mock_connection, mock_server, mock_access_controller, mock_app
     ):
         """Test list_models in standard mode uses MCP access controller."""
         # Setup mock data
@@ -196,9 +199,7 @@ class TestYoloModeTools:
         mock_access_controller.get_model_permissions.side_effect = mock_get_permissions
 
         # Create handler
-        handler = OdooToolHandler(
-            mock_app, mock_connection, mock_access_controller, config_standard
-        )
+        handler = OdooToolHandler(mock_app, mock_server, mock_access_controller, config_standard)
 
         # Call the method
         result = await handler._handle_list_models_tool()
@@ -221,16 +222,14 @@ class TestYoloModeTools:
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_error_handling(
-        self, config_yolo_read, mock_connection, mock_access_controller, mock_app
+        self, config_yolo_read, mock_connection, mock_server, mock_access_controller, mock_app
     ):
         """Test error handling in YOLO mode model listing."""
         # Setup connection to raise error
         mock_connection.search_read.side_effect = Exception("Database connection failed")
 
         # Create handler
-        handler = OdooToolHandler(
-            mock_app, mock_connection, mock_access_controller, config_yolo_read
-        )
+        handler = OdooToolHandler(mock_app, mock_server, mock_access_controller, config_yolo_read)
 
         # Call the method
         result = await handler._handle_list_models_tool()
@@ -255,15 +254,13 @@ class TestYoloModeTools:
 
     @pytest.mark.asyncio
     async def test_list_models_yolo_domain_construction(
-        self, config_yolo_read, mock_connection, mock_access_controller, mock_app
+        self, config_yolo_read, mock_connection, mock_server, mock_access_controller, mock_app
     ):
         """Test that domain is properly constructed in YOLO mode."""
         mock_connection.search_read.return_value = []
 
         # Create handler
-        handler = OdooToolHandler(
-            mock_app, mock_connection, mock_access_controller, config_yolo_read
-        )
+        handler = OdooToolHandler(mock_app, mock_server, mock_access_controller, config_yolo_read)
 
         # Call the method and verify empty result is handled
         result = await handler._handle_list_models_tool()
@@ -291,7 +288,13 @@ class TestYoloModeTools:
 
     @pytest.mark.asyncio
     async def test_yolo_mode_logging(
-        self, config_yolo_read, mock_connection, mock_access_controller, mock_app, caplog
+        self,
+        config_yolo_read,
+        mock_connection,
+        mock_server,
+        mock_access_controller,
+        mock_app,
+        caplog,
     ):
         """Test that appropriate logging occurs in YOLO mode."""
         import logging
@@ -304,9 +307,7 @@ class TestYoloModeTools:
         ]
 
         # Create handler
-        handler = OdooToolHandler(
-            mock_app, mock_connection, mock_access_controller, config_yolo_read
-        )
+        handler = OdooToolHandler(mock_app, mock_server, mock_access_controller, config_yolo_read)
 
         # Call the method and verify result
         result = await handler._handle_list_models_tool()

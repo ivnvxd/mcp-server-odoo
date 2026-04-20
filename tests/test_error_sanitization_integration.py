@@ -19,24 +19,36 @@ class TestErrorSanitizationIntegration:
         """Create a tool handler with mocked dependencies."""
         app = Mock()
         connection = Mock()
+        connection.is_authenticated = True
+        server = Mock()
+        server.connection = connection
         access_controller = Mock()
         config = Mock()
         config.default_limit = 10
         config.max_limit = 100
 
-        return OdooToolHandler(app, connection, access_controller, config)
+        handler = OdooToolHandler(app, server, access_controller, config)
+        # Store mock connection reference for test access
+        handler._mock_connection = connection
+        return handler
 
     @pytest.fixture
     def resource_handler(self):
         """Create a resource handler with mocked dependencies."""
         app = Mock()
         connection = Mock()
+        connection.is_authenticated = True
+        server = Mock()
+        server.connection = connection
         access_controller = Mock()
         config = Mock()
         config.default_limit = 10
         config.max_limit = 100
 
-        return OdooResourceHandler(app, connection, access_controller, config)
+        handler = OdooResourceHandler(app, server, access_controller, config)
+        # Store mock connection reference for test access
+        handler._mock_connection = connection
+        return handler
 
     @pytest.mark.asyncio
     async def test_tool_wraps_connection_error(self, tool_handler):

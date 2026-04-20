@@ -66,6 +66,14 @@ def mock_connection():
 
 
 @pytest.fixture
+def mock_server(mock_connection):
+    """Create a mock server with connection attribute."""
+    server = Mock()
+    server.connection = mock_connection
+    return server
+
+
+@pytest.fixture
 def mock_access_controller():
     """Create mock AccessController."""
     controller = Mock(spec=AccessController)
@@ -84,27 +92,57 @@ def mock_app():
 
 
 @pytest.fixture
-def resource_handler(mock_app, mock_connection, mock_access_controller, mock_config):
+def resource_handler(mock_app, mock_server, mock_access_controller, mock_config):
     """Create OdooResourceHandler instance."""
-    return OdooResourceHandler(mock_app, mock_connection, mock_access_controller, mock_config)
+    return OdooResourceHandler(mock_app, mock_server, mock_access_controller, mock_config)
 
 
 class TestOdooResourceHandler:
     """Test OdooResourceHandler functionality."""
 
-    def test_init(self, mock_app, mock_connection, mock_access_controller, mock_config):
+    def test_init(self, mock_app, mock_server, mock_access_controller, mock_config):
         """Test handler initialization."""
-        handler = OdooResourceHandler(
-            mock_app, mock_connection, mock_access_controller, mock_config
-        )
+        handler = OdooResourceHandler(mock_app, mock_server, mock_access_controller, mock_config)
 
         assert handler.app == mock_app
-        assert handler.connection == mock_connection
+        assert handler._server == mock_server
         assert handler.access_controller == mock_access_controller
         assert handler.config == mock_config
 
         # Check that resources were registered
         assert mock_app.resource.call_count >= 1
+
+    def test_connection_property_returns_connection(self, resource_handler, mock_connection):
+        """Test connection property returns connection when authenticated."""
+        conn = resource_handler.connection
+        assert conn is mock_connection
+
+    def test_connection_property_raises_when_none(
+        self, mock_app, mock_access_controller, mock_config
+    ):
+        """Test connection property raises ValidationError when connection is None."""
+        mock_server = Mock()
+        mock_server.connection = None
+
+        handler = OdooResourceHandler(mock_app, mock_server, mock_access_controller, mock_config)
+
+        with pytest.raises(ValidationError, match="Not authenticated with Odoo"):
+            _ = handler.connection
+
+    def test_connection_property_raises_when_not_authenticated(
+        self, mock_app, mock_access_controller, mock_config
+    ):
+        """Test connection property raises ValidationError when not authenticated."""
+        mock_connection = Mock(spec=OdooConnection)
+        mock_connection.is_authenticated = False
+
+        mock_server = Mock()
+        mock_server.connection = mock_connection
+
+        handler = OdooResourceHandler(mock_app, mock_server, mock_access_controller, mock_config)
+
+        with pytest.raises(ValidationError, match="Not authenticated with Odoo"):
+            _ = handler.connection
 
     @pytest.mark.asyncio
     async def test_handle_record_retrieval_success(
@@ -295,15 +333,13 @@ class TestOdooResourceHandler:
 class TestRegisterResources:
     """Test register_resources function."""
 
-    def test_register_resources(
-        self, mock_app, mock_connection, mock_access_controller, mock_config
-    ):
+    def test_register_resources(self, mock_app, mock_server, mock_access_controller, mock_config):
         """Test resource registration."""
-        handler = register_resources(mock_app, mock_connection, mock_access_controller, mock_config)
+        handler = register_resources(mock_app, mock_server, mock_access_controller, mock_config)
 
         assert isinstance(handler, OdooResourceHandler)
         assert handler.app == mock_app
-        assert handler.connection == mock_connection
+        assert handler._server == mock_server
         assert handler.access_controller == mock_access_controller
         assert handler.config == mock_config
 

@@ -37,6 +37,14 @@ def mock_connection():
 
 
 @pytest.fixture
+def mock_server(mock_connection):
+    """Create a mock server with connection attribute."""
+    server = Mock()
+    server.connection = mock_connection
+    return server
+
+
+@pytest.fixture
 def mock_access_controller():
     """Create a mock access controller."""
     controller = Mock(spec=AccessController)
@@ -64,9 +72,9 @@ def mock_app():
 
 
 @pytest.fixture
-def resource_handler(mock_app, mock_connection, mock_access_controller, mock_config):
+def resource_handler(mock_app, mock_server, mock_access_controller, mock_config):
     """Create a resource handler instance."""
-    return OdooResourceHandler(mock_app, mock_connection, mock_access_controller, mock_config)
+    return OdooResourceHandler(mock_app, mock_server, mock_access_controller, mock_config)
 
 
 @pytest.fixture
@@ -390,7 +398,12 @@ class TestSearchResourceIntegration:
         app.resource.side_effect = resource_decorator
 
         access_controller = AccessController(real_config)
-        handler = OdooResourceHandler(app, real_connection, access_controller, real_config)
+
+        # Create a mock server wrapper for the real connection
+        mock_server = Mock()
+        mock_server.connection = real_connection
+
+        handler = OdooResourceHandler(app, mock_server, access_controller, real_config)
 
         # Connect and authenticate
         real_connection.connect()
