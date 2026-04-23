@@ -625,29 +625,38 @@ class TestOdooToolHandler:
         assert "Failed to list models" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_search_records_with_defaults(
-        self, handler, mock_connection, mock_access_controller, mock_app, valid_config
+    async def test_search_records_omitted_limit_uses_configured_default(
+        self, mock_app, mock_connection, mock_access_controller
     ):
-        """Test search_records with default values."""
-        # Setup mocks
+        """Omitting limit must fall back to ODOO_MCP_DEFAULT_LIMIT, not a hardcoded value.
+
+        Uses a non-10 default_limit so this test would fail if the tool signature
+        hardcoded a default that bypassed config.
+        """
+        custom_config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            database="test_db",
+            default_limit=25,
+            max_limit=100,
+        )
+        OdooToolHandler(mock_app, mock_connection, mock_access_controller, custom_config)
+
         mock_connection.search_count.return_value = 0
         mock_connection.search.return_value = []
         mock_connection.read.return_value = []
 
-        # Get the registered search_records function
         search_records = mock_app._tools["search_records"]
 
-        # Call with minimal params
         result = await search_records(model="res.partner")
 
-        # Verify defaults were applied (SearchResult is a Pydantic model)
-        assert result.limit == valid_config.default_limit
+        assert result.limit == 25
         assert result.offset == 0
         assert result.total == 0
         assert result.records == []
 
-        # Verify domain default
         mock_connection.search_count.assert_called_with("res.partner", [])
+        mock_connection.search.assert_called_with("res.partner", [], limit=25, offset=0, order=None)
 
     @pytest.mark.asyncio
     async def test_search_records_limit_validation(

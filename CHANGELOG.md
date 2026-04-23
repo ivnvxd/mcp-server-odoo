@@ -5,10 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.1]
+## [0.5.1] - 2026-04-23
 
 ### Fixed
 - **CI**: Skip MCP integration tests for fork PRs where repository secrets are unavailable
+- **Search**: Cap over-limit to `max_limit` instead of resetting to `default_limit` (#57, @litnimax)
+- **Search**: `ODOO_MCP_DEFAULT_LIMIT` now applies when clients omit `limit` — previously hardcoded, bypassing the env var in the common case (#61)
 
 ## [0.5.0] - 2026-02-28
 
