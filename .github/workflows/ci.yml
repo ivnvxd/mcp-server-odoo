@@ -388,7 +388,7 @@ jobs:
         python-version: '3.10'
 
     - name: Merge and upload coverage
-      uses: codecov/codecov-action@v5
+      uses: codecov/codecov-action@v6
       with:
         directory: coverage-reports
         flags: all
