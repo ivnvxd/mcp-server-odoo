@@ -356,7 +356,7 @@ class OdooToolHandler:
             model: str,
             domain: Optional[Any] = None,
             fields: Optional[Any] = None,
-            limit: int = 10,
+            limit: Optional[int] = None,
             offset: int = 0,
             order: Optional[str] = None,
             ctx: Optional[Context] = None,
@@ -374,7 +374,9 @@ class OdooToolHandler:
                     - A list: ["field1", "field2", ...] - Returns only specified fields
                     - A JSON string: '["field1", "field2"]' - Parsed to list
                     - ["__all__"] or '["__all__"]': Returns ALL fields (warning: may cause serialization errors)
-                limit: Maximum number of records to return
+                limit: Maximum number of records to return. Omit to use the
+                    server-configured default (ODOO_MCP_DEFAULT_LIMIT). Capped
+                    at ODOO_MCP_MAX_LIMIT.
                 offset: Number of records to skip
                 order: Sort order (e.g., 'name asc')
 
@@ -562,7 +564,7 @@ class OdooToolHandler:
         model: str,
         domain: Optional[Any],
         fields: Optional[Any],
-        limit: int,
+        limit: Optional[int],
         offset: int,
         order: Optional[str],
         ctx=None,
@@ -644,8 +646,10 @@ class OdooToolHandler:
                             ) from e
 
                 # Set defaults
-                if limit <= 0 or limit > self.config.max_limit:
+                if limit is None or limit <= 0:
                     limit = self.config.default_limit
+                elif limit > self.config.max_limit:
+                    limit = self.config.max_limit
 
                 # Get total count
                 total_count = self.connection.search_count(model, parsed_domain)
