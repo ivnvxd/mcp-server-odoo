@@ -4,6 +4,7 @@ This module provides the FastMCP server that exposes Odoo data
 and functionality through the Model Context Protocol.
 """
 
+import atexit
 import contextlib
 from typing import Any, Dict, Optional
 
@@ -33,8 +34,12 @@ class OdooMCPServer:
     """Main MCP server class for Odoo integration.
 
     This class manages the FastMCP server instance and maintains
-    the connection to Odoo. The server lifecycle is managed by
-    establishing connection before starting and cleaning up on exit.
+    the connection to Odoo. The connection is **process-scoped**:
+    it is established once per process and reused across MCP
+    (streamable-http) sessions. Tool/resource registration is also
+    performed only once per instance to avoid duplicate-registration
+    warnings when the lifespan context manager is re-entered per
+    session by some transports.
     """
 
     def __init__(self, config: Optional[OdooConfig] = None):
@@ -56,6 +61,14 @@ class OdooMCPServer:
         self.performance_manager: Optional[PerformanceManager] = None
         self.resource_handler = None
         self.tool_handler = None
+
+        # One-shot guards so the lifespan being re-entered per MCP session
+        # (as happens with streamable-http transport) does not tear down
+        # the connection or re-register tools/resources.
+        self._startup_done: bool = False
+        self._tools_registered: bool = False
+        self._resources_registered: bool = False
+        self._atexit_registered: bool = False
 
         # Create FastMCP instance with server metadata
         self.app = FastMCP(
@@ -90,63 +103,129 @@ class OdooMCPServer:
     async def _odoo_lifespan(self, app: FastMCP):
         """Manage Odoo connection lifecycle for FastMCP.
 
-        Sets up connection, registers resources/tools before server starts.
-        Cleans up connection when server stops.
+        The connection and tool/resource registration are process-scoped
+        one-shots. This coroutine may be re-entered once per MCP session
+        by some transports (notably streamable-http); re-entries do not
+        re-authenticate or re-register handlers, and crucially they do
+        NOT tear the connection down on exit. Teardown happens only at
+        true process shutdown via :mod:`atexit`.
         """
-        try:
+        if not self._startup_done:
             with perf_logger.track_operation("server_startup"):
                 self._ensure_connection()
                 self._register_resources()
                 self._register_tools()
+                self._register_shutdown_hook()
+            self._startup_done = True
+        else:
+            # Subsequent session: verify the long-lived connection is
+            # still alive and re-authenticate if not.
+            self._ensure_connection()
+        try:
             yield {}
         finally:
-            self._cleanup_connection()
+            # Intentionally do NOT call _cleanup_connection here. The
+            # Odoo connection is process-scoped and must survive
+            # individual MCP session teardowns so subsequent sessions
+            # can reuse it.
+            pass
+
+    def _register_shutdown_hook(self) -> None:
+        """Register a process-level shutdown hook to release the connection."""
+        if self._atexit_registered:
+            return
+        try:
+            atexit.register(self._cleanup_connection)
+            self._atexit_registered = True
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(f"Could not register atexit cleanup: {e}")
+
+    def _connection_is_live(self) -> bool:
+        """Cheap liveness probe for the cached Odoo connection.
+
+        Returns True only if the connection object exists, reports
+        itself as authenticated, and responds to a lightweight RPC
+        (``common.version()``). Any failure is logged at debug level
+        and returns False so the caller can re-authenticate.
+        """
+        conn = self.connection
+        if conn is None or not getattr(conn, "is_authenticated", False):
+            return False
+        try:
+            is_healthy, _ = conn.check_health()
+            return bool(is_healthy)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(f"Liveness probe raised: {e}")
+            return False
 
     def _ensure_connection(self):
-        """Ensure connection to Odoo is established.
+        """Ensure a live, authenticated connection to Odoo exists.
+
+        Idempotent: if a cached connection is already alive and
+        authenticated, this is a no-op. If the cached connection is
+        stale/dead, it is discarded and a fresh one is created.
 
         Raises:
             ConnectionError: If connection fails
             ConfigurationError: If configuration is invalid
         """
-        if not self.connection:
+        if self.connection is not None:
+            if self._connection_is_live():
+                return
+            # Stale / dead — drop it and reconnect below.
+            logger.warning("Cached Odoo connection is stale; reconnecting...")
             try:
-                logger.info("Establishing connection to Odoo...")
-                with perf_logger.track_operation("connection_setup"):
-                    # Create performance manager (shared across components)
+                self.connection.disconnect(suppress_logging=True)
+            except Exception:
+                pass
+            self.connection = None
+            self.access_controller = None
+
+        try:
+            logger.info("Establishing connection to Odoo...")
+            with perf_logger.track_operation("connection_setup"):
+                # Create performance manager (shared across components)
+                if self.performance_manager is None:
                     self.performance_manager = PerformanceManager(self.config)
 
-                    # Create connection with performance manager
-                    self.connection = OdooConnection(
-                        self.config, performance_manager=self.performance_manager
-                    )
-
-                    # Connect and authenticate
-                    self.connection.connect()
-                    self.connection.authenticate()
-
-                logger.info(f"Successfully connected to Odoo at {self.config.url}")
-
-                # Initialize access controller (pass resolved DB for session auth)
-                self.access_controller = AccessController(
-                    self.config, database=self.connection.database
+                # Create connection with performance manager
+                self.connection = OdooConnection(
+                    self.config, performance_manager=self.performance_manager
                 )
-            except Exception as e:
-                context = ErrorContext(operation="connection_setup")
-                # Let specific errors propagate as-is
-                if isinstance(e, (OdooConnectionError, ConfigurationError)):
-                    raise
-                # Handle other unexpected errors
-                error_handler.handle_error(e, context=context)
+
+                # Connect and authenticate
+                self.connection.connect()
+                self.connection.authenticate()
+
+            logger.info(f"Successfully connected to Odoo at {self.config.url}")
+
+            # Initialize access controller (pass resolved DB for session auth)
+            self.access_controller = AccessController(
+                self.config, database=self.connection.database
+            )
+        except Exception as e:
+            context = ErrorContext(operation="connection_setup")
+            # Let specific errors propagate as-is
+            if isinstance(e, (OdooConnectionError, ConfigurationError)):
+                raise
+            # Handle other unexpected errors
+            error_handler.handle_error(e, context=context)
 
     def _cleanup_connection(self):
-        """Clean up Odoo connection."""
+        """Clean up Odoo connection. Called at process shutdown only."""
         if self.connection:
             try:
-                logger.info("Closing Odoo connection...")
+                try:
+                    logger.info("Closing Odoo connection...")
+                except (ValueError, RuntimeError):
+                    # Logging may already be torn down during atexit.
+                    pass
                 self.connection.disconnect()
             except Exception as e:
-                logger.error(f"Error closing connection: {e}")
+                try:
+                    logger.error(f"Error closing connection: {e}")
+                except (ValueError, RuntimeError):
+                    pass
             finally:
                 # Always clear connection reference
                 self.connection = None
@@ -155,19 +234,34 @@ class OdooMCPServer:
                 self.tool_handler = None
 
     def _register_resources(self):
-        """Register resource handlers after connection is established."""
+        """Register resource handlers after connection is established.
+
+        Guarded so the lifespan being re-entered per MCP session does
+        not attempt to re-register resources with FastMCP.
+        """
+        if self._resources_registered:
+            return
         if self.connection and self.access_controller:
             self.resource_handler = register_resources(
                 self.app, self.connection, self.access_controller, self.config
             )
+            self._resources_registered = True
             logger.info("Registered MCP resources")
 
     def _register_tools(self):
-        """Register tool handlers after connection is established."""
+        """Register tool handlers after connection is established.
+
+        Guarded so the lifespan being re-entered per MCP session does
+        not attempt to re-register tools (which would emit
+        ``Tool already exists`` warnings).
+        """
+        if self._tools_registered:
+            return
         if self.connection and self.access_controller:
             self.tool_handler = register_tools(
                 self.app, self.connection, self.access_controller, self.config
             )
+            self._tools_registered = True
             logger.info("Registered MCP tools")
 
     async def run_stdio(self):
