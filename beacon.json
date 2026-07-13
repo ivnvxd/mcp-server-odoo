@@ -1,0 +1,12 @@
+{
+  "beacon_manifest": "0.1",
+  "id": "ivnvxd/mcp-server-odoo",
+  "name": "MCP Server for Odoo",
+  "description": "MCP server for AI assistants to query and manage Odoo ERP data via natural language.",
+  "capabilities": ["mcp-server", "erp", "odoo", "business-data", "crm"],
+  "interfaces": [
+    { "type": "mcp", "endpoint": "https://github.com/ivnvxd/mcp-server-odoo" }
+  ],
+  "source": "https://github.com/ivnvxd/mcp-server-odoo",
+  "homepage": "https://github.com/ivnvxd/mcp-server-odoo"
+}
