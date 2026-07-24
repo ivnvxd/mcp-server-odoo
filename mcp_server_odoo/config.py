@@ -45,6 +45,14 @@ class OdooConfig:
     # task, server instance) in the session manager until process restart.
     session_idle_timeout: Optional[float] = None
 
+    # Per-request authentication (streamable-http). When true, no server-wide
+    # ODOO_API_KEY is used; each HTTP request carries its own key
+    # (Authorization: Bearer <key>) and runs as that key's Odoo user. Data
+    # calls go over standard XML-RPC as the resolved user, so Odoo's own
+    # access rights and record rules are the per-user boundary. Requires the
+    # small /mcp/auth/validate endpoint (key -> user id) to be served by Odoo.
+    per_request_auth: bool = False
+
     # YOLO mode configuration
     yolo_mode: str = "off"  # "off", "read", or "true"
 
@@ -76,8 +84,21 @@ class OdooConfig:
         has_api_key = bool(self.api_key)
         has_credentials = bool(self.username and self.password)
 
+        # Per-request auth takes precedence: the server holds no credentials of
+        # its own, so no startup key/password is required. Each request supplies
+        # its own key. It does need an explicit database (auto-detect would need
+        # a database listing, which is disabled on locked-down servers).
+        if self.per_request_auth:
+            if self.transport != "streamable-http":
+                raise ValueError(
+                    "ODOO_MCP_PER_REQUEST_AUTH requires ODOO_MCP_TRANSPORT=streamable-http"
+                )
+            if self.is_yolo_enabled:
+                raise ValueError("ODOO_MCP_PER_REQUEST_AUTH cannot be combined with ODOO_YOLO")
+            if not self.database:
+                raise ValueError("ODOO_MCP_PER_REQUEST_AUTH requires ODOO_DB to be set")
         # In YOLO mode, we might need username even with API key for standard auth
-        if self.is_yolo_enabled:
+        elif self.is_yolo_enabled:
             if not has_credentials and not (has_api_key and self.username):
                 raise ValueError("YOLO mode requires either username/password or username/API key")
         else:
@@ -159,8 +180,10 @@ class OdooConfig:
         Returns:
             Dict[str, str]: Mapping of endpoint names to paths
         """
-        if self.is_yolo_enabled:
-            # Use standard Odoo endpoints in YOLO mode
+        if self.is_yolo_enabled or self.per_request_auth:
+            # Standard Odoo endpoints. YOLO needs no module at all; per-request
+            # auth resolves the user via /mcp/auth/validate but runs data calls
+            # over standard XML-RPC as that user (Odoo enforces their rights).
             return {"db": "/xmlrpc/db", "common": "/xmlrpc/2/common", "object": "/xmlrpc/2/object"}
         else:
             # DB endpoint is always server-wide; common/object use MCP routes
@@ -285,6 +308,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         yolo_mode=get_yolo_mode(),
         enable_method_calls=get_bool_env("ODOO_MCP_ENABLE_METHOD_CALLS", False),
         allowed_hosts=parse_allowed_hosts(),
+        per_request_auth=get_bool_env("ODOO_MCP_PER_REQUEST_AUTH", False),
     )
 
     return config
