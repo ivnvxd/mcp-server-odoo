@@ -351,6 +351,41 @@ class TestExecuteKwErrorHandling:
         kwargs = conn._object_proxy.execute_kw.call_args[0][6]
         assert kwargs["context"]["lang"] == "de_DE"
 
+    def test_allowed_companies_injection(self, connected_connection):
+        """execute_kw should inject allowed_company_ids into context when configured."""
+        conn = connected_connection
+        conn.config.allowed_companies = [1, 3]
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.search("res.partner", [])
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert kwargs["context"]["allowed_company_ids"] == [1, 3]
+
+    def test_allowed_companies_overrides_caller_context(self, connected_connection):
+        """Company scoping is a guardrail: caller-provided values must not widen it."""
+        conn = connected_connection
+        conn.config.allowed_companies = [1]
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.execute_kw(
+            "res.partner", "search", [[]], {"context": {"allowed_company_ids": [1, 2, 3]}}
+        )
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert kwargs["context"]["allowed_company_ids"] == [1]
+
+    def test_allowed_companies_not_injected_when_unset(self, connected_connection):
+        """Without configuration, context must not carry allowed_company_ids."""
+        conn = connected_connection
+        conn.config.allowed_companies = None
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.search("res.partner", [])
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert "allowed_company_ids" not in kwargs.get("context", {})
+
     def test_marshal_none_fault_returns_none(self, connected_connection):
         """Odoo's "cannot marshal None" fault is translated to a None return.
 

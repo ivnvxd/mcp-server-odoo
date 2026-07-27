@@ -304,6 +304,7 @@ The server requires the following environment variables:
 | `ODOO_PASSWORD` | Yes* | Password (if not using API key) | `admin` |
 | `ODOO_DB` | No | Database name (auto-detected if not set) | `mycompany` |
 | `ODOO_LOCALE` | No | Language/locale for Odoo responses | `es_ES`, `fr_FR`, `de_DE` |
+| `ODOO_ALLOWED_COMPANIES` | No | Comma-separated company IDs to scope all operations to (multi-company setups) | `1`, `1,3` |
 | `ODOO_YOLO` | No | YOLO mode - bypasses MCP security (⚠️ DEV ONLY) | `off`, `read`, `true` |
 | `ODOO_MCP_ENABLE_METHOD_CALLS` | No | Enable the `call_model_method` tool — requires `ODOO_YOLO=true` (⚠️ Dangerous, see [`call_model_method`](#call_model_method)) | `false`, `true` |
 
@@ -313,6 +314,36 @@ The server requires the following environment variables:
 - If database listing is restricted on your server, you must specify `ODOO_DB`
 - API key authentication is recommended for better security
 - The server also loads environment variables from a `.env` file in the working directory
+
+**Multi-company scoping (`ODOO_ALLOWED_COMPANIES`):**
+In multi-company databases, the authenticated user's default company applies to
+every record the server creates, and record visibility spans all of the user's
+allowed companies. Setting `ODOO_ALLOWED_COMPANIES` injects
+`allowed_company_ids` into the context of every RPC call, so record rules,
+`env.company`, and create defaults are limited to the listed companies. A useful
+pattern is configuring one MCP server entry per company, sharing a single Odoo
+user:
+
+```json
+{
+  "mcpServers": {
+    "odoo-company-a": {
+      "command": "uvx",
+      "args": ["mcp-server-odoo"],
+      "env": { "ODOO_URL": "...", "ODOO_API_KEY": "...", "ODOO_ALLOWED_COMPANIES": "1" }
+    },
+    "odoo-company-b": {
+      "command": "uvx",
+      "args": ["mcp-server-odoo"],
+      "env": { "ODOO_URL": "...", "ODOO_API_KEY": "...", "ODOO_ALLOWED_COMPANIES": "3" }
+    }
+  }
+}
+```
+
+Note this is context-level scoping, not a security boundary: the credentials can
+still access every company the Odoo user is allowed to. For hard isolation,
+restrict the user's allowed companies in Odoo itself.
 
 #### Advanced Configuration
 
