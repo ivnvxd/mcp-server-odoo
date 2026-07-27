@@ -375,6 +375,18 @@ class TestExecuteKwErrorHandling:
         kwargs = conn._object_proxy.execute_kw.call_args[0][6]
         assert kwargs["context"]["allowed_company_ids"] == [1]
 
+    def test_allowed_companies_context_is_copied(self, connected_connection):
+        """Mutating the injected context must not corrupt the shared config."""
+        conn = connected_connection
+        conn.config.allowed_companies = [1, 3]
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.search("res.partner", [])
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        kwargs["context"]["allowed_company_ids"].append(99)
+        assert conn.config.allowed_companies == [1, 3]
+
     def test_allowed_companies_not_injected_when_unset(self, connected_connection):
         """Without configuration, context must not carry allowed_company_ids."""
         conn = connected_connection

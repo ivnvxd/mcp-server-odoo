@@ -37,7 +37,7 @@ class OdooConfig:
 
     # Company scoping: comma-separated company IDs injected as
     # allowed_company_ids into every RPC context (record rules + defaults).
-    allowed_companies: Optional[list] = None
+    allowed_companies: Optional[list[int]] = None
 
     # MCP transport configuration
     transport: Literal["stdio", "streamable-http"] = "stdio"
@@ -243,14 +243,17 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         except ValueError:
             raise ValueError(f"{key} must be a valid number") from None
 
-    def get_company_ids_env(key: str) -> Optional[list]:
+    def get_company_ids_env(key: str) -> Optional[list[int]]:
         value = os.getenv(key)
         if value is None or not value.strip():
             return None
         try:
-            return [int(c) for c in value.split(",") if c.strip()]
+            ids = [int(c) for c in value.split(",") if c.strip()]
         except ValueError:
             raise ValueError(f"{key} must be a comma-separated list of integer IDs") from None
+        # A value of only separators/whitespace (e.g. ",") parses to an empty
+        # list; treat it as unset so scoping is never half-configured.
+        return ids or None
 
     def get_bool_env(key: str, default: bool = False) -> bool:
         raw = os.getenv(key)

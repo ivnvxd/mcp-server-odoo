@@ -958,7 +958,8 @@ class OdooConnection:
         if self.config.allowed_companies:
             if "context" not in kwargs:
                 kwargs["context"] = {}
-            kwargs["context"]["allowed_company_ids"] = self.config.allowed_companies
+            # Copy so callers mutating the context cannot alter the config.
+            kwargs["context"]["allowed_company_ids"] = list(self.config.allowed_companies)
 
         try:
             # Log the operation (values redacted — write payloads can carry
