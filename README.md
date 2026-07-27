@@ -1,5 +1,7 @@
 # MCP Server for Odoo
 
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Fivnvxd%2Fmcp-server-odoo.svg)](https://mcptoplist.com/server/glama%2Fivnvxd%2Fmcp-server-odoo)
+
 [![CI](https://github.com/ivnvxd/mcp-server-odoo/actions/workflows/ci.yml/badge.svg)](https://github.com/ivnvxd/mcp-server-odoo/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/ivnvxd/mcp-server-odoo/branch/main/graph/badge.svg)](https://codecov.io/gh/ivnvxd/mcp-server-odoo)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
