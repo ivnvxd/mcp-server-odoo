@@ -75,6 +75,8 @@ def _require_key() -> str:
 
 def _request_config(key: str) -> OdooConfig:
     """A shallow copy of the base config carrying this request's key."""
+    if _base_config is None:
+        raise PerRequestAuthError("Per-request auth is not configured")
     cfg = copy.copy(_base_config)
     cfg.api_key = key
     cfg.username = None

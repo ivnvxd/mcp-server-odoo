@@ -6,7 +6,7 @@ and functionality through the Model Context Protocol.
 
 import asyncio
 import contextlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 from mcp.server import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -114,8 +114,10 @@ class OdooMCPServer:
         """
         self.performance_manager = PerformanceManager(self.config)
         request_auth.configure(self.config, self.performance_manager)
-        self.connection = request_auth.connection_proxy()
-        self.access_controller = request_auth.access_controller_proxy()
+        # The proxies duck-type the real objects (attribute access resolves
+        # against the per-request instance), hence the casts.
+        self.connection = cast(OdooConnection, request_auth.connection_proxy())
+        self.access_controller = cast(AccessController, request_auth.access_controller_proxy())
         self._register_resources()
         self._register_tools()
         logger.info("Per-request auth enabled: each request authenticates with its own API key")
