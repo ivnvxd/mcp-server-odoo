@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 from mcp.server import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import __version__
+from . import __version__, request_auth
 from .access_control import AccessController
 from .config import OdooConfig, get_config
 from .error_handling import (
@@ -24,7 +24,6 @@ from .odoo_connection import OdooConnection, OdooConnectionError
 from .performance import PerformanceManager
 from .resources import register_resources
 from .tools import register_tools
-from . import request_auth
 
 # Set up logging
 logger = get_logger(__name__)
