@@ -56,8 +56,12 @@ def test_extract_malformed_authorization_returns_none():
 # Config contract
 # --------------------------------------------------------------------------- #
 def _cfg(**kw):
-    base = dict(url="http://odoo:8069", transport="streamable-http",
-                database="cubert", per_request_auth=True)
+    base = dict(
+        url="http://odoo:8069",
+        transport="streamable-http",
+        database="cubert",
+        per_request_auth=True,
+    )
     base.update(kw)
     return OdooConfig(**base)
 
@@ -126,6 +130,7 @@ class _Recorder:
 async def _send_collect(store):
     async def send(msg):
         store.append(msg)
+
     return send
 
 
