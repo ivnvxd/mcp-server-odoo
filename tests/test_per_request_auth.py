@@ -8,6 +8,8 @@ exercised separately against a real Odoo + cubert_mcp addon.
 """
 
 import asyncio
+from contextlib import contextmanager
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -185,3 +187,121 @@ def test_middleware_passes_through_unguarded_path():
     _run(go())
     assert downstream.called is True  # /health not gated
     assert sent == []  # no 401 emitted
+
+
+# --------------------------------------------------------------------------- #
+# Per-request config, connection and controller lifecycle
+# --------------------------------------------------------------------------- #
+@contextmanager
+def _configured(cfg=None, key="req-key"):
+    """Configure the module for one test; restore pristine state after."""
+    prev_cfg = request_auth._base_config
+    prev_pm = request_auth._performance_manager
+    request_auth.configure(cfg or _cfg(), performance_manager=Mock())
+    token = current_api_key.set(key) if key else None
+    try:
+        yield
+    finally:
+        request_auth.reset()
+        if token is not None:
+            current_api_key.reset(token)
+        request_auth._base_config = prev_cfg
+        request_auth._performance_manager = prev_pm
+
+
+def test_request_config_carries_key_and_drops_credentials():
+    base = _cfg()
+    with _configured(base, key=None):
+        cfg = request_auth._request_config("k-abc")
+    assert cfg is not base  # a copy: the base config is never mutated
+    assert cfg.api_key == "k-abc"
+    assert cfg.username is None
+    assert cfg.password is None
+    assert cfg.per_request_auth is True
+    assert base.api_key is None
+
+
+def test_request_config_unconfigured_fails_closed():
+    prev = request_auth._base_config
+    request_auth._base_config = None
+    try:
+        with pytest.raises(PerRequestAuthError):
+            request_auth._request_config("k")
+        with pytest.raises(PerRequestAuthError):
+            request_auth.get_connection()
+        with pytest.raises(PerRequestAuthError):
+            request_auth.get_access_controller()
+    finally:
+        request_auth._base_config = prev
+
+
+def test_get_connection_builds_once_per_request():
+    with _configured(), patch("mcp_server_odoo.request_auth.OdooConnection") as conn_cls:
+        conn = conn_cls.return_value
+        first = request_auth.get_connection()
+        second = request_auth.get_connection()
+        assert first is conn
+        assert second is conn  # memoized within the request
+        conn_cls.assert_called_once()
+        conn.connect.assert_called_once()
+        conn.authenticate.assert_called_once()
+
+
+def test_get_access_controller_builds_from_request_connection():
+    with (
+        _configured(),
+        patch("mcp_server_odoo.request_auth.OdooConnection") as conn_cls,
+        patch("mcp_server_odoo.request_auth.AccessController") as ac_cls,
+    ):
+        conn_cls.return_value.database = "cubert"
+        conn_cls.return_value.auth_method = "api_key"
+        first = request_auth.get_access_controller()
+        second = request_auth.get_access_controller()
+        assert first is ac_cls.return_value
+        assert second is first  # memoized within the request
+        ac_cls.assert_called_once()
+        assert ac_cls.call_args.kwargs["database"] == "cubert"
+        assert ac_cls.call_args.kwargs["auth_method"] == "api_key"
+
+
+def test_reset_disconnects_and_clears_request_state():
+    with _configured(), patch("mcp_server_odoo.request_auth.OdooConnection") as conn_cls:
+        conn = conn_cls.return_value
+        request_auth.get_connection()
+        request_auth.reset()
+        conn.disconnect.assert_called_once_with(suppress_logging=True)
+        # State cleared: the next access has no key and fails closed.
+        with pytest.raises(PerRequestAuthError):
+            request_auth.get_connection()
+
+
+def test_reset_swallows_disconnect_errors():
+    with _configured(), patch("mcp_server_odoo.request_auth.OdooConnection") as conn_cls:
+        conn_cls.return_value.disconnect.side_effect = RuntimeError("boom")
+        request_auth.get_connection()
+        request_auth.reset()  # cleanup must never raise
+
+
+def test_proxies_route_to_the_request_objects():
+    with (
+        _configured(),
+        patch("mcp_server_odoo.request_auth.OdooConnection") as conn_cls,
+        patch("mcp_server_odoo.request_auth.AccessController") as ac_cls,
+    ):
+        conn_cls.return_value.database = "cubert"
+        conn_cls.return_value.auth_method = "api_key"
+        conn_cls.return_value.is_authenticated = True
+        ac_cls.return_value.enabled_models = ["project.task"]
+        assert request_auth.connection_proxy().is_authenticated is True
+        assert request_auth.access_controller_proxy().enabled_models == ["project.task"]
+
+
+def test_middleware_ignores_non_http_scopes():
+    downstream = _Recorder()
+    mw = PerRequestAuthMiddleware(downstream)
+
+    async def go():
+        await mw({"type": "lifespan"}, None, None)
+
+    _run(go())
+    assert downstream.called is True  # passed through untouched
