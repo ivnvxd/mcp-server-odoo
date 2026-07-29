@@ -6,12 +6,12 @@ and functionality through the Model Context Protocol.
 
 import asyncio
 import contextlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 from mcp.server import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import __version__
+from . import __version__, request_auth
 from .access_control import AccessController
 from .config import OdooConfig, get_config
 from .error_handling import (
@@ -99,7 +99,28 @@ class OdooMCPServer:
                 return Completion(values=matches[:20])
             return None
 
+        if self.config.per_request_auth:
+            self._setup_per_request_auth()
+
         logger.info(f"Initialized Odoo MCP Server v{SERVER_VERSION}")
+
+    def _setup_per_request_auth(self) -> None:
+        """Wire per-request auth: the connection and access controller become
+        proxies that resolve to the object built for the current request's key.
+
+        No server-wide connection is created (fail-closed): any Odoo access
+        outside a request context raises. Handlers are registered eagerly here
+        (pure app decoration, no I/O) so tools exist before the first request.
+        """
+        self.performance_manager = PerformanceManager(self.config)
+        request_auth.configure(self.config, self.performance_manager)
+        # The proxies duck-type the real objects (attribute access resolves
+        # against the per-request instance), hence the casts.
+        self.connection = cast(OdooConnection, request_auth.connection_proxy())
+        self.access_controller = cast(AccessController, request_auth.access_controller_proxy())
+        self._register_resources()
+        self._register_tools()
+        logger.info("Per-request auth enabled: each request authenticates with its own API key")
 
     @contextlib.asynccontextmanager
     async def _odoo_lifespan(self, app: FastMCP):
@@ -140,6 +161,10 @@ class OdooMCPServer:
             ConnectionError: If connection fails
             ConfigurationError: If configuration is invalid
         """
+        # Per-request auth holds no server-wide connection; each request builds
+        # and tears down its own. Nothing to establish at startup.
+        if self.config.per_request_auth:
+            return
         if self.connection and self.connection.is_authenticated:
             logger.info("Reusing existing authenticated Odoo connection")
             return
@@ -210,6 +235,10 @@ class OdooMCPServer:
 
     def _cleanup_connection(self):
         """Clean up Odoo connection."""
+        # Per-request connections are closed per request (request_auth.reset);
+        # self.connection is a proxy with no state to clean up here.
+        if self.config.per_request_auth:
+            return
         if self.connection:
             try:
                 logger.info("Closing Odoo connection...")
@@ -289,6 +318,9 @@ class OdooMCPServer:
             self._warn_if_exposed(host)
             self.app.settings.host = host
             self.app.settings.port = port
+            if self.config.per_request_auth:
+                await self._run_http_per_request(host, port)
+                return
             self._preseed_session_manager()
             await self.app.run_streamable_http_async()
         except KeyboardInterrupt:
@@ -298,6 +330,33 @@ class OdooMCPServer:
         except Exception as e:
             context = ErrorContext(operation="server_run_http")
             error_handler.handle_error(e, context=context)
+
+    async def _run_http_per_request(self, host: str, port: int) -> None:
+        """Serve streamable-http with per-request API-key auth.
+
+        Runs the transport STATELESS so each POST is handled inline in the
+        request task: this is what lets the API key set by the ASGI middleware
+        reach the tool through the context variable (a stateful session would
+        dispatch the tool on a separate long-lived task the header never
+        touches). The middleware also returns a real 401 before dispatch.
+        """
+        import uvicorn
+
+        # Stateless: no server-side session state between requests, so the
+        # per-request key set in middleware is visible to the inline handler.
+        self.app.settings.stateless_http = True
+        self.app.settings.json_response = True
+
+        http_app = self.app.streamable_http_app()
+        guarded = request_auth.PerRequestAuthMiddleware(http_app, guarded_prefix="/mcp")
+
+        config = uvicorn.Config(
+            guarded,
+            host=host,
+            port=port,
+            log_level=self.config.log_level.lower(),
+        )
+        await uvicorn.Server(config).serve()
 
     def _preseed_session_manager(self) -> None:
         """Apply ODOO_MCP_SESSION_IDLE_TIMEOUT to the streamable-http transport.
@@ -364,6 +423,21 @@ class OdooMCPServer:
         if host in ("localhost", "127.0.0.1", "::1"):
             return
 
+        if self.config.per_request_auth:
+            # Per-request auth DOES gate every request: no valid API key in the
+            # Authorization header -> HTTP 401 before dispatch. So the generic
+            # "no authentication" warning would be false here. Note the real
+            # residual risk instead: bearer tokens cross the network in the
+            # clear unless TLS terminates in front.
+            logger.info(
+                "HTTP transport binding to '%s' with per-request auth: every request "
+                "must carry a valid 'Authorization: Bearer <api-key>' (else 401). Keys "
+                "are Odoo credentials sent in the clear over plain HTTP — keep this on a "
+                "trusted network or terminate TLS in front.",
+                host,
+            )
+            return
+
         message = (
             f"HTTP transport binding to '{host}' — this transport has NO built-in "
             "authentication. Anyone who can reach this port gets Odoo access with "
@@ -400,6 +474,15 @@ class OdooMCPServer:
         Returns:
             Dict with health status
         """
+        if self.config.per_request_auth:
+            # No server-wide connection to probe; liveness is what /health means
+            # here. Touching the proxy outside a request would fail closed.
+            return {
+                "status": "healthy",
+                "version": SERVER_VERSION,
+                "connection": {"connected": True, "mode": "per-request-auth"},
+            }
+
         is_connected = bool(self.connection is not None and self.connection.is_authenticated)
 
         return {
