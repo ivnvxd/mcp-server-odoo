@@ -36,7 +36,11 @@ from .schemas import (
     CallModelMethodResult,
     CreateResult,
     DeleteResult,
+    ExportAccessDeniedError,
+    ExportBlockedExceedsLimitError,
     ExportDisabledError,
+    ExportFileError,
+    ExportResult,
     ExportSuccessResult,
     FieldSelectionMetadata,
     ModelsResult,
@@ -770,7 +774,7 @@ class OdooToolHandler:
                 domain: Optional[Any] = None,
                 fields: Optional[List[str]] = None,
                 ctx: Optional[Context] = None,
-            ) -> ExportSuccessResult:
+            ) -> ExportResult:
                 """Export filtered Odoo records to a CSV file on disk.
 
                 Returns a file path, row count, file size, and 10-line preview.
@@ -1766,7 +1770,7 @@ class OdooToolHandler:
         domain: Optional[Any],
         fields: Optional[List[str]],
         ctx=None,
-    ) -> ExportSuccessResult:
+    ) -> ExportResult:
         """Handle export_records tool request."""
         try:
             with perf_logger.track_operation("tool_export_records", model=model):
