@@ -674,6 +674,45 @@ When you omit the `fields` parameter (or set it to `null`), the server automatic
 
 The default limit is 15 fields per request. Responses include metadata showing which fields were returned and how many total fields are available. You can adjust the limit with `ODOO_MCP_MAX_SMART_FIELDS` or bypass it entirely with `fields: ["__all__"]`.
 
+## Exporting Data to CSV
+
+For large data analysis workflows, use `export_records` to write filtered Odoo records to a CSV file on disk. The tool returns only a file path and a 10-line preview — not the full record set — so the chat context stays small even when exporting thousands of rows.
+
+### Example
+
+```json
+{
+  "model": "res.partner",
+  "domain": [["customer_rank", ">", 0], ["active", "=", true]],
+  "fields": ["id", "name", "email", "phone"]
+}
+```
+
+The response includes the file path, row count, file size, and a preview of the first 10 lines. Open the file with any spreadsheet tool or read it programmatically.
+
+### When to use export vs. search vs. aggregate
+
+| Tool | Best for | Context impact |
+|------|----------|---------------|
+| `search_records` | Small result sets (<100 rows) | Full records returned |
+| `export_records` | Large result sets (100s–10,000s of rows) | File path + preview only |
+| `aggregate_records` | Summary statistics (counts, sums, averages) | Server-side aggregation |
+
+### Safety limits
+
+Exports are bounded by configurable limits to prevent agents from pulling unbounded record sets and breaking the Odoo server.
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `ODOO_MCP_EXPORT_ENABLED` | `true` | Master switch. When `false`, the tool is not registered. |
+| `ODOO_MCP_MAX_EXPORT_ROWS` | `10000` | Pre-flight check rejects exports matching more rows. |
+| `ODOO_MCP_EXPORT_BATCH_SIZE` | `500` | Records fetched per `search_read` call (memory bound). |
+| `ODOO_MCP_EXPORT_DIR` | system temp | Where CSV files are written. Auto-created if missing. |
+
+If an export would exceed `ODOO_MCP_MAX_EXPORT_ROWS`, the tool returns a structured error suggesting you refine the domain or use `aggregate_records` for server-side aggregation.
+
+`export_records` is a read-only operation, so it works in read-only mode (`ODOO_YOLO=read`) without changes.
+
 ## Resources
 
 The server also provides direct access to Odoo data through resource URIs:
