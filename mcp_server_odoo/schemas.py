@@ -4,9 +4,10 @@ These models define the response schemas for MCP tools, enabling
 automatic JSON schema generation and output validation by MCP clients.
 """
 
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # --- Search Records ---
 
@@ -199,3 +200,94 @@ class CallModelMethodResult(BaseModel):
         description="Return value from Odoo (type depends on the method; may be null)",
     )
     message: str = Field(description="Human-readable summary of the call")
+
+
+# --- Export Records ---
+
+
+class ExportConfig(BaseModel):
+    """Configuration for a single export operation."""
+
+    export_dir: Path
+    max_rows: int = Field(default=10000, gt=0, le=1_000_000)
+    batch_size: int = Field(default=500, gt=0, le=10_000)
+    format: Literal["csv"] = "csv"
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class ExportSuccessResult(BaseModel):
+    """Success response for export_records."""
+
+    success: Literal[True] = True
+    file_path: str
+    file_size_bytes: int
+    row_count: int
+    truncated: bool
+    max_rows_limit: int
+    preview: list[str] = Field(..., max_length=10)
+    duration_ms: int
+    exported_at: str  # ISO 8601 timestamp
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "success": True,
+                "file_path": "/tmp/odoo-mcp-exports/odoo_export_res_partner_20260614T153022_a1b2c3d4.csv",
+                "file_size_bytes": 1248392,
+                "row_count": 8421,
+                "truncated": False,
+                "max_rows_limit": 10000,
+                "preview": [
+                    "id,name,email",
+                    "1,Acme Corp,info@acme.com",
+                    "2,Globex Inc,contact@globex.com",
+                ],
+                "duration_ms": 3420,
+                "exported_at": "2026-06-14T15:30:25.123Z",
+            }
+        }
+    )
+
+
+class ExportBlockedExceedsLimitError(BaseModel):
+    """Error when export is blocked due to exceeding row limit."""
+
+    success: Literal[False] = False
+    error: Literal["export_blocked_exceeds_limit"] = "export_blocked_exceeds_limit"
+    message: str
+    matched_count: int
+    max_rows_limit: int
+    suggestion: str
+
+
+class ExportAccessDeniedError(BaseModel):
+    """Error when access is denied to the requested model."""
+
+    success: Literal[False] = False
+    error: Literal["access_denied"] = "access_denied"
+    message: str
+
+
+class ExportDisabledError(BaseModel):
+    """Error when the export tool is disabled."""
+
+    success: Literal[False] = False
+    error: Literal["export_disabled"] = "export_disabled"
+    message: str
+
+
+class ExportFileError(BaseModel):
+    """Error when file write operation fails."""
+
+    success: Literal[False] = False
+    error: Literal["file_write_error"] = "file_write_error"
+    message: str
+
+
+# Discriminated union of all export result variants
+ExportResult = Union[
+    ExportSuccessResult,
+    ExportBlockedExceedsLimitError,
+    ExportAccessDeniedError,
+    ExportDisabledError,
+    ExportFileError,
+]
