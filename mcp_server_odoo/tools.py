@@ -28,6 +28,7 @@ from .error_handling import (
     ValidationError,
 )
 from .error_sanitizer import ErrorSanitizer
+from .export_utils import execute_export
 from .logging_config import get_logger, perf_logger
 from .odoo_connection import OdooConnection, OdooConnectionError
 from .schemas import (
@@ -35,6 +36,8 @@ from .schemas import (
     CallModelMethodResult,
     CreateResult,
     DeleteResult,
+    ExportDisabledError,
+    ExportSuccessResult,
     FieldSelectionMetadata,
     ModelsResult,
     PostMessageResult,
@@ -749,6 +752,45 @@ class OdooToolHandler:
                 model, groupby, aggregates, domain, order, limit, offset, ctx
             )
             return AggregateResult(**result)
+
+        # Export tool: conditional on export_enabled flag.
+        if self.config.export_enabled:
+
+            @self.app.tool(
+                title="Export Records",
+                annotations=ToolAnnotations(
+                    readOnlyHint=True,
+                    destructiveHint=False,
+                    idempotentHint=True,
+                    openWorldHint=True,
+                ),
+            )
+            async def export_records(
+                model: str,
+                domain: Optional[Any] = None,
+                fields: Optional[List[str]] = None,
+                ctx: Optional[Context] = None,
+            ) -> ExportSuccessResult:
+                """Export filtered Odoo records to a CSV file on disk.
+
+                Returns a file path, row count, file size, and 10-line preview.
+                Bounded by ODOO_MCP_MAX_EXPORT_ROWS (default 10000).
+                Use this for large data exports to avoid flooding the chat context.
+                Use aggregate_records for summary statistics instead of exporting.
+
+                Args:
+                    model: Odoo model name (e.g., "res.partner")
+                    domain: Odoo domain filter as a list of tuples/lists
+                        (e.g., [["active", "=", True]])
+                    fields: List of field names to export
+                        (default: ["id", "display_name"])
+
+                Returns:
+                    ExportSuccessResult on success with file metadata.
+                    Error variants on failure: ExportBlockedExceedsLimitError,
+                    ExportAccessDeniedError, ExportDisabledError, ExportFileError.
+                """
+                return await self._handle_export_records_tool(model, domain, fields, ctx)
 
         # Two-key opt-in: invisible to the client unless both flags are set.
         if self.config.is_write_allowed and self.config.enable_method_calls:
@@ -1717,6 +1759,65 @@ class OdooToolHandler:
             logger.error(f"Error in aggregate_records tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Aggregation failed: {sanitized_msg}") from e
+
+    async def _handle_export_records_tool(
+        self,
+        model: str,
+        domain: Optional[Any],
+        fields: Optional[List[str]],
+        ctx=None,
+    ) -> ExportSuccessResult:
+        """Handle export_records tool request."""
+        try:
+            with perf_logger.track_operation("tool_export_records", model=model):
+                # Feature flag check
+                if not self.config.export_enabled:
+                    return ExportDisabledError(
+                        message="export_records is disabled (ODOO_MCP_EXPORT_ENABLED=false)."
+                    )
+
+                # Authentication check
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                await self._ctx_info(ctx, f"Exporting {model}...")
+
+                # Parse domain
+                parsed_domain = self._parse_domain_input(domain)
+
+                # Resolve default fields when None or empty
+                if fields is None or fields == []:
+                    fields = await asyncio.to_thread(self._get_smart_default_fields, model)
+
+                # Execute export in thread (heavy I/O, XML-RPC + filesystem)
+                # Note: execute_export expects OdooConfig, not ExportConfig
+                result = await asyncio.to_thread(
+                    execute_export,
+                    model=model,
+                    domain=parsed_domain,
+                    fields=fields,
+                    config=self.config,
+                    odoo_connection=self.connection,
+                    access_controller=self.access_controller,
+                )
+
+                # Result is already a typed Pydantic model (success or error variant)
+                await self._ctx_info(
+                    ctx,
+                    f"Export completed: {result.row_count if hasattr(result, 'row_count') else 'error'}",
+                )
+                return result
+
+        except ValidationError:
+            raise
+        except OdooConnectionError as e:
+            raise ValidationError(
+                f"Export failed: {ErrorSanitizer.sanitize_message(str(e))}"
+            ) from e
+        except Exception as e:
+            logger.error(f"Error in export_records tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Export failed: {sanitized_msg}") from e
 
     @staticmethod
     def _parse_execute_kw_arguments(value: Optional[Any]) -> List[Any]:

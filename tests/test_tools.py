@@ -85,6 +85,7 @@ class TestOdooToolHandler:
             "post_message",
             "aggregate_records",
             "list_resource_templates",
+            "export_records",
         }
         assert set(mock_app._tools.keys()) == expected_tools
 
