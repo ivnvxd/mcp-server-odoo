@@ -29,6 +29,7 @@ class OdooConfig:
 
     # Optional fields with defaults
     database: Optional[str] = None
+    uid: Optional[int] = None
     log_level: str = "INFO"
     default_limit: int = 10
     max_limit: int = 100
@@ -88,6 +89,9 @@ class OdooConfig:
                 )
 
         # Validate numeric fields
+        if self.uid is not None and self.uid <= 0:
+            raise ValueError("ODOO_UID must be a positive integer")
+
         if self.default_limit <= 0:
             raise ValueError("ODOO_MCP_DEFAULT_LIMIT must be positive")
 
@@ -230,6 +234,15 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         except ValueError:
             raise ValueError(f"{key} must be a valid integer") from None
 
+    def get_optional_int_env(key: str) -> Optional[int]:
+        value = os.getenv(key)
+        if value is None or not value.strip():
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            raise ValueError(f"{key} must be a valid integer") from None
+
     def get_optional_float_env(key: str) -> Optional[float]:
         value = os.getenv(key)
         if value is None or not value.strip():
@@ -273,6 +286,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         username=os.getenv("ODOO_USER", "").strip() or None,
         password=os.getenv("ODOO_PASSWORD", "").strip() or None,
         database=os.getenv("ODOO_DB", "").strip() or None,
+        uid=get_optional_int_env("ODOO_UID"),
         log_level=os.getenv("ODOO_MCP_LOG_LEVEL", "INFO").strip(),
         default_limit=get_int_env("ODOO_MCP_DEFAULT_LIMIT", 10),
         max_limit=get_int_env("ODOO_MCP_MAX_LIMIT", 100),

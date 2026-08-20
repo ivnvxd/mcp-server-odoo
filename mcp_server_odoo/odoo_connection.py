@@ -808,6 +808,19 @@ class OdooConnection:
         else:
             db_name = self.auto_select_database()
 
+        # If explicit UID is configured, skip remote authentication to avoid
+        # generating res.users.log entries and save startup latency.
+        if self.config.uid is not None:
+            self._uid = self.config.uid
+            self._database = db_name
+            self._auth_method = "api_key" if self.config.uses_api_key else "password"
+            self._authenticated = True
+            logger.info(
+                f"Using configured UID {self._uid} with {self._auth_method} auth "
+                f"for database '{db_name}' (skipping remote authentication)"
+            )
+            return
+
         # Log authentication strategy
         if self.config.is_yolo_enabled:
             mode_desc = "read-only" if self.config.yolo_mode == "read" else "full access"

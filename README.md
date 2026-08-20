@@ -302,6 +302,7 @@ The server requires the following environment variables:
 | `ODOO_API_KEY` | Yes* | API key for authentication | `0ef5b399e9ee9c11b053dfb6eeba8de473c29fcd` |
 | `ODOO_USER` | Yes* | Username (if not using API key) | `admin` |
 | `ODOO_PASSWORD` | Yes* | Password (if not using API key) | `admin` |
+| `ODOO_UID` | No | Explicit user ID (bypasses `common.authenticate`, prevents `res.users.log` entries) | `2` |
 | `ODOO_DB` | No | Database name (auto-detected if not set) | `mycompany` |
 | `ODOO_LOCALE` | No | Language/locale for Odoo responses | `es_ES`, `fr_FR`, `de_DE` |
 | `ODOO_YOLO` | No | YOLO mode - bypasses MCP security (⚠️ DEV ONLY) | `off`, `read`, `true` |
@@ -312,6 +313,7 @@ The server requires the following environment variables:
 **Notes:**
 - If database listing is restricted on your server, you must specify `ODOO_DB`
 - API key authentication is recommended for better security
+- Providing `ODOO_UID` allows the server to skip the startup `common.authenticate()` call, which avoids bloating Odoo's `res.users.log` login history and saves latency
 - The server also loads environment variables from a `.env` file in the working directory
 
 #### Advanced Configuration

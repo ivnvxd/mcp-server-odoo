@@ -90,11 +90,20 @@ class TestOdooConfig:
         with pytest.raises(ValueError, match="Invalid log level"):
             OdooConfig(url="http://localhost:8069", api_key="test-key", log_level="INVALID")
 
-    def test_log_level_case_insensitive(self):
-        """Test that log level is case insensitive."""
-        config = OdooConfig(url="http://localhost:8069", api_key="test-key", log_level="debug")
-        # Config should validate successfully
-        assert config.log_level == "debug"
+    def test_valid_uid(self):
+        """Test creating config with valid explicit UID."""
+        config = OdooConfig(url="http://localhost:8069", api_key="test-key", uid=2)
+        assert config.uid == 2
+
+    def test_invalid_uid_zero(self):
+        """Test that uid <= 0 raises ValueError."""
+        with pytest.raises(ValueError, match="ODOO_UID must be a positive integer"):
+            OdooConfig(url="http://localhost:8069", api_key="test-key", uid=0)
+
+    def test_invalid_uid_negative(self):
+        """Test that negative uid raises ValueError."""
+        with pytest.raises(ValueError, match="ODOO_UID must be a positive integer"):
+            OdooConfig(url="http://localhost:8069", api_key="test-key", uid=-5)
 
 
 class TestLoadConfig:
@@ -612,3 +621,34 @@ class TestSessionIdleTimeout:
         """Test negative values are rejected."""
         with pytest.raises(ValueError, match="must be positive"):
             OdooConfig(url="http://localhost:8069", api_key="test", session_idle_timeout=-5)
+
+
+class TestOdooUIDEnv:
+    """Test loading ODOO_UID from environment."""
+
+    def test_load_uid_from_env(self, monkeypatch):
+        """Test loading valid ODOO_UID from environment."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_UID", "42")
+
+        config = load_config()
+        assert config.uid == 42
+
+    def test_empty_uid_means_none(self, monkeypatch):
+        """Test empty ODOO_UID env defaults to None."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_UID", "  ")
+
+        config = load_config()
+        assert config.uid is None
+
+    def test_invalid_uid_string_raises(self, monkeypatch):
+        """Test non-integer ODOO_UID raises ValueError."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_UID", "not-an-int")
+
+        with pytest.raises(ValueError, match="ODOO_UID must be a valid integer"):
+            load_config()

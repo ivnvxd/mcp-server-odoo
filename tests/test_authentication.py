@@ -672,6 +672,52 @@ class TestYoloModeAuthentication:
             assert conn._auth_method == "password"
             assert conn._uid == 2
 
+    def test_authenticate_with_explicit_uid(self):
+        """Test that configuring an explicit UID bypasses remote authentication."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            database="testdb",
+            uid=42,
+        )
+        conn = OdooConnection(config)
+        conn._connected = True
+
+        mock_common = Mock()
+        conn._common_proxy = mock_common
+
+        with (
+            patch.object(conn, "_authenticate_api_key") as mock_api,
+            patch.object(conn, "_authenticate_password") as mock_pwd,
+        ):
+            conn.authenticate("testdb")
+
+            mock_api.assert_not_called()
+            mock_pwd.assert_not_called()
+            mock_common.authenticate.assert_not_called()
+            assert conn.is_authenticated
+            assert conn.uid == 42
+            assert conn.database == "testdb"
+            assert conn.auth_method == "api_key"
+
+    def test_authenticate_with_explicit_uid_password_auth(self):
+        """Test explicit UID with username/password configuration."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            username="admin",
+            password="secretpassword",
+            database="testdb",
+            uid=7,
+        )
+        conn = OdooConnection(config)
+        conn._connected = True
+
+        conn.authenticate("testdb")
+        assert conn.is_authenticated
+        assert conn.uid == 7
+        assert conn.database == "testdb"
+        assert conn.auth_method == "password"
+
 
 if __name__ == "__main__":
     # Run integration tests when executed directly
