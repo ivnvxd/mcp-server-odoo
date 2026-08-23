@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`export_records` MCP tool**: write filtered Odoo records to a CSV file on disk, returning only a file path and a 10-line preview to keep chat context small. Hard row limits and a pre-flight `search_count` make it safe for data-analysis agents to pull large result sets without breaking the Odoo server. Honors `ODOO_YOLO=read` (it's a read operation).
+- **`ODOO_MCP_EXPORT_ENABLED`** (default `true`): master switch — when `false`, the `export_records` tool is not registered.
+- **`ODOO_MCP_MAX_EXPORT_ROWS`** (default `10000`): pre-flight `search_count` blocks exports that would match more rows than this.
+- **`ODOO_MCP_EXPORT_BATCH_SIZE`** (default `500`): records fetched per `search_read` call (memory bound for streaming writes).
+- **`ODOO_MCP_EXPORT_DIR`** (default `$TMPDIR/odoo-mcp-exports`): where CSV files are written; auto-created if missing.
+- **CSV export details**: UTF-8 with BOM (Excel-compatible), RFC 4180 quoting, atomic writes via temp file + `os.replace`, 16-char sha256 domain hash in the audit log (full domain never logged), Windows path-length validation.
+
 ## [0.7.1] - 2026-06-12
 
 ### Added

@@ -6,6 +6,7 @@ for connecting to Odoo via XML-RPC.
 
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Literal, Optional
@@ -53,6 +54,12 @@ class OdooConfig:
 
     # Allowed hosts for DNS rebinding protection (HTTP transport)
     allowed_hosts: list[str] = field(default_factory=list)
+
+    # Export tool configuration
+    export_enabled: bool = True
+    export_max_rows: int = 10000
+    export_batch_size: int = 500
+    _export_dir: Optional[Path] = None  # None means use system temp default
 
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -121,6 +128,16 @@ class OdooConfig:
         if self.session_idle_timeout is not None and self.session_idle_timeout <= 0:
             raise ValueError("ODOO_MCP_SESSION_IDLE_TIMEOUT must be positive")
 
+        # Validate export configuration
+        if self.export_batch_size < 1:
+            raise ValueError("ODOO_MCP_EXPORT_BATCH_SIZE must be at least 1")
+
+        if self.export_max_rows < 1:
+            raise ValueError("ODOO_MCP_MAX_EXPORT_ROWS must be at least 1")
+
+        if self.export_batch_size > self.export_max_rows:
+            raise ValueError("ODOO_MCP_EXPORT_BATCH_SIZE cannot exceed ODOO_MCP_MAX_EXPORT_ROWS")
+
         # Without this warning, the silent non-registration is hard to debug.
         if self.enable_method_calls and self.yolo_mode != "true":
             logger.warning(
@@ -148,6 +165,27 @@ class OdooConfig:
     def is_write_allowed(self) -> bool:
         """Check if write operations are allowed in current mode."""
         return self.yolo_mode == "true"
+
+    @property
+    def export_dir(self) -> Path:
+        """Get the export directory, creating it if needed.
+
+        Returns:
+            Path: The export directory path, created if it didn't exist
+
+        Note:
+            If _export_dir is None, defaults to system temp directory + 'odoo-mcp-exports'.
+            The directory is created with parents=True, exist_ok=True on first access.
+        """
+        if self._export_dir is None:
+            self._export_dir = Path(tempfile.gettempdir()) / "odoo-mcp-exports"
+        self._export_dir.mkdir(parents=True, exist_ok=True)
+        return self._export_dir
+
+    @property
+    def is_export_allowed(self) -> bool:
+        """Check if the export tool is allowed to run."""
+        return self.export_enabled
 
     def get_endpoint_paths(self) -> Dict[str, str]:
         """Get appropriate endpoint paths based on mode.
@@ -266,6 +304,13 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
             return []
         return [h.strip() for h in hosts.split(",") if h.strip()]
 
+    # Helper function to parse export directory
+    def get_export_dir() -> Optional[Path]:
+        value = os.getenv("ODOO_MCP_EXPORT_DIR", "").strip()
+        if not value:
+            return None
+        return Path(value)
+
     # Create configuration
     config = OdooConfig(
         url=os.getenv("ODOO_URL", "").strip(),
@@ -285,6 +330,10 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         yolo_mode=get_yolo_mode(),
         enable_method_calls=get_bool_env("ODOO_MCP_ENABLE_METHOD_CALLS", False),
         allowed_hosts=parse_allowed_hosts(),
+        export_enabled=get_bool_env("ODOO_MCP_EXPORT_ENABLED", True),
+        export_max_rows=get_int_env("ODOO_MCP_MAX_EXPORT_ROWS", 10000),
+        export_batch_size=get_int_env("ODOO_MCP_EXPORT_BATCH_SIZE", 500),
+        _export_dir=get_export_dir(),
     )
 
     return config
