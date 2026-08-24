@@ -5,10 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - Unreleased
+
+### Added
+- **`get_current_context` tool**: returns the connected user, timezone, company scope and UTC guidance as structured data.
+- **Personalized `initialize` instructions**: the same context block is sent at handshake (UTC-only fallback when the user read fails).
+- **`get_fields` tool**: schema discovery with curated attributes by default; honors `field_names` and `attributes`.
+- **Binary & attachment resources**: `odoo://{model}/record/{id}/{field}` and `odoo://attachment/{id}`, served with per-read mimeTypes.
+- **No inlined base64**: populated binary fields are returned as fetchable resource URIs instead (reads use `bin_size`).
+- **x2many previews**: `get_record` returns display-name summaries for small collections in `related_summaries`.
+- **Inverse-field drilldown hints**: the record resource's one2many "view all" filters on the inverse field (generic `res_id` inverses and domain-restricted one2manys keep the id-in domain).
+- **Offset depth cap**: offsets are capped at 1000 pages of `limit`, floored at 10,000 rows.
+- **`aggregate_records` pagination**: reports `has_more` and `next_hint`.
+- **`aggregate_records` overall totals**: an omitted or empty `groupby` returns a single overall row.
+- **`post_message` subject**: optional `subject` argument.
+- **Archived records**: the record resource serves them (`active_test=False`), matching what `get_record` already returned.
+- **`all_fields_fallback`**: new `field_selection_method` value, reported when smart selection is unavailable and every field was read.
+
+### Security
+- **Attachment reads gate on the attached-to model**: `res_model` is checked alongside `ir.attachment`, so enabling that one model no longer exposes every attachment body on the database.
+- **Attachment metadata is gated too**: the `search_records`/`get_record`/`aggregate_records` tools and the record/search/count resources scope `ir.attachment` to `res_model`s the caller may read — a row carries `url` and `index_content` (the extracted document text). An allowlist the module cannot report fails closed, as a retryable "could not verify access".
+- **Attachment writes are gated too**: `create_record`/`update_record`/`delete_record` and `post_message`'s `attachment_ids` check the attached-to model. An ungated `update_record` could repoint an excluded model's attachment at an allowed one and then read it back, bypassing the read gate entirely.
+- **`run_http()` host/port removed**: it reassigned `app.settings.host` after FastMCP had already chosen transport security from `config.host`, so an embedder could bind loopback with DNS-rebinding protection left off; the bind now always follows `config.host`/`config.port`.
+- **Internal endpoints in error text**: hostnames, private IPs, ports and URLs are scrubbed from sanitized messages — a connection or DNS failure quotes the endpoint it tried, and the `ERROR_MAPPINGS` branch returned before the removal patterns ran.
+- **`ODOO_MCP_ALLOWED_HOSTS` Origin ports**: an entry that pins a port now pins it for `Origin` too; the wildcard `:*` origin trusted a page served from any other port on the same host.
+- **`ODOO_MCP_MAX_BINARY_SIZE`** (default 50 MB): bounds a single binary/attachment read, checked before the payload is fetched.
+- **Sensitive-field filtering**: credential-named fields are withheld from bulk reads with an explanatory note; explicitly named fields are still returned. Covers `*password`/`*_pass`/`*secret`/`*_token`, the `*_api_key`/`*_hmac_key`/`*_signature_key` compounds, OAuth refresh tokens, passkeys, salts, OTP secrets and PINs, including trailing-underscore spellings (`pass_`, `api_key_`).
+- **Credential-shaped log keys**: write-payload logging now uses the same detector as the read paths, so `smtp_pass`/`webhook_secret` are redacted instead of logged in cleartext.
+- **`call_model_method` alias gaps**: `copy_data`, `copy_multi`, `update`, `get_view` and `get_views` are refused alongside the primitives they alias.
+- **Sanitized error mappings**: captured fault text is scrubbed before interpolation — file paths, host:port pairs and memory addresses no longer reach the client through `ERROR_MAPPINGS`.
+- **`call_model_method` hardening**: rejects `ir.actions.*`/`ir.cron`, the `web_*` family, and ORM CRUD primitives; list results truncate at 100 items.
+
+### Fixed
+- **Smart field selection**: the non-stored score cap gated on a `compute` key `fields_get()` never returns; it now gates on `store=False` (related fields exempt).
+- **Oversized record ids**: ids outside the XML-RPC 32-bit range are rejected with a clean validation error before any RPC.
+- **Oversized ints in domains, values and method arguments**: domains, `create_record`/`update_record` values and `call_model_method` arguments are all range-checked, instead of an `OverflowError` surfacing as `Connection error: Operation failed`.
+- **YOLO `list_models` cap**: the silent 200-model cap is gone — listings truncate at 500 with an explicit note and the real total.
+- **YOLO `list_models` filter**: the system-model exclusion is prefix-anchored (`!` + `=like`); plain `like` matched substrings and hid every model merely containing `ir.`/`base.` (`repair.*`, ...).
+- **Fault classification**: business faults route on Odoo's `faultCode` (2 = UserError/ValidationError, 4 = AccessError), the only signal `/xmlrpc/2/*` sends — previously every business error read as `Connection error: Operation failed:`.
+- **Business error line structure**: multi-line messages keep their newlines, and trailing `CONTEXT:`/`HINT:` lines are no longer stripped from business exceptions (psycopg2 diagnostics still are).
+- **Traceback frame detection**: a frame is matched by shape, so a business message quoting a filename at line start is no longer mistaken for one and truncated.
+- **Unsanitized error paths**: the record, search, count and fields resource handlers scrub the exception before surfacing it.
+- **Non-loopback bind warning**: the HTTP startup warning now also states that DNS-rebinding protection is off unless `ODOO_MCP_ALLOWED_HOSTS` is set.
+- **`ODOO_MCP_ALLOWED_HOSTS` port-less authority**: a port-less entry now also allows the bare `Host`/`Origin` a proxy sends on 80/443, which previously matched nothing.
+- **`ODOO_MCP_ALLOWED_HOSTS` IPv6**: bracketed and bare literals are parsed and normalized instead of producing junk patterns that locked the deployment out.
+- **HTTP session teardown**: keys off the transport that actually started, so `run_http()` under a default stdio config no longer strands tool handlers on a dead connection (#70).
+- **`aggregate_records` groupby collision**: aggregating a field that is also a groupby key is refused on the pre-19 path instead of returning corrupted groups.
+- **`aggregate_records` duplicate aggregates**: two aggregates over one field are refused on the pre-19 path, where `read_group` dropped one and mislabeled the other.
+- **`__extra_domain` drilldown contract**: documented as the group's own condition, to be ANDed with the caller's `domain`.
+- **`list_resource_templates`**: unreadable models are filtered out when `/mcp/models` reports per-model `operations` (best-effort — older modules omit the block and everything stays listed).
+- **`id:` aggregates on Odoo 15/16**: refused with an explanation — `read_group` deletes the `id` key before returning, so the value silently never arrived.
+- **`__extra_domain` on overall totals**: emitted as `[]` for `groupby=[]` on every version; Odoo 15/16 omit the key entirely.
+- **Unbalanced domains**: a domain whose `&`/`|`/`!` operators lack operands is rejected with a clear message before any RPC, instead of reaching Odoo as a server-side "syntactically not correct".
+- **Deeply nested `domain`/`fields` strings**: reported as an invalid parameter instead of an unexpected failure — `json.loads` recurses per nesting level, so a 2 KB `[[[[...]]]]` exhausted the stack.
+- **Mutated caller context dicts**: `search()`, `read()` and `search_read()` copy the `context` they are given — `execute_kw` injects the locale into it, so a caller reusing one dict accumulated our keys.
+- **Caller-supplied invalid `lang`**: no longer blamed on `ODOO_MCP_LOCALE` — a bad context language used to null the configured locale for every later request in the process.
+- **`ModelInfo.operations` description**: was "Allowed operations (standard mode only)"; now states it is null in YOLO mode, where the flags are global and reported once under `yolo_mode.operations`.
+- **Session cookie race**: the REST session id is read under the lock that creates it, so a concurrent 401 handler can no longer produce `Cookie: session_id=None`.
+
+### Changed
+- **`list_models` counts**: `total` is the number of models returned and `total_available` the database count; both are emitted in every mode.
+- **YOLO `list_models` rows**: no longer repeat the global `operations` dict on every row — it is reported once under `yolo_mode.operations` (46.6 KB to 28.5 KB for 319 models).
+- **Stored binaries in resource reads**: the record/search resources previously skipped every binary field; stored ones are now read under `bin_size` and rendered as fetchable URIs. Non-stored ones stay out — `bin_size` cannot short-circuit a compute (`sale.order.tax_totals` made a 10-row read 3.3x slower).
+- **Default search resource reads**: `odoo://{model}/search` reads only the fields its one-line summary renders, instead of every safe field of every record and then discarding them.
+- **`mcp` floor raised to 1.27**: `session_idle_timeout` is passed to `StreamableHTTPSessionManager`, which does not accept it before 1.27.
+
+### Removed
+- **`build_search_uri`**: unused public helper removed from `uri_schema`.
+- **`Cache.invalidate_pattern`**: orphaned when the record cache was removed.
+
 ## [0.7.1] - 2026-06-12
 
 ### Added
-- **`ODOO_MCP_ALLOWED_HOSTS`**: comma-separated `Host` headers to accept for the `streamable-http` transport (DNS-rebinding protection). Needed when running behind a reverse proxy that forwards an external host; unset preserves the prior default (no host validation) (#45, @Miriup).
+- **`ODOO_MCP_ALLOWED_HOSTS`**: comma-separated `Host` headers to accept for the `streamable-http` transport (DNS-rebinding protection). Needed when running behind a reverse proxy that forwards an external host; unset preserves the prior behavior (the SDK auto-enables protection for a loopback bind only) (#45, @Miriup).
 - **`ODOO_MCP_SESSION_IDLE_TIMEOUT`**: seconds of inactivity before a `streamable-http` session is closed and its server-side state freed; unset preserves the prior behavior (sessions never expire).
 
 ### Changed

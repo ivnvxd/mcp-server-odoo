@@ -5,13 +5,18 @@ letting all OdooConnection logic (argument building, caching,
 performance tracking, error handling) run for real.
 """
 
+import socket
 import xmlrpc.client
 from unittest.mock import Mock
 
 import pytest
 
 from mcp_server_odoo.config import OdooConfig
-from mcp_server_odoo.odoo_connection import OdooConnection, OdooConnectionError
+from mcp_server_odoo.odoo_connection import (
+    OdooConnection,
+    OdooConnectionError,
+    OdooValidationFault,
+)
 
 
 @pytest.fixture
@@ -373,14 +378,15 @@ class TestExecuteKwErrorHandling:
         assert result is None
 
     def test_other_xmlrpc_fault_still_raises(self, connected_connection):
-        """A regular Odoo Fault is still wrapped as OdooConnectionError."""
+        """A regular Odoo Fault still raises (not swallowed like marshal-None);
+        field-validation faults are classified as OdooValidationFault."""
         conn = connected_connection
         conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
             1,
             "ValueError: Invalid field 'bad_field' on model 'res.partner'",
         )
 
-        with pytest.raises(OdooConnectionError, match="Operation failed"):
+        with pytest.raises(OdooValidationFault, match="Invalid field"):
             conn.execute_kw("res.partner", "do_thing", [[1]], {})
 
     def test_marshal_none_substring_alone_does_not_swallow(self, connected_connection):
@@ -394,8 +400,132 @@ class TestExecuteKwErrorHandling:
             "ValidationError: User said 'cannot marshal None' in a message — distinct fault",
         )
 
-        with pytest.raises(OdooConnectionError, match="Operation failed"):
+        with pytest.raises(OdooConnectionError):
             conn.execute_kw("res.partner", "do_thing", [[1]], {})
+
+    def test_validation_fault_classified(self, connected_connection):
+        """A traceback-style fault carrying odoo.exceptions.ValidationError
+        raises OdooValidationFault with the clean user-facing message."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            1,
+            "Traceback (most recent call last):\n"
+            '  File "/opt/odoo/odoo/api.py", line 525, in call_kw\n'
+            "    result = getattr(recs, name)(*args, **kwargs)\n"
+            "odoo.exceptions.ValidationError: The operation cannot be completed: "
+            "a partner cannot follow itself",
+        )
+
+        with pytest.raises(OdooValidationFault) as exc_info:
+            conn.execute_kw("res.partner", "write", [[1], {"parent_id": 1}], {})
+
+        message = str(exc_info.value)
+        assert "Operation failed" not in message
+        assert message == ("The operation cannot be completed: a partner cannot follow itself")
+
+    def test_user_error_fault_carries_business_message(self, connected_connection):
+        """A UserError fault surfaces the actual business message, without
+        the connection-flavored 'Operation failed' prefix."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            1,
+            "Traceback (most recent call last):\n"
+            '  File "/opt/odoo/odoo/api.py", line 525, in call_kw\n'
+            "odoo.exceptions.UserError: You cannot delete a posted journal entry.",
+        )
+
+        with pytest.raises(OdooValidationFault) as exc_info:
+            conn.execute_kw("account.move", "unlink", [[5]], {})
+
+        assert str(exc_info.value) == "You cannot delete a posted journal entry."
+
+    def test_missing_error_fault_classified_as_validation(self, connected_connection):
+        """A MissingError fault is a business fault → OdooValidationFault with the
+        canned 'record not found' message, not the connection-flavored wrap."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            1,
+            "Traceback (most recent call last):\n"
+            '  File "/opt/odoo/odoo/models.py", line 1, in browse\n'
+            "odoo.exceptions.MissingError: Record does not exist or has been deleted.",
+        )
+
+        with pytest.raises(OdooValidationFault) as exc_info:
+            conn.execute_kw("res.partner", "read", [[999999]], {})
+
+        assert str(exc_info.value) == "The requested record was not found"
+
+    def test_object_does_not_exist_fault_classified_as_validation(self, connected_connection):
+        """An 'Object does not exist' fault is a business fault → OdooValidationFault."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            1, "Object does not exist: res.partner(999,)"
+        )
+
+        with pytest.raises(OdooValidationFault) as exc_info:
+            conn.execute_kw("res.partner", "read", [[999]], {})
+
+        assert str(exc_info.value) == "The requested resource does not exist"
+
+    def test_access_error_fault_classified_as_validation(self, connected_connection):
+        """A leading AccessError fault is a business condition (record
+        rules/ACLs) — OdooValidationFault carrying Odoo's actionable
+        modify/groups explanation, with no 'Operation failed' prefix."""
+        conn = connected_connection
+        message = (
+            "You are not allowed to modify 'Contact' (res.partner).\n"
+            "This operation is allowed for the following groups:\n"
+            "- Administration/Settings"
+        )
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            1,
+            "Traceback (most recent call last):\n"
+            '  File "/opt/odoo/odoo/models.py", line 3720, in write\n'
+            "    self.check_access_rights('write')\n"
+            f"odoo.exceptions.AccessError: {message}",
+        )
+
+        with pytest.raises(OdooValidationFault) as exc_info:
+            conn.execute_kw("res.partner", "write", [[1], {"name": "X"}], {})
+
+        assert str(exc_info.value) == message
+        assert "Operation failed" not in str(exc_info.value)
+
+    def test_access_denied_fault_stays_connection_error(self, connected_connection):
+        """The literal 'Access Denied' login/credentials fault (no leading
+        class) stays a plain OdooConnectionError — it indicates auth setup,
+        not record rules — never an OdooValidationFault."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(1, "Access Denied")
+
+        with pytest.raises(OdooConnectionError) as exc_info:
+            conn.execute_kw("res.partner", "search", [[]], {})
+
+        assert not isinstance(exc_info.value, OdooValidationFault)
+
+    def test_socket_timeout_stays_connection_error(self, connected_connection):
+        """A transport timeout is a connection problem, never a validation fault."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.side_effect = socket.timeout()
+
+        with pytest.raises(OdooConnectionError) as exc_info:
+            conn.execute_kw("res.partner", "search", [[]], {})
+
+        assert not isinstance(exc_info.value, OdooValidationFault)
+        assert "timeout" in str(exc_info.value)
+
+    def test_generic_fault_stays_connection_error(self, connected_connection):
+        """A fault without business-error markers keeps the historical
+        connection-flavored 'Operation failed' wrapping."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            1, "RuntimeError: something unexpected broke"
+        )
+
+        with pytest.raises(OdooConnectionError, match="Operation failed") as exc_info:
+            conn.execute_kw("res.partner", "search", [[]], {})
+
+        assert not isinstance(exc_info.value, OdooValidationFault)
 
 
 class TestTimeoutRetryGating:
@@ -427,3 +557,81 @@ class TestTimeoutRetryGating:
         conn.execute_kw("sale.order", "action_confirm", [[1]], {})
 
         assert conn._object_proxy("transport").timeout_retry_safe is False
+
+
+class TestFaultCodeClassification:
+    """Odoo's /xmlrpc/2/* endpoint classifies exceptions in the fault CODE and
+    sends the message bare, so code-first routing is the only thing that works.
+    """
+
+    @pytest.mark.parametrize(
+        "code,label",
+        [(2, "RPC_FAULT_CODE_WARNING"), (4, "RPC_FAULT_CODE_ACCESS_ERROR")],
+    )
+    def test_business_codes_surface_without_connection_prefix(self, code, label):
+        from mcp_server_odoo.odoo_connection import _raise_for_fault
+
+        fault = xmlrpc.client.Fault(code, "You cannot create recursive Partner hierarchies.")
+        with pytest.raises(OdooValidationFault) as exc:
+            _raise_for_fault(fault)
+
+        message = str(exc.value)
+        assert message == "You cannot create recursive Partner hierarchies."
+        assert "Operation failed" not in message, f"{label} must not read as a transport error"
+        assert "Connection error" not in message
+
+    def test_access_denied_code_stays_connection_flavored(self):
+        """faultCode 3 is a rejected login — auth setup, not a record rule."""
+        from mcp_server_odoo.odoo_connection import _raise_for_fault
+
+        fault = xmlrpc.client.Fault(3, "Access Denied")
+        with pytest.raises(OdooConnectionError) as exc:
+            _raise_for_fault(fault)
+        assert not isinstance(exc.value, OdooValidationFault)
+        assert "Operation failed" in str(exc.value)
+
+    def test_application_error_code_stays_connection_flavored(self):
+        from mcp_server_odoo.odoo_connection import _raise_for_fault
+
+        fault = xmlrpc.client.Fault(1, "Traceback (most recent call last):\nValueError: boom")
+        with pytest.raises(OdooConnectionError) as exc:
+            _raise_for_fault(fault)
+        assert not isinstance(exc.value, OdooValidationFault)
+
+    def test_non_integer_fault_code_falls_back_to_string_routing(self):
+        """Legacy /xmlrpc/1 sends string fault codes — must not crash."""
+        from mcp_server_odoo.odoo_connection import _raise_for_fault
+
+        fault = xmlrpc.client.Fault("warning -- MissingError", "gone")
+        with pytest.raises(OdooConnectionError):
+            _raise_for_fault(fault)
+
+
+class TestLogRedactionUsesCentralDetector:
+    """Reads withhold credential-named fields; write-payload logging must not
+    print those same values in cleartext."""
+
+    def test_credential_shaped_keys_are_redacted(self):
+        from mcp_server_odoo.odoo_connection import _redact_values
+
+        out = _redact_values(
+            {
+                "name": "Acme",
+                "smtp_pass": "hunter2",
+                "webhook_secret": "s3cr3t",
+                "openai_api_key": "sk-xxx",
+                "password": "p",
+                "child": {"api_key_": "nested"},
+            }
+        )
+
+        assert out["name"] == "Acme"
+        for key in ("smtp_pass", "webhook_secret", "openai_api_key", "password"):
+            assert out[key] == "***", f"{key} leaked into logs"
+        assert out["child"]["api_key_"] == "***"
+
+    def test_benign_lookalikes_are_not_redacted(self):
+        from mcp_server_odoo.odoo_connection import _redact_values
+
+        out = _redact_values({"max_tokens": 4096, "sort_key": "name", "commit_hash": "abc"})
+        assert out == {"max_tokens": 4096, "sort_key": "name", "commit_hash": "abc"}

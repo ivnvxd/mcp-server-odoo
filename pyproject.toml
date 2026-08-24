@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-server-odoo"
-version = "0.7.1"
+version = "0.8.0"
 description = "A Model Context Protocol server for Odoo ERP systems"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,7 +31,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "mcp>=1.26.0,<2",
+    # 1.27 is the floor: _preseed_session_manager passes
+    # StreamableHTTPSessionManager(session_idle_timeout=...), which does not
+    # exist before it — under a resolved 1.26.x wheel the HTTP transport
+    # crashes at startup whenever ODOO_MCP_SESSION_IDLE_TIMEOUT is set.
+    "mcp>=1.27.0,<2",
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",

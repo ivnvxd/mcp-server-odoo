@@ -1,6 +1,6 @@
 """MCP Server for Odoo - Model Context Protocol server for Odoo ERP systems."""
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 __author__ = "Andrey Ivanov"
 __license__ = "MPL-2.0"
 

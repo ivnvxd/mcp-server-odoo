@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from mcp_server_odoo.field_security import is_sensitive_field_name
 from mcp_server_odoo.tools import OdooToolHandler
 
 
@@ -61,6 +62,105 @@ class TestSmartFieldSelection:
         field_info = {"type": "char", "compute": "some_method", "store": True, "searchable": True}
         score = tool_handler._score_field_importance("computed_field", field_info)
         assert score > 30  # Should get base type score + storage + searchability bonuses
+
+    def test_score_field_importance_non_stored_without_compute_key(self, tool_handler):
+        """Non-stored fields are capped even without a `compute` key.
+
+        fields_get() never returns a `compute` key, so the cap must gate on
+        `store` alone (store=False <=> computed or related).
+        """
+        field_info = {"type": "char", "store": False}
+        score = tool_handler._score_field_importance("related_field", field_info)
+        assert score <= 30
+
+    def test_score_field_importance_related_non_stored_not_capped(self, tool_handler):
+        """Non-stored fields with a `related` attribute escape the score cap.
+
+        Related fields resolve via cheap joins (incl. _inherits delegation),
+        not per-row compute — they score like a normal field, minus only the
+        store bonus.
+        """
+        related_info = {
+            "type": "char",
+            "store": False,
+            "related": "partner_id.name",
+            "searchable": True,
+        }
+        stored_info = {"type": "char", "store": True, "searchable": True}
+
+        related_score = tool_handler._score_field_importance("partner_name", related_info)
+        stored_score = tool_handler._score_field_importance("partner_name", stored_info)
+
+        assert related_score > 30  # not capped
+        assert related_score == stored_score - 80  # misses only the store bonus
+
+    def test_get_smart_default_fields_non_stored_loses_to_stored(self, tool_handler):
+        """Non-stored fields rank below stored fields even with high raw scores."""
+        mock_fields = {
+            "id": {"type": "integer"},
+            "name": {"type": "char", "required": True},
+            "display_name": {"type": "char"},
+            "stored_field": {"type": "char", "store": True, "searchable": True},
+            # Would outscore stored_field without the cap (required + business patterns)
+            "amount_total": {"type": "float", "store": False, "required": True},
+        }
+        tool_handler.connection.fields_get.return_value = mock_fields
+        tool_handler.config.max_smart_fields = 4
+
+        result = tool_handler._get_smart_default_fields("res.partner")
+
+        assert "stored_field" in result
+        assert "amount_total" not in result
+
+    def test_get_smart_default_fields_related_non_stored_makes_the_cut(self, tool_handler):
+        """A related non-stored business field outranks a weaker stored field.
+
+        With the old blanket cap, list_price would be pinned at 30 and lose
+        the last slot to the stored text field.
+        """
+        mock_fields = {
+            "id": {"type": "integer"},
+            "name": {"type": "char", "required": True},
+            "display_name": {"type": "char"},
+            "notes": {"type": "text", "store": True, "searchable": False},
+            "list_price": {
+                "type": "float",
+                "store": False,
+                "searchable": True,
+                "related": "product_tmpl_id.list_price",
+            },
+        }
+        tool_handler.connection.fields_get.return_value = mock_fields
+        tool_handler.config.max_smart_fields = 4
+
+        result = tool_handler._get_smart_default_fields("product.product")
+
+        assert "list_price" in result
+        assert "notes" not in result
+
+    def test_score_field_importance_sensitive_fields(self, tool_handler):
+        """Credential-like fields score 0 even with otherwise-high-scoring metadata."""
+        field_info = {"type": "char", "required": True, "store": True, "searchable": True}
+        assert tool_handler._score_field_importance("api_key", field_info) == 0
+        assert tool_handler._score_field_importance("webhook_secret", field_info) == 0
+        # `*_pass` credential field (e.g. ir.mail_server.smtp_pass)
+        assert tool_handler._score_field_importance("smtp_pass", field_info) == 0
+
+    def test_get_smart_default_fields_excludes_sensitive(self, tool_handler):
+        """Smart defaults never include credential-like fields."""
+        mock_fields = {
+            "id": {"type": "integer"},
+            "name": {"type": "char", "required": True},
+            "openai_api_key": {"type": "char", "store": True, "searchable": True},
+            "user_password": {"type": "char", "store": True, "searchable": True},
+        }
+        tool_handler.connection.fields_get.return_value = mock_fields
+
+        result = tool_handler._get_smart_default_fields("res.partner")
+
+        assert "openai_api_key" not in result
+        assert "user_password" not in result
+        assert "name" in result
 
     def test_score_field_importance_relation_fields(self, tool_handler):
         """Test scoring of relation fields."""
@@ -240,7 +340,24 @@ class TestSmartFieldSelection:
         assert result.metadata is None
 
         # Should have called read with None (all fields)
-        tool_handler.connection.read.assert_called_once_with("res.partner", [1], None)
+        tool_handler.connection.read.assert_called_once_with(
+            "res.partner", [1], None, {"bin_size": True}
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_record_all_fields_strips_smtp_pass(self, tool_handler):
+        """`*_pass` credential fields are stripped from an __all__ read."""
+        tool_handler.connection.is_authenticated = True
+        tool_handler.connection.read.return_value = [
+            {"id": 1, "name": "Mail Server", "smtp_pass": "hunter2"}
+        ]
+
+        result = await tool_handler._handle_get_record_tool("ir.mail_server", 1, ["__all__"])
+
+        assert "smtp_pass" not in result.record
+        assert result.record["name"] == "Mail Server"
+        assert result.metadata is not None
+        assert "smtp_pass" in result.metadata.note
 
     @pytest.mark.asyncio
     async def test_get_record_with_specific_fields(self, tool_handler):
@@ -259,7 +376,9 @@ class TestSmartFieldSelection:
         assert result.metadata is None
 
         # Should have called read with specific fields
-        tool_handler.connection.read.assert_called_once_with("res.partner", [1], fields)
+        tool_handler.connection.read.assert_called_once_with(
+            "res.partner", [1], fields, {"bin_size": True}
+        )
 
     def test_field_selection(self, tool_handler):
         """Test that expected fields are selected by smart defaults."""
@@ -294,3 +413,136 @@ class TestSmartFieldSelection:
         # The exact order depends on the scoring algorithm and essential field processing
         # Just verify the expected fields are present in correct quantity
         assert set(result) == {"active", "name", "display_name", "id", "email", "city", "zip"}
+
+
+class TestSensitiveFieldNames:
+    """Test the credential-like field name heuristic."""
+
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "password",
+            "user_password",
+            "webhook_secret",
+            "client_secret",
+            "auth_token",
+            "openai_api_key",
+            "stripe_secret_key",
+            "aws_access_key",
+            "api_key",
+            "secret_key",
+            "apikey",
+            # `*_pass` credential fields — Odoo core's ir.mail_server.smtp_pass
+            # has final segment `pass`, so it is now flagged.
+            "smtp_pass",
+            "pass",
+            "mail_pass",
+            # Normalized final segment: trailing digits stripped ...
+            "password2",
+            "passwd2",
+            # ... and trailing all-digit segments dropped.
+            "password_2",
+            "smtp_pass_2",
+            "api_key_2",
+            "token_2",
+            # No-underscore compounds mirroring the `*_key` sequences.
+            "privatekey",
+            "accesskey",
+            # A trailing hash/value/digest suffix names the representation of
+            # the credential, not a new concept — popped before the marker
+            # checks.
+            "password_hash",
+            "secret_value",
+            "api_token_hash",
+            "api_key_hash",
+            # Every marker added for the OAuth/WebAuthn/OTP and payment-signing
+            # families. Without one case each, deleting any single entry from
+            # SENSITIVE_FIELD_MARKERS / SENSITIVE_MARKER_SEQUENCES leaves the
+            # suite green while that family leaks back into bulk reads.
+            "refresh_rtoken",
+            "webauthn_passkey",
+            "password_salt",
+            "salt",
+            "mfa_otp",
+            # hr.employee.pin / POS pin — the only match this heuristic finds
+            # on a stock Odoo 19 database.
+            "pin",
+            "employee_pin",
+            # ECPay's AES signing pair, spelled without a separator.
+            "l10n_tw_edi_ecpay_hashkey",
+            "l10n_tw_edi_ecpay_hashiv",
+            # Payment/webhook signing material, as trailing `*_key` compounds.
+            "stripe_hmac_key",
+            "payment_signature_key",
+            "authorize_transaction_key",
+            "provider_hash_key",
+            "vault_encryption_key",
+            "jwt_signing_key",
+        ],
+    )
+    def test_sensitive_names_flagged(self, field_name):
+        assert is_sensitive_field_name(field_name) is True
+
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "secretary_id",
+            "sort_key",
+            "is_secret",
+            "token_id",
+            "api_key_ids",
+            "password_expiry_date",
+            "access_token_expiry",
+            # `*_key` compound followed by trailing metadata: the sequence no
+            # longer ends at the last segment, so it's not a credential.
+            "api_key_expiry_date",
+            "access_key_count",
+            "secret_key_updated_at",
+            # Normalization must not over-trigger: digit stripping of a
+            # non-marker word never produces a marker.
+            "address2",
+            # Dropping a trailing all-digit segment must not flag a benign
+            # base name either.
+            "address_2",
+            "line_2",
+            "x_studio_field_2",
+            "progress",
+            "mass",
+            "sales",
+            "access",
+            # Plural forms are NOT singular-ized — a withholding heuristic
+            # must minimize false positives, and plural names are usually
+            # benign config/counter fields (max_tokens flagged was a
+            # regression), not credential values.
+            "max_tokens",
+            "num_tokens",
+            "tokens",
+            "secrets",
+            "api_tokens",
+            "secret_keys",
+            # hash/value/digest suffix popping must not flag names whose
+            # remaining tail is not a credential marker, nor a bare suffix.
+            "commit_hash",
+            "md5_hash",
+            "amount_value",
+            "total_value",
+            "hash",
+            "value",
+            # The newer markers must not over-trigger either: they match a
+            # whole final segment, and the existing _id/_ids, boolean-flag and
+            # trailing-metadata guards still apply to them.
+            "pin_ids",
+            "is_pin",
+            "pinned",
+            "spin",
+            "pin_expiry_date",
+            "salt_content",
+            "otp_expiry",
+            "hashiv_id",
+            # `*_key` compounds that do not end at the last segment.
+            "signing_key_updated_at",
+            "encryption_key_count",
+        ],
+    )
+    def test_benign_names_not_flagged(self, field_name):
+        assert is_sensitive_field_name(field_name) is False

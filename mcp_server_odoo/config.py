@@ -54,6 +54,13 @@ class OdooConfig:
     # Allowed hosts for DNS rebinding protection (HTTP transport)
     allowed_hosts: list[str] = field(default_factory=list)
 
+    # Ceiling on a single binary resources/read (bytes). The read decodes the
+    # payload and the MCP layer re-encodes it to base64, so peak memory runs
+    # ~2.3x the stored size — one oversized attachment can take the process
+    # down. Now that populated binaries are advertised as odoo:// URIs, a
+    # client will follow them, so the ceiling is enforced rather than assumed.
+    max_binary_size: int = 50 * 1024 * 1024
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         # Validate URL
@@ -120,6 +127,9 @@ class OdooConfig:
         # Validate session idle timeout
         if self.session_idle_timeout is not None and self.session_idle_timeout <= 0:
             raise ValueError("ODOO_MCP_SESSION_IDLE_TIMEOUT must be positive")
+
+        if self.max_binary_size <= 0:
+            raise ValueError("ODOO_MCP_MAX_BINARY_SIZE must be positive")
 
         # Without this warning, the silent non-registration is hard to debug.
         if self.enable_method_calls and self.yolo_mode != "true":
@@ -285,6 +295,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         yolo_mode=get_yolo_mode(),
         enable_method_calls=get_bool_env("ODOO_MCP_ENABLE_METHOD_CALLS", False),
         allowed_hosts=parse_allowed_hosts(),
+        max_binary_size=get_int_env("ODOO_MCP_MAX_BINARY_SIZE", 50 * 1024 * 1024),
     )
 
     return config
@@ -328,3 +339,28 @@ def reset_config() -> None:
     """
     global _config
     _config = None
+
+
+# Deep pagination is query-cost amplification: Postgres still walks (and
+# discards) every skipped row, so a huge offset is expensive even though the
+# limit is capped. Reject offsets beyond this many pages of the effective
+# limit — generous for real paging, but it stops an ``offset=999999999``
+# forcing an unbounded skip.
+MAX_OFFSET_PAGES = 1000
+
+# Floor for the offset cap: small-limit deep pagination (fetch-the-Nth-record
+# with limit=1) must not fail shallower than a larger page size would —
+# without the floor, ``limit=1, offset=1500`` would be rejected while
+# ``limit=100`` reaches the same depth fine.
+MIN_OFFSET_CAP = 10_000
+
+
+def max_offset_for(limit: int) -> int:
+    """The deepest offset accepted for a given page size.
+
+    ``MAX_OFFSET_PAGES`` pages of the effective limit, floored at
+    ``MIN_OFFSET_CAP``. Lives beside the other paging limits rather than in
+    ``tools``: the read-only resource layer enforces the same bound and must
+    not import from the write-capable tool layer to get it.
+    """
+    return max(limit * MAX_OFFSET_PAGES, MIN_OFFSET_CAP)

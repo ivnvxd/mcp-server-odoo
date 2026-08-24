@@ -306,6 +306,9 @@ class TestAccessControl:
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
         with patch.object(controller, "_ensure_session") as mock_session:
+            # _ensure_session returns the id it ensured — reading the attribute
+            # afterwards would race a concurrent 401 handler nulling it.
+            mock_session.return_value = "sess123"
             controller._session_id = "sess123"
             controller._do_request("/mcp/models", timeout=5, allow_session_retry=True)
             mock_session.assert_called_once()

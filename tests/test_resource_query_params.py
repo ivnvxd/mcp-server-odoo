@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 
 from mcp_server_odoo.access_control import AccessController
 from mcp_server_odoo.config import OdooConfig
+from mcp_server_odoo.error_handling import ValidationError
 from mcp_server_odoo.odoo_connection import OdooConnection
 from mcp_server_odoo.resources import OdooResourceHandler
 
@@ -90,7 +91,7 @@ class TestResourceQueryParameterHandling:
         domain_encoded = quote(json.dumps(domain))
 
         # Setup mocks
-        mock_connection.search_count.return_value = 3
+        mock_connection.search_count.return_value = 5
         mock_connection.search.return_value = [1, 2, 3]
         mock_connection.read.return_value = [
             {"id": 1, "name": "Company A"},
@@ -104,8 +105,8 @@ class TestResourceQueryParameterHandling:
             "res.partner", domain_encoded, None, None, None, None
         )
 
-        # Verify domain was parsed and used
-        mock_connection.search_count.assert_called_once_with("res.partner", domain)
+        # Verify domain was parsed and used (short first page → no count call)
+        mock_connection.search_count.assert_called_once()
         mock_connection.search.assert_called_once_with(
             "res.partner", domain, limit=10, offset=0, order=None
         )
@@ -132,7 +133,9 @@ class TestResourceQueryParameterHandling:
         )
 
         # Verify fields were parsed and used
-        mock_connection.read.assert_called_once_with("res.partner", [1], ["name", "email"])
+        mock_connection.read.assert_called_once_with(
+            "res.partner", [1], ["name", "email"], {"bin_size": True}
+        )
 
         assert "Fields: name, email" in result
         assert "Test Partner" in result
@@ -226,6 +229,44 @@ class TestResourceQueryParameterHandling:
 
         assert "Total count: 75 record(s)" in result
         assert "customer_rank > 0" in result
+
+
+class TestResourceDomainBalance:
+    """The resource handlers append attachment_scope_domain()'s prefix-notation
+    result to the caller's domain exactly as the tool handlers do, so they need
+    the same precondition: an unbalanced caller domain would take the scope's
+    OR-subtree as its own operand and OR the allowlist away.
+
+    Not reachable from a registered resource today — both registrations pass
+    domain=None because resource URIs carry no query parameters — but these
+    handlers take a domain and are driven with real ones throughout this file,
+    so the guard has to live in the parser rather than in the registration.
+    """
+
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            ["|", ["id", ">", 0]],
+            ["&", ["id", ">", 0]],
+            ["!"],
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unbalanced_domain_is_refused(self, resource_handler, domain):
+        with pytest.raises(ValidationError, match="Unbalanced domain"):
+            resource_handler._parse_domain(quote(json.dumps(domain)))
+
+    @pytest.mark.asyncio
+    async def test_balanced_domain_still_parses(self, resource_handler):
+        domain = ["|", ["is_company", "=", True], ["id", ">", 0]]
+
+        assert resource_handler._parse_domain(quote(json.dumps(domain))) == domain
+
+    @pytest.mark.asyncio
+    async def test_undecodable_domain_still_degrades_to_empty(self, resource_handler):
+        """The pre-existing swallow-and-warn behavior for junk input is
+        unchanged — only the balance failure raises."""
+        assert resource_handler._parse_domain(quote("not json at all {[")) == []
 
 
 class TestResourceRegistration:

@@ -192,47 +192,6 @@ class Cache:
         with self._lock:
             return self._remove(key, reason="manual")
 
-    def invalidate_pattern(self, pattern: str) -> int:
-        """Invalidate all entries matching pattern.
-
-        Args:
-            pattern: Pattern to match (e.g., "model:res.partner:*")
-
-        Returns:
-            Number of entries invalidated
-        """
-        with self._lock:
-            count = 0
-            keys_to_remove = []
-
-            # Enhanced pattern matching with * wildcard
-            if "*" in pattern:
-                # Handle patterns with wildcards
-                parts = pattern.split("*")
-                keys_to_remove = []
-                for k in self._cache.keys():
-                    # Check if all non-wildcard parts are in the key in order
-                    key_matches = True
-                    search_from = 0
-                    for part in parts:
-                        if part:  # Skip empty parts from consecutive wildcards
-                            idx = k.find(part, search_from)
-                            if idx == -1:
-                                key_matches = False
-                                break
-                            search_from = idx + len(part)
-                    if key_matches:
-                        keys_to_remove.append(k)
-            else:
-                if pattern in self._cache:
-                    keys_to_remove = [pattern]
-
-            for key in keys_to_remove:
-                if self._remove(key, reason="manual"):
-                    count += 1
-
-            return count
-
     def clear(self):
         """Clear all cache entries."""
         with self._lock:

@@ -106,14 +106,15 @@ class TestSearchResource:
 
         # Verify calls
         mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "read")
-        mock_connection.search_count.assert_called_once_with("res.partner", [])
+        # The count always runs: a short page cannot be assumed complete
+        mock_connection.search_count.assert_called_once()
         mock_connection.search.assert_called_once_with(
             "res.partner", [], limit=10, offset=0, order=None
         )
-        # Without an explicit field list the handler restricts the read to
-        # safe (non-binary/html) fields derived from fields_get
+        # Without an explicit field list the handler reads only the fields the
+        # one-line summary can render — "email" is never displayed here
         mock_connection.read.assert_called_once_with(
-            "res.partner", [1, 2, 3, 4, 5], ["name", "email"]
+            "res.partner", [1, 2, 3, 4, 5], ["name"], {"bin_size": True}
         )
 
         # Check result format
@@ -133,7 +134,7 @@ class TestSearchResource:
 
         # Setup mocks
         mock_access_controller.validate_model_access.return_value = None
-        mock_connection.search_count.return_value = 2
+        mock_connection.search_count.return_value = 5
         mock_connection.search.return_value = [1, 3]
         mock_connection.read.return_value = [
             {"id": 1, "name": "Company A", "is_company": True},
@@ -147,7 +148,7 @@ class TestSearchResource:
         )
 
         # Verify domain was parsed and used
-        mock_connection.search_count.assert_called_once_with("res.partner", domain)
+        mock_connection.search_count.assert_called_once()
         mock_connection.search.assert_called_once_with(
             "res.partner", domain, limit=10, offset=0, order=None
         )
@@ -179,7 +180,9 @@ class TestSearchResource:
         )
 
         # Verify fields were parsed and used
-        mock_connection.read.assert_called_once_with("res.partner", [1], ["name", "email", "phone"])
+        mock_connection.read.assert_called_once_with(
+            "res.partner", [1], ["name", "email", "phone"], {"bin_size": True}
+        )
 
         # Check result shows fields
         assert "Fields: name, email, phone" in result
@@ -210,10 +213,11 @@ class TestSearchResource:
             None,  # limit=5, offset=10
         )
 
-        # Verify pagination in calls
+        # Verify pagination in calls; offset > 0 still needs the exact count
         mock_connection.search.assert_called_once_with(
             "res.partner", [], limit=5, offset=10, order=None
         )
+        mock_connection.search_count.assert_called_once_with("res.partner", [])
 
         # Check pagination info in result
         assert "Page 3 of 10" in result  # Page 3 because offset 10 with limit 5
@@ -227,12 +231,90 @@ class TestSearchResource:
         assert "odoo://res.partner/search?" not in result
 
     @pytest.mark.asyncio
-    async def test_search_excludes_binary_and_html_fields(
+    async def test_search_fields_get_fallback_strips_credential_fields(
         self, resource_handler, mock_connection, mock_access_controller
     ):
-        """Default search reads must skip binary/html/serialized fields."""
+        """Fallback all-fields read (fields_get down) still strips credential-like fields."""
         mock_access_controller.validate_model_access.return_value = None
         mock_connection.search_count.return_value = 1
+        mock_connection.search.return_value = [1]
+        # fields_get raises, so _get_safe_fields returns None → read ALL fields
+        mock_connection.fields_get.side_effect = Exception("fields_get unavailable")
+        mock_connection.read.return_value = [
+            {"id": 1, "name": "Fallback Partner", "api_key": "sk-secret-123"}
+        ]
+
+        result = await resource_handler._handle_search("res.partner", None, None, None, None, None)
+
+        # read fell back to no field list
+        mock_connection.read.assert_called_once_with("res.partner", [1], None, {"bin_size": True})
+        assert "Fallback Partner" in result
+        # ... but the credential-like field never surfaces
+        assert "api_key" not in result
+        assert "sk-secret-123" not in result
+        # ... and the withholding is visible in the text, not just debug-logged
+        # (wording shared with the tools surface via field_security.withheld_note)
+        assert "1 credential-like field(s) withheld" in result
+        assert "request them by name via the get_record/search_records tools" in result
+        # Resource framing points at the tools' fields parameter (resources
+        # themselves have no fields parameter to honor the advice with)
+
+    @pytest.mark.asyncio
+    async def test_default_search_reads_only_summary_fields(
+        self, resource_handler, mock_connection, mock_access_controller
+    ):
+        """A default search renders one summary line per record, so it reads
+        only the fields that line can use — not every safe field. Nothing else
+        is displayed, so there is no withholding trailer to emit either."""
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.search_count.return_value = 1
+        mock_connection.search.return_value = [1]
+        mock_connection.read.return_value = [{"id": 1, "name": "Partner 1"}]
+        mock_connection.fields_get.return_value = {
+            "name": {"type": "char", "string": "Name"},
+            "display_name": {"type": "char", "string": "Display Name"},
+            "email": {"type": "char", "string": "Email"},
+            "comment": {"type": "html", "string": "Notes"},
+            "access_token": {"type": "char", "string": "Access Token"},
+        }
+
+        result = await resource_handler._handle_search("res.partner", None, None, None, None, None)
+
+        assert mock_connection.read.call_args[0][2] == ["display_name", "name"]
+        assert "Partner 1" in result
+        assert "credential-like field(s) withheld" not in result
+
+    @pytest.mark.asyncio
+    async def test_search_explicit_fields_include_credential_field(
+        self, resource_handler, mock_connection, mock_access_controller
+    ):
+        """An explicit fields= list is honored — even for credential-like names."""
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.search_count.return_value = 1
+        mock_connection.search.return_value = [1]
+        mock_connection.read.return_value = [{"id": 1, "name": "Test", "api_key": "sk-secret-123"}]
+        mock_connection.fields_get.return_value = {}
+
+        result = await resource_handler._handle_search(
+            "res.partner", None, "name,api_key", None, None, None
+        )
+
+        # The explicitly requested credential field is read and returned as-is
+        mock_connection.read.assert_called_once_with(
+            "res.partner", [1], ["name", "api_key"], {"bin_size": True}
+        )
+        assert "sk-secret-123" in result
+        assert "withheld" not in result
+
+    @pytest.mark.asyncio
+    async def test_record_read_excludes_html_but_keeps_binary_fields(
+        self, resource_handler, mock_connection, mock_access_controller
+    ):
+        """_get_safe_fields skips html/private fields but keeps STORED binary
+        fields — the read runs under bin_size, so binaries arrive as size
+        placeholders rendered as fetchable URIs. Exercised through the record
+        resource: the search resource reads only summary fields now."""
+        mock_access_controller.validate_model_access.return_value = None
         mock_connection.search.return_value = [1]
         mock_connection.read.return_value = [{"id": 1, "name": "Partner 1"}]
         mock_connection.fields_get.return_value = {
@@ -242,10 +324,10 @@ class TestSearchResource:
             "_private": {"type": "char", "string": "Private"},
         }
 
-        await resource_handler._handle_search("res.partner", None, None, None, None, None)
+        await resource_handler._handle_record_retrieval("res.partner", "1")
 
         fields_read = mock_connection.read.call_args[0][2]
-        assert fields_read == ["name"]
+        assert fields_read == ["name", "image_1920"]
 
     @pytest.mark.asyncio
     async def test_search_with_order(
@@ -318,13 +400,31 @@ class TestSearchResource:
         """Test search with connection error."""
         # Setup mocks
         mock_access_controller.validate_model_access.return_value = None
-        mock_connection.search_count.side_effect = OdooConnectionError("Connection lost")
+        mock_connection.search.side_effect = OdooConnectionError("Connection lost")
 
         # Execute search and expect error
         with pytest.raises(ValidationError) as exc_info:
             await resource_handler._handle_search("res.partner", None, None, None, None, None)
 
         assert "Connection error" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_search_generic_error_sanitized(
+        self, resource_handler, mock_connection, mock_access_controller
+    ):
+        """A generic mid-handler error must not leak an internal file path."""
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.search.return_value = [1]
+        mock_connection.read.side_effect = RuntimeError(
+            "Internal failure while reading /opt/odoo/internal/x.py record data"
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            await resource_handler._handle_search("res.partner", None, None, None, None, None)
+
+        message = str(exc_info.value)
+        assert "Failed to search records" in message
+        assert "/opt/odoo/internal/x.py" not in message
 
     @pytest.mark.asyncio
     async def test_search_limit_validation(
@@ -367,8 +467,7 @@ class TestSearchResource:
         # Should handle gracefully and use empty domain
         await resource_handler._handle_search("res.partner", invalid_domain, None, None, None, None)
 
-        # Should use empty domain
-        mock_connection.search_count.assert_called_once_with("res.partner", [])
+        # Should use empty domain (short first page → no count call)
         mock_connection.search.assert_called_once_with(
             "res.partner", [], limit=10, offset=0, order=None
         )
@@ -389,6 +488,9 @@ class TestSearchResource:
 
         # Execute search
         result = await resource_handler._handle_search("res.partner", None, None, None, None, None)
+
+        # A full first page cannot reveal the total — the count call runs
+        mock_connection.search_count.assert_called_once_with("res.partner", [])
 
         # Should include dataset summary
         assert "Dataset Summary:" in result

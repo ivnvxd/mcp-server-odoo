@@ -430,7 +430,7 @@ class TestToolOperations:
     async def test_aggregate_records_count_only(self, connected_env):
         """aggregate_records: count partners by country via formatted_read_group.
 
-        Requires the much-mcp-server addon's whitelist to include
+        Requires the MCP module's whitelist to include
         ``"formatted_read_group": "read"`` (matches the Post-Completion step
         of the aggregate_records plan).
         """
@@ -488,21 +488,30 @@ class TestToolOperations:
             assert "partner_share:count_distinct" in bucket
 
     @pytest.mark.asyncio
-    async def test_aggregate_records_empty_groupby_rejected(self, connected_env):
-        """Validation runs before the network call."""
+    async def test_aggregate_records_empty_groupby_overall_count(self, connected_env):
+        """groupby=[] collapses to one overall row — the filtered-count path."""
         handler = connected_env["tool_handler"]
+        ac = connected_env["access_controller"]
 
-        with pytest.raises(ValidationError) as exc_info:
-            await handler._handle_aggregate_records_tool(
-                model="res.partner",
-                groupby=[],
-                aggregates=None,
-                domain=None,
-                order=None,
-                limit=None,
-                offset=0,
-            )
-        assert "groupby must not be empty" in str(exc_info.value)
+        try:
+            ac.validate_model_access("res.partner", "read")
+        except Exception:
+            pytest.skip("No read permission on res.partner in current MCP config")
+
+        result = await handler._handle_aggregate_records_tool(
+            model="res.partner",
+            groupby=[],
+            aggregates=None,
+            domain=[["active", "=", True]],
+            order=None,
+            limit=None,
+            offset=0,
+        )
+
+        assert result["groupby"] == []
+        assert result["aggregates"] == ["__count"]
+        assert len(result["groups"]) == 1
+        assert isinstance(result["groups"][0]["__count"], int)
 
 
 class TestErrorHandling:
