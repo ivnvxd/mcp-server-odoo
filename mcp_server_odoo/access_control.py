@@ -38,6 +38,41 @@ class AccessControlUnavailableError(AccessControlError):
     pass
 
 
+def access_denied_message(error: Exception) -> str:
+    """Prefix an access failure with "Access denied: " unless it already says so.
+
+    The MCP module's own refusals are self-labelling ("Access denied: your
+    user is not authorized for MCP..."), so the unconditional prefix the
+    handlers used produced "Access denied: Access denied: ...". Prefix only
+    when the message does not already open with it.
+    """
+    message = str(error).strip()
+    if message.lower().startswith("access denied"):
+        return message
+    return f"Access denied: {message}"
+
+
+def _http_error_message(error: urllib.error.HTTPError) -> Optional[str]:
+    """Extract the MCP module's own error message from an HTTPError body.
+
+    The module answers failures with
+    ``{"success": false, "error": {"message": ..., "code": ...}}``. Reading
+    that message keeps its diagnosis ("Model 'x' is not enabled for MCP
+    access.") instead of replacing it with a generic one.
+
+    Returns None when the body is missing, unreadable, not that shape, or
+    carries a blank message — the caller then falls back to its own wording.
+    The body can only be consumed once, so this is called at most once per
+    error.
+    """
+    try:
+        payload = json.loads(error.read().decode("utf-8"))
+        message = payload.get("error", {}).get("message")
+    except Exception:
+        return None
+    return message.strip() if isinstance(message, str) and message.strip() else None
+
+
 @dataclass
 class ModelPermissions:
     """Permissions for a specific model."""
@@ -280,7 +315,12 @@ class AccessController:
                     "Configure ODOO_API_KEY or use YOLO mode (ODOO_YOLO=read)."
                 ) from e
             elif e.code == 403:
-                raise AccessControlError("Access denied to MCP endpoints") from e
+                # The module explains exactly what was refused ("Model 'x' is
+                # not enabled for MCP access."); a generic message here sends
+                # users hunting a credential problem that does not exist.
+                raise AccessControlError(
+                    _http_error_message(e) or "Access denied to MCP endpoints"
+                ) from e
             elif e.code == 404:
                 raise AccessControlUnavailableError(f"Endpoint not found: {endpoint}") from e
             else:
@@ -323,7 +363,7 @@ class AccessController:
         """Get list of all MCP-enabled models.
 
         Returns:
-            List of dicts with 'model' and 'name' keys
+            List of dicts with 'model' and 'name' keys (newer MCP modules add 'operations')
 
         Raises:
             AccessControlError: If request fails
@@ -446,7 +486,6 @@ class AccessController:
         """
         # In YOLO mode, check based on mode level
         if self.config.is_yolo_enabled:
-            # Define read operations
             read_operations = {
                 "read",
                 "search",
@@ -456,12 +495,9 @@ class AccessController:
                 "search_count",
             }
 
-            # Check operation based on mode
             if operation in read_operations:
-                # Read operations always allowed in YOLO mode
                 return True, None
             elif self.config.yolo_mode == "true":
-                # All operations allowed in full mode
                 return True, None
             else:
                 # Write operations blocked in read-only mode

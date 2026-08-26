@@ -276,18 +276,24 @@ class TestResourceOperations:
 
     @pytest.mark.asyncio
     async def test_record_safe_field_filtering(self, connected_env):
-        """Test that binary/html/serialized fields are excluded from record retrieval."""
+        """Stored binaries render as fetchable URIs, never as inlined base64."""
         handler = connected_env["resource_handler"]
         conn = connected_env["connection"]
 
         partner_ids = conn.search("res.partner", [], limit=1)
         assert partner_ids
+        partner_id = partner_ids[0]
 
-        result = await handler._handle_record_retrieval("res.partner", str(partner_ids[0]))
+        result = await handler._handle_record_retrieval("res.partner", str(partner_id))
 
-        # Binary fields like image_1920 should NOT appear in the output
-        assert "image_1920:" not in result
-        assert "image_128:" not in result
+        # A stored binary is advertised as a resource URI plus its size, so the
+        # client can fetch it on demand instead of paying for base64 inline.
+        for field in ("image_1920", "image_128"):
+            if f"{field}:" in result:
+                assert f"{field}: odoo://res.partner/record/{partner_id}/{field}" in result
+        # Whatever is rendered, no raw base64 payload leaks into the text
+        assert "data:image" not in result
+        assert "iVBORw0KGgo" not in result  # PNG base64 preamble
 
 
 class TestToolOperations:

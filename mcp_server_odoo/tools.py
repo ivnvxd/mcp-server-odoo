@@ -21,6 +21,7 @@ from .access_control import (
     AccessControlError,
     AccessController,
     AccessControlUnavailableError,
+    access_denied_message,
     attachment_scope_domain,
     check_domain_balance,
 )
@@ -60,7 +61,7 @@ from .schemas import (
 )
 from .uri_schema import BINARY_FIELD_TYPES, URIValidationError, build_binary_uri
 from .user_context import (
-    UTC_DATETIME_GUIDANCE,
+    context_unavailable_text,
     format_user_context,
     get_user_context_data,
 )
@@ -81,11 +82,9 @@ _BLOCKED_METHOD_CALL_MODELS = ("ir.actions", "ir.cron")
 
 # ORM CRUD / data-access primitives call_model_method refuses even under full
 # YOLO — the business-method hatch must not silently become generic CRUD;
-# those operations go through the dedicated tools. Mirrors the reference
-# in-process implementation's blocked set, plus default_get/exists: it
-# refuses those via mapped-operation gating and a hasattr(BaseModel, ...)
-# check that cannot be replicated over XML-RPC, so this denylist is the
-# remote approximation.
+# those operations go through the dedicated tools. In-process introspection
+# (mapped-operation gating, a hasattr(BaseModel, ...) check) cannot be
+# replicated over XML-RPC, so this denylist is the remote approximation.
 _BLOCKED_METHOD_CALLS = frozenset(
     {
         "create",
@@ -198,9 +197,7 @@ def _validate_record_id(record_id: int, label: str = "record ID") -> None:
 def _validate_method_call(model: str, method: str) -> None:
     """Reject models/methods call_model_method must never touch.
 
-    The reference in-process implementation's two-tier check (known data-access
-    method vs any other BaseModel attribute) needs Python introspection that is
-    unavailable over XML-RPC; these denylists are the remote approximation.
+    See _BLOCKED_METHOD_CALLS for the rationale.
     """
     if any(
         model == blocked or model.startswith(blocked + ".")
@@ -543,7 +540,6 @@ class OdooToolHandler:
                 if score > 0:  # Only include fields with positive scores
                     field_scores.append((field_name, score))
 
-            # Sort by score (highest first)
             field_scores.sort(key=lambda x: x[1], reverse=True)
 
             # Select top N fields based on configuration
@@ -556,7 +552,6 @@ class OdooToolHandler:
                 if field in fields_info and field not in selected_fields:
                     selected_fields.append(field)
 
-            # Remove duplicates while preserving order
             final_fields = []
             seen = set()
             for field in selected_fields:
@@ -1212,7 +1207,9 @@ class OdooToolHandler:
                     filtered count via the default ``__count`` aggregate.
                 aggregates: Aggregate expressions of the form ``"field:operator"``
                     (sum, avg, min, max, count, count_distinct, array_agg, ...).
-                    Examples: ``["amount_total:sum"]``, ``["id:count"]``.
+                    Examples: ``["amount_total:sum"]``, ``["__count"]``.
+                    ``["id:count"]`` works on Odoo 17+ only — use
+                    ``__count`` for a row count on every version.
                     If omitted or empty, defaults to ``["__count"]`` so each
                     group carries a count. Pass ``["__count", "amount_total:sum"]``
                     to get both.
@@ -1224,11 +1221,12 @@ class OdooToolHandler:
                 offset: Number of groups to skip (capped at 1000 pages of
                     ``limit``, min 10000).
 
-            Drilldown: a group's ``__extra_domain`` is that group's own
-                condition, NOT a standalone domain. AND it with the ``domain``
+            Drilldown: AND a group's ``__extra_domain`` with the ``domain``
                 you passed — ``search_records(model, domain=[*your_domain,
-                *group["__extra_domain"]])`` — or the result will ignore your
-                filter and disagree with ``__count``.
+                *group["__extra_domain"]])``. On Odoo 19 it is only the
+                group's own condition; on older servers it is already the
+                full domain (your filter included). Re-ANDing is idempotent,
+                so the same call is correct on every version.
 
             Returns:
                 ``AggregateResult`` with ``groups`` (list of dicts; each contains
@@ -1291,10 +1289,7 @@ class OdooToolHandler:
                 self-elevate past the user's ACLs), the ``web_*`` data-access
                 family, and ORM CRUD/data-access primitives (``create``, ``read``,
                 ``search_read``, ...) are refused — use the dedicated CRUD/search
-                tools. List results are truncated to 100 items. The reference
-                in-process implementation's recordset coercion and generic-ORM
-                (BaseModel) introspection cannot be replicated over XML-RPC;
-                these denylists are the remote approximation.
+                tools. List results are truncated to 100 items.
 
                 Args:
                     model: Technical model name (e.g. ``account.move``).
@@ -1332,11 +1327,9 @@ class OdooToolHandler:
         """Handle search tool request."""
         try:
             with perf_logger.track_operation("tool_search", model=model):
-                # Check model access
                 await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
                 await self._ctx_info(ctx, f"Searching {model}...")
 
-                # Ensure we're connected
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
@@ -1413,9 +1406,7 @@ class OdooToolHandler:
                 total_count = await asyncio.to_thread(
                     self.connection.search_count, model, parsed_domain
                 )
-                # _ctx_info, not _ctx_progress: the other two steps of this
-                # operation report via _ctx_info, so a progress notification
-                # here would advertise a 3-step total that never advances.
+                # No progress notifications — see CLAUDE.md "MCP context conventions".
                 await self._ctx_info(ctx, f"Found {total_count} records")
 
                 # Determine which fields to fetch. An empty list means
@@ -1498,7 +1489,7 @@ class OdooToolHandler:
         except AccessControlUnavailableError as e:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise ValidationError(f"Access denied: {e}") from e
+            raise ValidationError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
@@ -1520,13 +1511,11 @@ class OdooToolHandler:
             with perf_logger.track_operation("tool_get_record", model=model):
                 _validate_record_id(record_id)
 
-                # Check model access
                 await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
                 if model == "ir.attachment":
                     await self._gate_attachment_records([record_id])
                 await self._ctx_info(ctx, f"Getting {model}/{record_id}...")
 
-                # Ensure we're connected
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
@@ -1664,7 +1653,7 @@ class OdooToolHandler:
         except AccessControlUnavailableError as e:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise ValidationError(f"Access denied: {e}") from e
+            raise ValidationError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
@@ -1688,7 +1677,6 @@ class OdooToolHandler:
                 await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
                 await self._ctx_info(ctx, f"Getting fields for {model}...")
 
-                # Ensure we're connected
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
@@ -1719,7 +1707,7 @@ class OdooToolHandler:
         except AccessControlUnavailableError as e:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise ValidationError(f"Access denied: {e}") from e
+            raise ValidationError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
@@ -1735,8 +1723,9 @@ class OdooToolHandler:
         Deliberately NOT gated by the access controller: it exposes only the
         caller's own user/company info — no new data surface — and must work
         even when res.users is not an MCP-enabled model (standard mode). On
-        any read failure it degrades to the UTC-guidance-only text with null
-        structured fields instead of erroring.
+        any read failure it degrades to ``CONTEXT_UNAVAILABLE_TEXT`` (the UTC
+        guidance plus a note naming the likely cause) with null structured
+        fields instead of erroring.
         """
         with perf_logger.track_operation("tool_get_current_context"):
             await self._ctx_info(ctx, "Reading current session context...")
@@ -1744,7 +1733,7 @@ class OdooToolHandler:
                 data = await asyncio.to_thread(get_user_context_data, self.connection)
             except Exception as e:
                 logger.warning(f"Could not read user context, returning UTC guidance only: {e}")
-                return CurrentContextResult(text=UTC_DATETIME_GUIDANCE)
+                return CurrentContextResult(text=context_unavailable_text(str(e)))
             allowed = [CompanyInfo(**company) for company in data["allowed_companies"]]
             return CurrentContextResult(
                 user_name=data["user_name"],
@@ -1854,11 +1843,7 @@ class OdooToolHandler:
 
                         # Rows carry no per-model operations in YOLO mode: the
                         # flags are global and already reported once under
-                        # yolo_mode.operations, so repeating them on every row
-                        # only inflates the response the MAX_LISTED_MODELS cap
-                        # exists to bound (measured on the wire: 46.6 KB ->
-                        # 28.5 KB for 319 models — the key still serializes as
-                        # null per row). Standard mode still stamps them
+                        # yolo_mode.operations. Standard mode still stamps them
                         # per row, where they genuinely differ per model.
                         models_list = [
                             {
@@ -1960,6 +1945,11 @@ class OdooToolHandler:
                 }
         except ValidationError:
             raise
+        except AccessControlError as e:
+            # A refusal explains itself ("...not a member of the MCP User
+            # group"); the generic wrapper below buried that under "Failed to
+            # list models", leaving the caller with nothing to act on.
+            raise ValidationError(access_denied_message(e)) from e
         except Exception as e:
             logger.error(f"Error in list_models tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
@@ -2051,7 +2041,6 @@ class OdooToolHandler:
                 },
             ]
 
-            # Return the resource template information
             base_note = (
                 "Resource URIs do not support query parameters. Use tools "
                 "(search_records, get_record) for advanced operations with "
@@ -2085,13 +2074,11 @@ class OdooToolHandler:
         """Handle create record tool request."""
         try:
             with perf_logger.track_operation("tool_create_record", model=model):
-                # Check model access
                 await asyncio.to_thread(
                     self.access_controller.validate_model_access, model, "create"
                 )
                 await self._ctx_info(ctx, f"Creating record in {model}...")
 
-                # Ensure we're connected
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
@@ -2112,12 +2099,9 @@ class OdooToolHandler:
                         values.get("res_model"), "attachment would be attached to"
                     )
 
-                # Create the record
                 record_id = await asyncio.to_thread(self.connection.create, model, values)
 
-                # Return only essential fields to minimize context usage
-                # Users can use get_record if they need more fields
-                # Only use universally available fields (not all models have 'name')
+                # display_name only — universal and cheap; get_record for more.
                 essential_fields = ["id", "display_name"]
 
                 # Read only the essential fields
@@ -2144,13 +2128,12 @@ class OdooToolHandler:
         except ValidationError:
             raise
         except MCPPermissionError as e:
-            # The attachment gate's denial — surfaced verbatim rather than
-            # rewritten to a generic by the handler below.
+            # Attachment-gate denial surfaced verbatim — see _handle_get_record_tool.
             raise ValidationError(str(e)) from e
         except AccessControlUnavailableError as e:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise ValidationError(f"Access denied: {e}") from e
+            raise ValidationError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
@@ -2172,13 +2155,11 @@ class OdooToolHandler:
             with perf_logger.track_operation("tool_update_record", model=model):
                 _validate_record_id(record_id)
 
-                # Check model access
                 await asyncio.to_thread(
                     self.access_controller.validate_model_access, model, "write"
                 )
                 await self._ctx_info(ctx, f"Updating {model}/{record_id}...")
 
-                # Ensure we're connected
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
@@ -2210,9 +2191,7 @@ class OdooToolHandler:
                 # Update the record
                 success = await asyncio.to_thread(self.connection.write, model, [record_id], values)
 
-                # Return only essential fields to minimize context usage
-                # Users can use get_record if they need more fields
-                # Only use universally available fields (not all models have 'name')
+                # display_name only — universal and cheap; get_record for more.
                 essential_fields = ["id", "display_name"]
 
                 # Read only the essential fields
@@ -2241,13 +2220,12 @@ class OdooToolHandler:
         except NotFoundError as e:
             raise ValidationError(str(e)) from e
         except MCPPermissionError as e:
-            # The attachment gate's denial — surfaced verbatim rather than
-            # rewritten to a generic by the handler below.
+            # Attachment-gate denial surfaced verbatim — see _handle_get_record_tool.
             raise ValidationError(str(e)) from e
         except AccessControlUnavailableError as e:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise ValidationError(f"Access denied: {e}") from e
+            raise ValidationError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
@@ -2268,13 +2246,11 @@ class OdooToolHandler:
             with perf_logger.track_operation("tool_delete_record", model=model):
                 _validate_record_id(record_id)
 
-                # Check model access
                 await asyncio.to_thread(
                     self.access_controller.validate_model_access, model, "unlink"
                 )
                 await self._ctx_info(ctx, f"Deleting {model}/{record_id}...")
 
-                # Ensure we're connected
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
@@ -2296,7 +2272,6 @@ class OdooToolHandler:
                 # .get's default would leave False and break DeleteResult.
                 record_name = existing[0].get("display_name") or f"ID {record_id}"
 
-                # Delete the record
                 success = await asyncio.to_thread(self.connection.unlink, model, [record_id])
 
                 return {
@@ -2311,13 +2286,12 @@ class OdooToolHandler:
         except NotFoundError as e:
             raise ValidationError(str(e)) from e
         except MCPPermissionError as e:
-            # The attachment gate's denial — surfaced verbatim rather than
-            # rewritten to a generic by the handler below.
+            # Attachment-gate denial surfaced verbatim — see _handle_get_record_tool.
             raise ValidationError(str(e)) from e
         except AccessControlUnavailableError as e:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise ValidationError(f"Access denied: {e}") from e
+            raise ValidationError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
@@ -2359,7 +2333,6 @@ class OdooToolHandler:
                 )
                 await self._ctx_info(ctx, f"Posting message to {model}/{record_id}...")
 
-                # Ensure we're connected
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
@@ -2386,7 +2359,7 @@ class OdooToolHandler:
                 if attachment_ids is not None:
                     kwargs["attachment_ids"] = attachment_ids
                 if body_is_html:
-                    # Odoo 19 escapes any plain str body — opt-in flag preserves HTML
+                    # Odoo 17+ escapes any plain str body — opt-in flag preserves HTML
                     kwargs["body_is_html"] = True
 
                 # Call message_post; translate the "no mail.thread" error before
@@ -2426,13 +2399,12 @@ class OdooToolHandler:
         except ValidationError:
             raise
         except MCPPermissionError as e:
-            # The attachment gate's denial — surfaced verbatim rather than
-            # rewritten to a generic by the handler below.
+            # Attachment-gate denial surfaced verbatim — see _handle_get_record_tool.
             raise ValidationError(str(e)) from e
         except AccessControlUnavailableError as e:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise ValidationError(f"Access denied: {e}") from e
+            raise ValidationError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
@@ -2605,12 +2577,8 @@ class OdooToolHandler:
                         attachment_scope_domain, self.config, self.access_controller
                     )
                     if scope:
-                        # Appended, not prefixed with an explicit "&": Odoo
-                        # normalizes a flat sequence of expressions with
-                        # implicit ANDs, whereas a hand-written "&" would
-                        # bind only the first term of a multi-leaf domain.
-                        # Balance is enforced in _parse_domain_input; see the
-                        # matching comment in _handle_search_tool.
+                        # Appended, not "&"-prefixed — see the matching comment
+                        # in _handle_search_tool.
                         parsed_domain = list(parsed_domain) + scope
 
                 # Limit defaults & capping (mirror search_records)
@@ -2643,8 +2611,8 @@ class OdooToolHandler:
                     # Odoo 15/16 alias an `id:<op>` aggregate to the bare key
                     # "id" and then delete it unconditionally
                     # (_read_group_format_result: `del data['id']`), so the
-                    # aggregate silently vanishes — including the `id:count`
-                    # this tool's own docstring suggests. 17/18 keep it.
+                    # aggregate silently vanishes. 17/18 keep it, which is
+                    # why the docstring offers `id:count` for 17+ only.
                     if major < 17:
                         id_aggregates = sorted(
                             {
@@ -2716,7 +2684,7 @@ class OdooToolHandler:
         except AccessControlUnavailableError as e:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise ValidationError(f"Access denied: {e}") from e
+            raise ValidationError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
@@ -2856,7 +2824,7 @@ class OdooToolHandler:
         except AccessControlUnavailableError as e:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise ValidationError(f"Access denied: {e}") from e
+            raise ValidationError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:

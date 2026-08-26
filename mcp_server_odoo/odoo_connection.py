@@ -283,7 +283,8 @@ class OdooConnection:
         """Establish connection to Odoo server.
 
         Creates XML-RPC proxies for MCP endpoints but doesn't
-        authenticate yet. Uses connection pooling for better performance.
+        authenticate yet. Proxies are created once and reused for the
+        server's lifetime.
 
         In standard mode, resolves the target database first using the
         server-wide ``/xmlrpc/db`` endpoint, then sets the
@@ -463,42 +464,21 @@ class OdooConnection:
 
     @property
     def db_proxy(self) -> xmlrpc.client.ServerProxy:
-        """Get database operations proxy.
-
-        Returns:
-            XML-RPC proxy for database operations
-
-        Raises:
-            OdooConnectionError: If not connected
-        """
+        """XML-RPC proxy for db endpoint; raises OdooConnectionError if not connected."""
         if not self._connected or not self._db_proxy:
             raise OdooConnectionError("Not connected to Odoo")
         return self._db_proxy
 
     @property
     def common_proxy(self) -> xmlrpc.client.ServerProxy:
-        """Get common operations proxy.
-
-        Returns:
-            XML-RPC proxy for common operations
-
-        Raises:
-            OdooConnectionError: If not connected
-        """
+        """XML-RPC proxy for common endpoint; raises OdooConnectionError if not connected."""
         if not self._connected or not self._common_proxy:
             raise OdooConnectionError("Not connected to Odoo")
         return self._common_proxy
 
     @property
     def object_proxy(self) -> xmlrpc.client.ServerProxy:
-        """Get object operations proxy.
-
-        Returns:
-            XML-RPC proxy for object operations
-
-        Raises:
-            OdooConnectionError: If not connected
-        """
+        """XML-RPC proxy for object endpoint; raises OdooConnectionError if not connected."""
         if not self._connected or not self._object_proxy:
             raise OdooConnectionError("Not connected to Odoo")
         return self._object_proxy
@@ -607,7 +587,6 @@ class OdooConnection:
         if self.config.database:
             db_name = self.config.database
             logger.info(f"Using configured database: {db_name}")
-            # Skip existence check as database listing might be restricted
             return db_name
 
         # List available databases
@@ -876,13 +855,11 @@ class OdooConnection:
         if not self._connected:
             raise OdooConnectionError("Not connected to Odoo")
 
-        # Get database name
         if database:
             db_name = database
         else:
             db_name = self.auto_select_database()
 
-        # Log authentication strategy
         if self.config.is_yolo_enabled:
             mode_desc = "read-only" if self.config.yolo_mode == "read" else "full access"
             logger.info(f"Authenticating in YOLO {mode_desc} mode for database '{db_name}'")
@@ -891,7 +868,6 @@ class OdooConnection:
 
         auth_errors = []
 
-        # Try API key authentication first (if available)
         if self.config.uses_api_key:
             auth_method = "API key (YOLO mode)" if self.config.is_yolo_enabled else "MCP API key"
             logger.info(f"Attempting {auth_method} authentication")
@@ -904,7 +880,6 @@ class OdooConnection:
                     error_msg = f"{auth_method} authentication failed"
                     auth_errors.append(error_msg)
 
-                    # Only try fallback if we have credentials
                     if self.config.uses_credentials:
                         logger.warning(
                             f"{error_msg} — the configured ODOO_API_KEY was rejected. "
@@ -917,7 +892,6 @@ class OdooConnection:
                 logger.error(f"Critical error during {auth_method} authentication: {e}")
                 raise
 
-        # Try username/password authentication (if available)
         if self.config.uses_credentials:
             logger.info("Attempting username/password authentication")
 
@@ -932,7 +906,6 @@ class OdooConnection:
                 logger.error(f"Critical error during password authentication: {e}")
                 raise
 
-        # Authentication failed - provide detailed error message
         if auth_errors:
             error_details = "; ".join(auth_errors)
             mode_hint = ""

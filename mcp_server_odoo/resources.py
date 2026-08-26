@@ -15,6 +15,7 @@ attachment is refused with a clean error instead of being buffered.
 import asyncio
 import base64
 import binascii
+import codecs
 import json
 import re
 import xmlrpc.client
@@ -30,6 +31,7 @@ from .access_control import (
     AccessControlError,
     AccessController,
     AccessControlUnavailableError,
+    access_denied_message,
     attachment_scope_domain,
     check_domain_balance,
 )
@@ -92,22 +94,48 @@ _MAGIC_SIGNATURES: Tuple[Tuple[bytes, str], ...] = (
 )
 
 
+# SVG is XML, so it has no magic number: the root <svg> element may be
+# preceded by a UTF-8 BOM, an <?xml?> declaration, a DOCTYPE or comments.
+# It earns this extra check because Odoo renders every default user and
+# partner avatar as SVG, making it the most common binary field served over
+# MCP — without it those all degrade to an opaque octet-stream download.
+_SVG_SNIFF_WINDOW = 1024
+_SVG_PROLOGUE_PREFIXES = (b"<?xml", b"<!doctype svg", b"<!--")
+
+
+def _looks_like_svg(raw: bytes) -> bool:
+    """Whether `raw` opens an SVG document.
+
+    Only the head of the payload is scanned, so a large XML file cannot turn
+    this into a full-buffer search. The first tag must be `<svg` itself or a
+    prologue that legitimately precedes it, and any HTML marker (`<html` or
+    `<!doctype html`) in the head disqualifies it — a leading comment would
+    otherwise defer `<!doctype html` past the prefix check, so an inline
+    `<svg>` in a web page is not mistaken for one.
+    """
+    head = raw[:_SVG_SNIFF_WINDOW]
+    if head.startswith(codecs.BOM_UTF8):
+        head = head[len(codecs.BOM_UTF8) :]
+    head = head.lstrip().lower()
+    if head.startswith(b"<svg"):
+        return True
+    if head.startswith(_SVG_PROLOGUE_PREFIXES):
+        return b"<svg" in head and b"<html" not in head and b"<!doctype html" not in head
+    return False
+
+
 def _guess_mimetype(raw: bytes) -> str:
     """Best-effort mimetype from magic bytes; octet-stream when unknown."""
     for signature, mimetype in _MAGIC_SIGNATURES:
         if raw.startswith(signature):
             return mimetype
+    if _looks_like_svg(raw):
+        return "image/svg+xml"
     return "application/octet-stream"
 
 
 def _withheld_fields_line(count: int) -> str:
-    """Visible trailer for formatted text when a bulk read withheld fields.
-
-    Wording comes from field_security.withheld_note (shared with the tools
-    surface); this wrapper adds the resource-side framing. Resources have no
-    fields parameter, so "request explicitly by name" alone would be unusable
-    advice here — point at the tools that do carry one.
-    """
+    """Visible trailer for formatted text when a bulk read withheld fields."""
     # withheld_note ends in "request explicitly by name to include"; the
     # resource surface has no fields parameter, so that trailing advice is
     # REPLACED with a pointer to the tools that do carry one, not appended
@@ -196,13 +224,9 @@ class OdooResourceHandler:
 
     def _register_resources(self):
         """Register all resource handlers with FastMCP."""
-        # Note: FastMCP uses decorators to register resources.
-        # The @self.app.resource decorator automatically handles resource registration.
         # Resources with parameters (like {model}) are registered as templates,
         # not concrete resources, so they won't show in list_resources().
 
-        # Add some concrete resources for enabled models
-        # These will show up in the resource list
         self._register_concrete_resources()
 
         # Register record retrieval resource handler
@@ -234,14 +258,15 @@ class OdooResourceHandler:
         async def search_records(model: str, ctx: Optional[Context] = None) -> str:
             """Search records with default settings.
 
-            Returns first 10 records with all fields.
-            For more control, use the search_records tool instead.
+            Returns the first 10 records with only the fields the one-line
+            summary renders. For field selection, use the search_records
+            tool instead.
             """
             await self._ctx_info(ctx, f"Searching {model} (default: first 10 records)...")
             return await self._handle_search(model, None, None, None, None, None)
 
-        # Note: Browse resource removed due to FastMCP query parameter limitations
-        # Use get_record multiple times or search_records tool instead
+        # No browse resource: FastMCP URI templates cannot carry query parameters —
+        # use the search resource or search_records tool.
 
         # Register count resource (no parameters due to FastMCP limitations)
         @self.app.resource(
@@ -628,7 +653,7 @@ class OdooResourceHandler:
                     ) from e
                 except AccessControlError as e:
                     logger.warning(f"Access denied for {model}.read: {e}")
-                    raise MCPPermissionError(f"Access denied: {e}", context=context) from e
+                    raise MCPPermissionError(access_denied_message(e), context=context) from e
 
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo", context=context)
@@ -771,7 +796,7 @@ class OdooResourceHandler:
                     ) from e
                 except AccessControlError as e:
                     logger.warning(f"Access denied for ir.attachment.read: {e}")
-                    raise MCPPermissionError(f"Access denied: {e}", context=context) from e
+                    raise MCPPermissionError(access_denied_message(e), context=context) from e
 
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo", context=context)
@@ -796,14 +821,7 @@ class OdooResourceHandler:
                     raise NotFoundError(f"Attachment not found: {attachment_id}", context=context)
                 attachment = records[0]
 
-                # Gate on the ATTACHED-TO model as well. Checking only
-                # ir.attachment would let an enabled-model allowlist be
-                # sidestepped wholesale: enable ir.attachment and every
-                # attachment body on the database becomes readable, including
-                # those hanging off models deliberately left out. Odoo's own
-                # ACLs still apply underneath; this is the MCP layer's gate.
-                # A standalone attachment (no res_model) has no second model
-                # to check and stays governed by the ir.attachment gate alone.
+                # Gate on the attached-to model — see _assert_attachment_model_allowed.
                 await self._assert_attachment_model_allowed(
                     attachment.get("res_model"), attachment_id, context
                 )
@@ -902,16 +920,13 @@ class OdooResourceHandler:
                     ) from e
                 except AccessControlError as e:
                     logger.warning(f"Access denied for {model}.read: {e}")
-                    raise MCPPermissionError(f"Access denied: {e}", context=context) from e
+                    raise MCPPermissionError(access_denied_message(e), context=context) from e
 
                 # Ensure we're connected
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo", context=context)
 
-                # An ir.attachment row carries url and index_content (the
-                # extracted document text), so it needs the same attached-to
-                # model gate the payload readers apply — gating only payloads
-                # would leave the allowlist sidestep open for metadata.
+                # Metadata is sensitive too — see AccessController.attachment_scope_domain.
                 if model == "ir.attachment":
                     await self._gate_attachment_row(record_id_int, context)
 
@@ -1019,7 +1034,7 @@ class OdooResourceHandler:
                 raise ValidationError(f"Could not verify access (connection error): {e}") from e
             except AccessControlError as e:
                 logger.warning(f"Access denied for {model}.read: {e}")
-                raise MCPPermissionError(f"Access denied: {e}") from e
+                raise MCPPermissionError(access_denied_message(e)) from e
 
             # Ensure we're connected
             if not self.connection.is_authenticated:
@@ -1033,9 +1048,7 @@ class OdooResourceHandler:
             requested_domain = self._parse_domain(domain)
             parsed_domain = requested_domain
             if model == "ir.attachment":
-                # Scope to accessible res_models — an attachment row carries
-                # url and index_content (the extracted document text), so the
-                # allowlist gate must cover metadata, not only payloads.
+                # Metadata is sensitive too — see AccessController.attachment_scope_domain.
                 scope = await asyncio.to_thread(
                     attachment_scope_domain, self.config, self.access_controller
                 )
@@ -1075,8 +1088,7 @@ class OdooResourceHandler:
                 if fields_to_read is None:
                     # A default search renders ONE line per record — the
                     # display-name summary — so read only what that summary
-                    # can use. Reading every safe field here pulled ~100
-                    # columns per row over XML-RPC and discarded all of them.
+                    # can use.
                     fields_to_read = await asyncio.to_thread(self._summary_fields, model)
                 records = await asyncio.to_thread(
                     self.connection.read, model, record_ids, fields_to_read, {"bin_size": True}
@@ -1125,7 +1137,7 @@ class OdooResourceHandler:
             # read must surface as retryable, never as an unscoped result.
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise MCPPermissionError(f"Access denied: {e}") from e
+            raise MCPPermissionError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
@@ -1406,7 +1418,7 @@ class OdooResourceHandler:
                 raise ValidationError(f"Could not verify access (connection error): {e}") from e
             except AccessControlError as e:
                 logger.warning(f"Access denied for {model}.read: {e}")
-                raise MCPPermissionError(f"Access denied: {e}") from e
+                raise MCPPermissionError(access_denied_message(e)) from e
 
             # Ensure we're connected
             if not self.connection.is_authenticated:
@@ -1417,9 +1429,7 @@ class OdooResourceHandler:
             requested_domain = self._parse_domain(domain)
             parsed_domain = requested_domain
             if model == "ir.attachment":
-                # Scope to accessible res_models — an attachment row carries
-                # url and index_content (the extracted document text), so the
-                # allowlist gate must cover metadata, not only payloads.
+                # Metadata is sensitive too — see AccessController.attachment_scope_domain.
                 scope = await asyncio.to_thread(
                     attachment_scope_domain, self.config, self.access_controller
                 )
@@ -1443,7 +1453,7 @@ class OdooResourceHandler:
             # read must surface as retryable, never as an unscoped result.
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
-            raise MCPPermissionError(f"Access denied: {e}") from e
+            raise MCPPermissionError(access_denied_message(e)) from e
         except OdooValidationFault as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
@@ -1477,7 +1487,7 @@ class OdooResourceHandler:
                 raise ValidationError(f"Could not verify access (connection error): {e}") from e
             except AccessControlError as e:
                 logger.warning(f"Access denied for {model}.read: {e}")
-                raise MCPPermissionError(f"Access denied: {e}") from e
+                raise MCPPermissionError(access_denied_message(e)) from e
 
             # Ensure we're connected
             if not self.connection.is_authenticated:

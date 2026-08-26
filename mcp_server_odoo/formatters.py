@@ -213,7 +213,6 @@ class RecordFormatter:
             if field_type == "monetary":
                 # Try to get currency information
                 # TODO: Use currency_field to get proper currency formatting
-                # currency_field = field_meta.get("currency_field", "currency_id")
                 return f"{value:,.2f}"  # Format with thousand separators
             elif field_type == "float":
                 # XML-RPC unmarshals Odoo's digits tuple as a list
@@ -294,12 +293,12 @@ class RecordFormatter:
                 return self._truncate_value(str(value))
             if record_id is None:
                 return "[Binary data]"
-            # No URIValidationError guard here, unlike the tools' copy: the
-            # only field name Odoo can produce that the URI grammar rejects is
-            # a leading-underscore one, and format_record drops those before
-            # the type dispatch. record_id is already a validated positive
-            # int, and self.model reached the formatter by surviving a real
-            # Odoo query.
+            # No URIValidationError guard here, unlike the tools' copy:
+            # leading-underscore field names are filtered by format_record
+            # before the type dispatch, though the URI grammar would also
+            # reject non-ASCII identifiers. record_id is already a validated
+            # positive int, and self.model reached the formatter by surviving
+            # a real Odoo query.
             uri = build_binary_uri(self.model, record_id, field_name)
             # Only a bin_size read yields a short size placeholder to append.
             if isinstance(value, str) and len(value) <= self.MAX_BINARY_PLACEHOLDER_LENGTH:

@@ -360,8 +360,7 @@ class OdooMCPServer:
 
         asyncio.run(self.run_stdio())
 
-    # SSE transport has been deprecated in MCP protocol version 2025-03-26
-    # Use streamable-http transport instead
+    # No SSE transport (deprecated in MCP; streamable-http replaces it).
 
     async def run_http(self):
         """Run the server using streamable HTTP transport.
@@ -515,7 +514,7 @@ class OdooMCPServer:
             "capabilities": {
                 "resources": True,  # Exposes Odoo data as resources
                 "tools": True,  # Provides tools for Odoo operations
-                "prompts": False,  # Prompts will be added in later phases
+                "prompts": False,  # No prompt support.
             }
         }
 

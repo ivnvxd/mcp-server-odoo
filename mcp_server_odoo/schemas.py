@@ -119,7 +119,8 @@ class CurrentContextResult(BaseModel):
 
     Structured fields are null when the user context could not be read
     (e.g. standard mode where res.users is not MCP-enabled); ``text``
-    then carries only the UTC datetime guidance.
+    then carries the UTC datetime guidance prefixed by a note explaining
+    why the personalized block is missing.
     """
 
     user_name: Optional[str] = Field(default=None, description="Display name of the connected user")
@@ -283,17 +284,17 @@ class PostMessageResult(BaseModel):
 
 
 class AggregateResult(BaseModel):
-    """Result of a server-side aggregation via Odoo's formatted_read_group."""
+    """Result of a server-side aggregation via Odoo's grouping methods."""
 
     groups: List[Dict[str, Any]] = Field(
         description=(
             "Aggregated buckets. Each entry contains the groupby keys, '__count', "
             "any requested aggregate values, and '__extra_domain' for drilldown. "
-            "'__extra_domain' is the group's OWN condition, not a complete "
-            "domain: AND it with the 'domain' you passed to reproduce the "
+            "AND '__extra_domain' with the 'domain' you passed to reproduce the "
             "group's records, e.g. search_records(domain=[*your_domain, "
-            "*group['__extra_domain']]). Using it alone ignores your filter "
-            "and returns more records than '__count'."
+            "*group['__extra_domain']]). On Odoo 19 it is only the group's own "
+            "condition; on older servers it is already the full domain (your "
+            "filter included) — re-ANDing is idempotent either way."
         )
     )
     model: str = Field(description="Odoo model name that was aggregated")

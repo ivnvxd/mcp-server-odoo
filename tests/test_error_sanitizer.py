@@ -801,3 +801,41 @@ class TestDeploymentTopologyScrubbing:
     )
     def test_business_prose_is_untouched(self, raw):
         assert ErrorSanitizer.sanitize_message(raw) == raw
+
+
+class TestAccessDeniedMappingIsNarrow:
+    """An access refusal that explains itself must survive sanitization.
+
+    The blanket `Access denied` -> `Permission denied for this operation`
+    mapping matched anywhere in the message, so the module's actionable
+    "not a member of the MCP User group" wording was replaced wholesale and
+    the real cause never reached the caller.
+    """
+
+    def test_explanatory_refusal_keeps_its_text(self):
+        raw = "MCP access denied: user is not a member of the MCP User group."
+
+        assert ErrorSanitizer.sanitize_message(raw) == raw
+
+    def test_group_guidance_survives(self):
+        raw = (
+            "Access denied: your user is not authorized for MCP. "
+            "Ask your Odoo administrator for the 'MCP User' group."
+        )
+
+        out = ErrorSanitizer.sanitize_message(raw)
+
+        assert "MCP User" in out and "administrator" in out
+
+    @pytest.mark.parametrize("raw", ["Access denied", "Access denied."], ids=["plain", "dotted"])
+    def test_bare_refusal_still_maps_to_the_generic(self, raw):
+        assert ErrorSanitizer.sanitize_message(raw) == "Permission denied for this operation"
+
+    def test_internals_in_a_refusal_are_still_scrubbed(self):
+        """Unmatched messages fall through to PATTERNS_TO_REMOVE, so keeping
+        the text does not mean keeping leak vectors."""
+        out = ErrorSanitizer.sanitize_message(
+            "Access denied: cannot reach http://internal-erp.corp.example.com:8069/mcp"
+        )
+
+        assert "internal-erp.corp.example.com" not in out

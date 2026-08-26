@@ -7,7 +7,7 @@ Spec-compliant MCP clients inject it into the model context on connect
 returns the same block with structured data.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .logging_config import get_logger
 from .odoo_connection import OdooConnection
@@ -23,6 +23,70 @@ UTC_DATETIME_GUIDANCE = (
     "- Provide datetimes to tools in UTC.\n"
     "- Convert to the user's timezone only for display."
 )
+
+# Prefixed to the fallback text so the caller learns WHY the personalized
+# block is missing instead of silently seeing null identity fields. The
+# usual cause is the expected standard-mode configuration: the read goes
+# through the MCP module's XML-RPC proxy, which refuses any model the
+# administrator has not enabled, and res.users is not enabled by default.
+CONTEXT_UNAVAILABLE_NOTE = (
+    "Session context unavailable: the connected user's identity, timezone and "
+    "company could not be read. In standard mode this usually means the "
+    "'res.users' model is not enabled for MCP access, or is enabled without "
+    "read permission."
+)
+
+# The fallback served whenever the personalized block cannot be built and no
+# specific reason was reported.
+CONTEXT_UNAVAILABLE_TEXT = f"{CONTEXT_UNAVAILABLE_NOTE}\n\n{UTC_DATETIME_GUIDANCE}"
+
+# Wrappers the transport adds around a reason without contributing meaning.
+_REASON_PREFIXES = ("operation failed:", "connection error:", "access denied:")
+
+# Reasons that, once unwrapped, say no more than CONTEXT_UNAVAILABLE_NOTE's own
+# guess already does. Compared by EQUALITY, not containment: an informative
+# refusal ("MCP access denied: user is not a member of the MCP User group")
+# contains one of these phrases and must still be surfaced.
+_UNINFORMATIVE_REASONS = frozenset(
+    {
+        "permission denied for this operation",
+        "permission denied",
+        "access denied",
+        "operation failed",
+        "an error occurred while processing your request",
+    }
+)
+
+
+def _unwrap_reason(reason: str) -> str:
+    """Strip transport wrappers so the reason is judged on its own words."""
+    cleaned = reason.strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _REASON_PREFIXES:
+            if cleaned.lower().startswith(prefix):
+                cleaned = cleaned[len(prefix) :].strip()
+                changed = True
+    return cleaned.rstrip(".").strip()
+
+
+def context_unavailable_text(reason: Optional[str] = None) -> str:
+    """Fallback text, naming the server's own reason when it gave one.
+
+    The static note guesses the most common cause (res.users not MCP-enabled).
+    That guess is wrong whenever the refusal came from somewhere else — a user
+    outside the MCP User group is refused on every model, not just res.users —
+    so a specific reason replaces the guess instead of being discarded.
+    """
+    cleaned = _unwrap_reason(reason or "")
+    if cleaned and cleaned.lower() not in _UNINFORMATIVE_REASONS:
+        note = (
+            "Session context unavailable: the connected user's identity, "
+            f"timezone and company could not be read — {cleaned}."
+        )
+        return f"{note}\n\n{UTC_DATETIME_GUIDANCE}"
+    return CONTEXT_UNAVAILABLE_TEXT
 
 
 # Every code point str.splitlines() treats as a line break: CR/LF plus the
@@ -124,10 +188,15 @@ def build_user_context(connection: OdooConnection) -> str:
     """Build the personalized user-context block for ``initialize.instructions``.
 
     Best-effort: on any failure it logs and falls back to the always-safe
-    UTC guidance so ``initialize`` still yields useful instructions.
+    UTC guidance (prefixed with ``CONTEXT_UNAVAILABLE_NOTE``) so
+    ``initialize`` still yields useful instructions.
+
+    Logged at WARNING, not ERROR: the common cause is the expected
+    standard-mode configuration where res.users is not an MCP-enabled model,
+    and an ERROR on every startup for a supported setup is just noise.
     """
     try:
         return format_user_context(get_user_context_data(connection))
     except Exception as e:
-        logger.error(f"Error building MCP user context: {e}")
-        return UTC_DATETIME_GUIDANCE
+        logger.warning(f"Could not build MCP user context, serving UTC guidance only: {e}")
+        return context_unavailable_text(str(e))

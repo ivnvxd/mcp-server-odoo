@@ -237,10 +237,7 @@ def build_uri(
 
 
 def build_record_uri(model: str, record_id: int) -> str:
-    """Build a record URI for a specific record.
-
-    This is a convenience function for building record URIs.
-    """
+    """Build a record URI for a specific record."""
     return build_uri(model, "record", record_id=record_id)
 
 
@@ -342,7 +339,7 @@ def _is_valid_model_name(model: str) -> bool:
 
 def _parse_query_parameters(query_string: str) -> Dict[str, str]:
     """Parse URL query parameters."""
-    # parse_qsl returns a list of tuples, filter out empty values
+    # keep blank values so '?domain=' parses as an empty string, not a missing key
     params = {}
     for key, value in urllib.parse.parse_qsl(query_string, keep_blank_values=True):
         params[key] = value

@@ -45,7 +45,7 @@ def main(argv: Optional[list[str]] = None) -> int:
   ODOO_LOCALE        Locale for formatting (e.g. en_US, de_DE)
 
 Optional environment variables:
-  ODOO_MCP_LOG_LEVEL       Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)
+  ODOO_MCP_LOG_LEVEL       Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
   ODOO_MCP_LOG_JSON        Enable structured JSON log output (default: false)
   ODOO_MCP_LOG_FILE        Path for rotating log file (10 MB, 5 backups)
   ODOO_MCP_DEFAULT_LIMIT   Default record limit (default: 10)

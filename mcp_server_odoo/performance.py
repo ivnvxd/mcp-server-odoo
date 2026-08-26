@@ -1,9 +1,8 @@
 """Performance optimization and caching for Odoo MCP Server.
 
-This module provides performance optimizations including:
-- Connection pooling and reuse
-- Intelligent response caching
-- Request batching and optimization
+This module provides:
+- Per-endpoint XML-RPC proxy creation and reuse (`ConnectionPool`)
+- `fields_get` result caching
 - Performance monitoring and metrics
 """
 
@@ -363,11 +362,8 @@ class ConnectionPool:
         self._database: Optional[str] = None
         self._lock = threading.Lock()
         self._connections_created = 0
-        # One SSL context shared by all HTTPS transports: amortizes context
-        # construction and lets TLS session tickets ride between the
-        # per-proxy keepalive sockets. ssl.SSLContext is documented
-        # thread-safe for use across connections; a future refactor that
-        # mutates it per-call would silently break this contract.
+        # One shared context amortizes construction and lets TLS session
+        # resumption work across sockets; never mutate it per-call.
         self._ssl_context: Optional[ssl.SSLContext] = (
             ssl.create_default_context() if config.url.startswith("https://") else None
         )

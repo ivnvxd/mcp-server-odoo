@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **`get_current_context` tool**: returns the connected user, timezone, company scope and UTC guidance as structured data.
-- **Personalized `initialize` instructions**: the same context block is sent at handshake (UTC-only fallback when the user read fails).
+- **Personalized `initialize` instructions**: the same context block is sent at handshake. When the user read fails it falls back to the UTC guidance plus a note naming the server's own reason (e.g. the caller is not in the MCP User group), or the likely cause when the server gives none.
 - **`get_fields` tool**: schema discovery with curated attributes by default; honors `field_names` and `attributes`.
 - **Binary & attachment resources**: `odoo://{model}/record/{id}/{field}` and `odoo://attachment/{id}`, served with per-read mimeTypes.
 - **No inlined base64**: populated binary fields are returned as fetchable resource URIs instead (reads use `bin_size`).
@@ -52,22 +52,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **HTTP session teardown**: keys off the transport that actually started, so `run_http()` under a default stdio config no longer strands tool handlers on a dead connection (#70).
 - **`aggregate_records` groupby collision**: aggregating a field that is also a groupby key is refused on the pre-19 path instead of returning corrupted groups.
 - **`aggregate_records` duplicate aggregates**: two aggregates over one field are refused on the pre-19 path, where `read_group` dropped one and mislabeled the other.
-- **`__extra_domain` drilldown contract**: documented as the group's own condition, to be ANDed with the caller's `domain`.
+- **`__extra_domain` drilldown contract**: documented — AND it with the caller's `domain` (group condition only on Odoo 19; already the full domain on older servers).
 - **`list_resource_templates`**: unreadable models are filtered out when `/mcp/models` reports per-model `operations` (best-effort — older modules omit the block and everything stays listed).
 - **`id:` aggregates on Odoo 15/16**: refused with an explanation — `read_group` deletes the `id` key before returning, so the value silently never arrived.
-- **`__extra_domain` on overall totals**: emitted as `[]` for `groupby=[]` on every version; Odoo 15/16 omit the key entirely.
+- **`__extra_domain` on overall totals**: the key is always present for `groupby=[]`, filled in as `[]` on Odoo 15/16, which omit it entirely (17/18 return the caller's domain, 19 a trivially-true condition — re-ANDing any of them is a no-op).
 - **Unbalanced domains**: a domain whose `&`/`|`/`!` operators lack operands is rejected with a clear message before any RPC, instead of reaching Odoo as a server-side "syntactically not correct".
 - **Deeply nested `domain`/`fields` strings**: reported as an invalid parameter instead of an unexpected failure — `json.loads` recurses per nesting level, so a 2 KB `[[[[...]]]]` exhausted the stack.
 - **Mutated caller context dicts**: `search()`, `read()` and `search_read()` copy the `context` they are given — `execute_kw` injects the locale into it, so a caller reusing one dict accumulated our keys.
 - **Caller-supplied invalid `lang`**: no longer blamed on `ODOO_MCP_LOCALE` — a bad context language used to null the configured locale for every later request in the process.
 - **`ModelInfo.operations` description**: was "Allowed operations (standard mode only)"; now states it is null in YOLO mode, where the flags are global and reported once under `yolo_mode.operations`.
 - **Session cookie race**: the REST session id is read under the lock that creates it, so a concurrent 401 handler can no longer produce `Cookie: session_id=None`.
+- **Self-explaining access refusals were flattened**: the sanitizer rewrote any message merely *containing* "access denied" to a bare `Permission denied for this operation`, so the module's actionable wording (e.g. a user outside the MCP User group) never reached the caller; only a bare refusal maps to the generic text now.
+- **Doubled "Access denied: " prefix**: refusals that already label themselves are no longer prefixed again across the tool and resource handlers.
+- **`list_models` swallowed the reason**: an access failure reported `Failed to list models: Permission denied for this operation` instead of what the server actually said.
+- **Discarded 403 diagnostics**: the MCP module's own message (`Model 'x' is not enabled for MCP access.`) is surfaced instead of a generic `Access denied to MCP endpoints`, which pointed at a credential problem that did not exist.
 
 ### Changed
+- **Documentation pass**: corrected stale claims (mcp ≥1.27 floor, YOLO auth needing `ODOO_USER`, Odoo 17+ HTML escaping, `handle_error` contract), documented `ODOO_MCP_LOG_FORMAT`/`ODOO_MCP_SLOW_OPERATION_THRESHOLD_MS`, and consolidated duplicated comments.
 - **`list_models` counts**: `total` is the number of models returned and `total_available` the database count; both are emitted in every mode.
-- **YOLO `list_models` rows**: no longer repeat the global `operations` dict on every row — it is reported once under `yolo_mode.operations` (46.6 KB to 28.5 KB for 319 models).
 - **Stored binaries in resource reads**: the record/search resources previously skipped every binary field; stored ones are now read under `bin_size` and rendered as fetchable URIs. Non-stored ones stay out — `bin_size` cannot short-circuit a compute (`sale.order.tax_totals` made a 10-row read 3.3x slower).
 - **Default search resource reads**: `odoo://{model}/search` reads only the fields its one-line summary renders, instead of every safe field of every record and then discarding them.
+- **CI targets Odoo 19**: both integration jobs run on `odoo:19`, and the MCP job now sources the module from `much-GmbH/much-mcp-server@19.0` (was `ivnvxd/odoo-apps@18.0`) using the `MCP_MODULE_PAT` secret. The module's declared Python dependencies are installed into the Odoo image so `mcp_server` can install.
 - **`mcp` floor raised to 1.27**: `session_idle_timeout` is passed to `StreamableHTTPSessionManager`, which does not accept it before 1.27.
 
 ### Removed

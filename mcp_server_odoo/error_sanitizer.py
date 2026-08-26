@@ -122,7 +122,15 @@ class ErrorSanitizer:
         r"Operation timeout after \d+ seconds": "Request timed out",
         # Authentication errors
         r"Invalid API key": "Authentication failed: Invalid API key",
-        r"Access denied": "Permission denied for this operation",
+        # Only a BARE refusal maps to the generic wording. A refusal that
+        # explains itself — "MCP access denied: user is not a member of the
+        # MCP User group." — must keep its text: the explanation is the
+        # actionable part and names a group, not an internal. Matching
+        # "Access denied" anywhere replaced those messages wholesale, which
+        # is why a missing MCP User group surfaced as an unexplained
+        # "Permission denied for this operation". Unmatched messages still
+        # run PATTERNS_TO_REMOVE below, so any real internals are scrubbed.
+        r"^Access denied\.?$": "Permission denied for this operation",
         # Record errors
         r"Record not found": "The requested record does not exist",
         r"Record .+ does not exist": "Record ID {} not found",
@@ -369,7 +377,6 @@ class ErrorSanitizer:
                 # Map internal error types to user-friendly categories
                 sanitized["category"] = cls._map_error_type(value)
 
-        # Remove any traceback information
         sanitized.pop("traceback", None)
 
         return sanitized

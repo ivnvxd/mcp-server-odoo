@@ -63,7 +63,6 @@ class OdooConfig:
 
     def __post_init__(self):
         """Validate configuration after initialization."""
-        # Validate URL
         if not self.url:
             raise ValueError("ODOO_URL is required")
 
@@ -71,7 +70,6 @@ class OdooConfig:
         if not self.url.startswith(("http://", "https://")):
             raise ValueError("ODOO_URL must start with http:// or https://")
 
-        # Validate YOLO mode
         valid_yolo_modes = {"off", "read", "true"}
         if self.yolo_mode not in valid_yolo_modes:
             raise ValueError(
@@ -79,7 +77,6 @@ class OdooConfig:
                 f"Must be one of: {', '.join(valid_yolo_modes)}"
             )
 
-        # Validate authentication (relaxed for YOLO mode)
         has_api_key = bool(self.api_key)
         has_credentials = bool(self.username and self.password)
 
@@ -94,7 +91,6 @@ class OdooConfig:
                     "both ODOO_USER and ODOO_PASSWORD"
                 )
 
-        # Validate numeric fields
         if self.default_limit <= 0:
             raise ValueError("ODOO_MCP_DEFAULT_LIMIT must be positive")
 
@@ -104,7 +100,6 @@ class OdooConfig:
         if self.default_limit > self.max_limit:
             raise ValueError("ODOO_MCP_DEFAULT_LIMIT cannot exceed ODOO_MCP_MAX_LIMIT")
 
-        # Validate log level
         valid_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         if self.log_level.upper() not in valid_log_levels:
             raise ValueError(
@@ -112,7 +107,6 @@ class OdooConfig:
                 f"Must be one of: {', '.join(valid_log_levels)}"
             )
 
-        # Validate transport
         valid_transports = {"stdio", "streamable-http"}
         if self.transport not in valid_transports:
             raise ValueError(
@@ -120,7 +114,6 @@ class OdooConfig:
                 f"Must be one of: {', '.join(valid_transports)}"
             )
 
-        # Validate port
         if self.port <= 0 or self.port > 65535:
             raise ValueError("Port must be between 1 and 65535")
 
@@ -276,7 +269,6 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
             return []
         return [h.strip() for h in hosts.split(",") if h.strip()]
 
-    # Create configuration
     config = OdooConfig(
         url=os.getenv("ODOO_URL", "").strip(),
         api_key=os.getenv("ODOO_API_KEY", "").strip() or None,
@@ -312,7 +304,7 @@ def get_config() -> OdooConfig:
         OdooConfig: The configuration object
 
     Raises:
-        ValueError: If configuration is not yet loaded
+        ValueError: If configuration cannot be loaded or is invalid.
     """
     global _config
     if _config is None:

@@ -2505,10 +2505,35 @@ class TestAggregateRecordsReadGroupFallback:
         assert passed.args[3]["groupby"] == []
         assert result.groupby == []
         assert result.aggregates == ["__count"]
-        # __extra_domain is present on every version: an overall-total row
-        # has no grouping condition, and Odoo 15/16 omit the key entirely.
+        # Odoo 15/16 omit __domain on the overall-total row, so the key is
+        # filled in as [] to keep it present on every version. (17/18 DO send
+        # it — see the next test.)
         assert result.groups == [{"__count": 42, "__extra_domain": []}]
         assert result.has_more is False
+
+    @pytest.mark.asyncio
+    async def test_empty_groupby_keeps_server_supplied_domain(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Odoo 17/18 DO send __domain on the overall-total row — carrying the
+        caller's own filter — and it is renamed, not overwritten with [].
+
+        Verified live against Odoo 18.0: aggregate_records(res.partner,
+        domain=[["is_company","=",True]]) returns that same domain back. The
+        drilldown contract stays correct because re-ANDing it is idempotent.
+        """
+        mock_access_controller.validate_model_access.return_value = None
+        mock_connection.execute_kw.return_value = [
+            {"__count": 11, "__domain": [["is_company", "=", True]]}
+        ]
+
+        aggregate_records = mock_app._tools["aggregate_records"]
+        result = await aggregate_records(
+            model="res.partner", groupby=[], domain=[["is_company", "=", True]]
+        )
+
+        assert result.groups == [{"__count": 11, "__extra_domain": [["is_company", "=", True]]}]
+        assert "__domain" not in result.groups[0]
 
     @pytest.mark.asyncio
     async def test_v17_also_dispatches_to_read_group(

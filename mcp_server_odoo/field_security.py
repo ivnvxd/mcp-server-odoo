@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Sequence, Union
 # `accesskey`) mirror SENSITIVE_MARKER_SEQUENCES for names written without a
 # separator. Arbitrary compounds (`webhooksecret`, ...) are deliberately NOT
 # chased — that enumeration has no end, and this heuristic is only
-# defense-in-depth: Odoo field-level `groups=` is the real ACL.
+# defense-in-depth.
 SENSITIVE_FIELD_MARKERS = (
     "password",
     "passwd",
@@ -87,9 +87,7 @@ SENSITIVE_MARKER_SEQUENCES = (
 
 # A leading boolean-flag segment (`is_secret`) or a trailing `_id`/`_ids`
 # relational reference (`token_id`, `api_key_ids`) never holds a credential
-# value. Guarding `_ids` is a deliberate divergence from the reference
-# in-process implementation (which guards only `_id`): an x2many field carries
-# record ids, not secret material.
+# value. _ids is guarded too: an x2many holds record ids, not secret material.
 _BOOLEAN_FLAG_PREFIXES = ("is", "has", "can")
 
 # A trailing hash/value/digest segment names the *representation* of what
@@ -104,35 +102,12 @@ _CREDENTIAL_REPRESENTATION_SUFFIXES = ("hash", "value", "digest")
 def is_sensitive_field_name(field_name: str) -> bool:
     """Whether `field_name` looks like it holds a credential value.
 
-    Best-effort, name-based defense-in-depth for the *bulk* read paths only: it
-    de-scores such a field out of the smart-default selection and strips it from
-    an `["__all__"]` read. Explicitly-named fields are always honored — Odoo
-    field-level `groups=` is the real ACL, not this heuristic.
-
-    A field is sensitive when its final `_`-delimited segment is a credential
-    marker (`*password`, `*_pass` such as `smtp_pass`, `*secret`, `*_token`,
-    `*apikey`) or the name ends with a credential `*_key` compound (`api_key`,
-    `secret_key`). The final segment is also matched with trailing digits
-    stripped (`password2`). Plural final segments are NOT singular-ized: a
-    withholding heuristic must minimize false positives, and plural names
-    (`max_tokens`, `num_tokens`, `tokens`, `secrets`, `api_tokens`) are
-    usually benign config/counter fields, not credential values. Markers
-    match only on whole segments, so `secretary_id` (segments
-    `secretary`/`id`) is not mistaken for a `secret` and `sort_key` is not a
-    key. A trailing
-    `_id`/`_ids` reference (`token_id`, `api_key_ids` — checked on the RAW
-    final segment, before normalization), a leading
-    `is_`/`has_`/`can_` boolean flag (`is_secret`), and a metadata suffix that
-    pushes the marker off the final segment (`password_expiry_date`,
-    `access_token_expiry`, `api_key_expiry_date`) are never treated as
-    sensitive. Trailing all-digit segments are copy/sequence suffixes, not
-    part of the name — they are dropped before the marker checks (after the
-    raw `_id`/`_ids` and boolean-flag guards), so `password_2` and
-    `api_key_2` are flagged while `address_2` stays benign. A trailing
-    `hash`/`value`/`digest` segment names the representation of what precedes
-    it — at most one is popped (after the digit pops) so `password_hash`,
-    `secret_value` and `api_key_hash` are flagged, while `commit_hash`,
-    `amount_value` and a bare `hash`/`value` stay benign.
+    A field is sensitive when, after the suffix normalization below, its name
+    ends in a credential marker segment or a credential `*_key` compound;
+    `_id`/`_ids` references and `is_`/`has_`/`can_` boolean flags never are.
+    The exact matching rules are documented on the SENSITIVE_* constants
+    above. Used only on the bulk read paths — callers always honor
+    explicitly-named fields.
     """
     segments = field_name.lower().split("_")
     if segments[-1] in ("id", "ids") or segments[0] in _BOOLEAN_FLAG_PREFIXES:
@@ -148,14 +123,8 @@ def is_sensitive_field_name(field_name: str) -> bool:
         segments.pop()
     if not segments:
         return False
-    # Pop at most one representation suffix (`password_hash`, `secret_value`,
-    # `api_key_digest`) so the marker checks see the credential tail. A bare
-    # `hash`/`value` field has nothing before the suffix and stays benign.
     if segments[-1] in _CREDENTIAL_REPRESENTATION_SUFFIXES and len(segments) > 1:
         segments.pop()
-    # Normalized forms of the final segment: as-is and trailing digits
-    # stripped (`password2` → `password`). No plural singular-ization —
-    # `max_tokens`/`num_tokens`-style config fields must stay benign.
     last = segments[-1]
     candidates = {last, last.rstrip("0123456789")}
     for sequence in SENSITIVE_MARKER_SEQUENCES:
@@ -193,8 +162,7 @@ def strip_sensitive_fields(record: Dict[str, Any]) -> List[str]:
     smart-default fallback that reads all fields — so a field named like a
     credential (`*_api_key`, `*password`, `webhook_secret` ...) is not surfaced
     by a caller that did not ask for it by name. An explicitly-named field is
-    honored (never stripped): Odoo field-level `groups=` is the real ACL, this
-    is best-effort defense in depth. Mutates `record` in place; returns the
+    honored (never stripped). Mutates `record` in place; returns the
     removed field names (sorted).
     """
     withheld = sorted(name for name in record if is_sensitive_field_name(name))

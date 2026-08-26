@@ -1,5 +1,6 @@
 """Tests for the personalized user-context block and get_current_context tool."""
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -7,8 +8,11 @@ import pytest
 from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.tools import OdooToolHandler
 from mcp_server_odoo.user_context import (
+    CONTEXT_UNAVAILABLE_NOTE,
+    CONTEXT_UNAVAILABLE_TEXT,
     UTC_DATETIME_GUIDANCE,
     build_user_context,
+    context_unavailable_text,
     get_user_context_data,
 )
 
@@ -166,9 +170,10 @@ class TestBuildUserContext:
     def test_read_failure_falls_back_to_utc_guidance(self):
         connection = MagicMock()
         connection.uid = 2
-        connection.read.side_effect = Exception("res.users not enabled for MCP")
+        connection.read.side_effect = Exception("Permission denied for this operation")
 
-        assert build_user_context(connection) == UTC_DATETIME_GUIDANCE
+        # A generic refusal adds nothing, so the static guess is served.
+        assert build_user_context(connection) == CONTEXT_UNAVAILABLE_TEXT
 
     def test_company_read_failure_keeps_user_context(self):
         """A denied res.company read drops only the allowed-companies list —
@@ -274,12 +279,16 @@ class TestGetCurrentContextTool:
     async def test_read_failure_returns_fallback_with_null_fields(self, config):
         connection = MagicMock()
         connection.uid = 2
-        connection.read.side_effect = Exception("boom")
+        connection.read.side_effect = Exception("Operation failed: Access denied")
         handler = self._handler(connection, config)
 
         result = await handler._handle_get_current_context_tool()
 
-        assert result.text == UTC_DATETIME_GUIDANCE
+        assert result.text == CONTEXT_UNAVAILABLE_TEXT
+        # The caller must be able to tell WHY identity is missing, not just
+        # receive nulls — the note names the usual standard-mode cause.
+        assert CONTEXT_UNAVAILABLE_NOTE in result.text
+        assert UTC_DATETIME_GUIDANCE in result.text
         assert result.user_name is None
         assert result.login is None
         assert result.company_id is None
@@ -309,3 +318,81 @@ class TestGetCurrentContextTool:
         assert result.allowed_companies is None
         assert "- Allowed companies:" not in result.text
         assert result.text != UTC_DATETIME_GUIDANCE
+
+
+class TestContextUnavailableFallback:
+    """The degraded path must explain itself instead of going silently null."""
+
+    def test_read_failure_explains_itself_and_avoids_the_error_log(self, caplog):
+        """A denied res.users read is an expected standard-mode configuration:
+        it explains itself in the text and stays out of the ERROR log."""
+        connection = MagicMock()
+        connection.uid = 2
+        connection.read.side_effect = Exception("Permission denied for this operation")
+
+        with caplog.at_level(logging.DEBUG, logger="mcp_server_odoo.user_context"):
+            text = build_user_context(connection)
+
+        assert CONTEXT_UNAVAILABLE_NOTE in text
+        assert "res.users" in text
+        # Still carries the always-safe guidance the caller depends on
+        assert text.endswith(UTC_DATETIME_GUIDANCE)
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_successful_build_carries_no_unavailable_note(self):
+        """The note must never leak into a context that was read fine."""
+        text = build_user_context(_make_connection(ADMIN_USER))
+
+        assert CONTEXT_UNAVAILABLE_NOTE not in text
+        assert "- User: Mitchell Admin (login: admin)" in text
+
+
+class TestReasonAwareFallback:
+    """A refusal that names its own cause must not be replaced by the guess.
+
+    Regression cover for a user outside the MCP User group: the module says
+    exactly what is wrong, and the static note's res.users guess is simply
+    false in that case.
+    """
+
+    MCP_GROUP_REFUSAL = (
+        "Operation failed: MCP access denied: user is not a member of the MCP User group."
+    )
+
+    def test_specific_reason_replaces_the_static_guess(self):
+        text = context_unavailable_text(self.MCP_GROUP_REFUSAL)
+
+        assert "not a member of the MCP User group" in text
+        assert "'res.users' model is not enabled" not in text
+        assert text.endswith(UTC_DATETIME_GUIDANCE)
+
+    def test_transport_wrappers_are_stripped(self):
+        """Nested 'Connection error:'/'Operation failed:'/'Access denied:'
+        prefixes are wrappers, not reasons — the tail is what matters."""
+        text = context_unavailable_text(
+            "Connection error: Operation failed: Access denied: your user is not "
+            "authorized for MCP. Ask your Odoo administrator for the 'MCP User' group"
+        )
+
+        assert "your user is not authorized for MCP" in text
+        assert "Operation failed:" not in text
+        assert "Connection error:" not in text
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            None,
+            "",
+            "   ",
+            "Access denied",
+            "Permission denied for this operation",
+            "Operation failed: Permission denied for this operation",
+            "An error occurred while processing your request",
+        ],
+        ids=["none", "empty", "blank", "bare", "generic", "wrapped-generic", "sanitizer-default"],
+    )
+    def test_uninformative_reasons_keep_the_static_guess(self, reason):
+        """Matching is by equality after unwrapping, not containment — a
+        generic phrase must not suppress the guess it is no better than."""
+        assert context_unavailable_text(reason) == CONTEXT_UNAVAILABLE_TEXT

@@ -309,7 +309,7 @@ The server requires the following environment variables:
 | `ODOO_YOLO` | No | YOLO mode - bypasses MCP security (⚠️ DEV ONLY) | `off`, `read`, `true` |
 | `ODOO_MCP_ENABLE_METHOD_CALLS` | No | Enable the `call_model_method` tool — requires `ODOO_YOLO=true` (⚠️ Dangerous, see [`call_model_method`](#call_model_method)) | `false`, `true` |
 
-*Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required.
+*Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required. In YOLO mode, `ODOO_USER` is required even when using an API key.
 
 **Notes:**
 - If database listing is restricted on your server, you must specify `ODOO_DB`
@@ -326,6 +326,8 @@ The server requires the following environment variables:
 | `ODOO_MCP_LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
 | `ODOO_MCP_LOG_JSON` | `false` | Enable structured JSON log output |
 | `ODOO_MCP_LOG_FILE` | — | Path for rotating log file (10 MB, 5 backups) |
+| `ODOO_MCP_LOG_FORMAT` | — | Custom Python logging format string (default: `%(asctime)s - %(name)s - %(levelname)s - %(message)s`) |
+| `ODOO_MCP_SLOW_OPERATION_THRESHOLD_MS` | `1000` | Threshold in milliseconds above which an operation is logged as slow |
 | `ODOO_MCP_TRANSPORT` | `stdio` | Transport type (`stdio`, `streamable-http`) |
 | `ODOO_MCP_HOST` | `localhost` | Host to bind for HTTP transport |
 | `ODOO_MCP_PORT` | `8000` | Port to bind for HTTP transport |
@@ -366,7 +368,7 @@ uvx mcp-server-odoo
 
 The HTTP endpoint will be available at: `http://localhost:8000/mcp/`
 
-> **Note**: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication. Requires MCP library v1.9.4 or higher for proper session management.
+> **Note**: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication. Requires MCP library v1.27.0 or higher.
 
 <details>
 <summary>Running streamable-http transport for remote access</summary>
