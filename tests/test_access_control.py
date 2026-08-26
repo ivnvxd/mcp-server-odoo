@@ -4,6 +4,7 @@ This module tests the AccessController class and its integration with
 the Odoo MCP module's REST API endpoints.
 """
 
+import io
 import json
 import os
 import time
@@ -15,6 +16,7 @@ import pytest
 from mcp_server_odoo.access_control import (
     AccessControlError,
     AccessController,
+    access_denied_message,
 )
 from mcp_server_odoo.config import OdooConfig
 
@@ -101,6 +103,51 @@ class TestAccessControl:
         mock_urlopen.side_effect = urllib.error.HTTPError(None, 401, "Unauthorized", {}, None)
 
         with pytest.raises(AccessControlError, match="API key rejected"):
+            controller._make_request("/test/endpoint")
+
+    @patch("urllib.request.urlopen")
+    def test_make_request_http_403_surfaces_the_module_message(self, mock_urlopen, controller):
+        """The module says exactly what was refused — keep its wording.
+
+        Replacing it with a generic denial sends users hunting a credential
+        problem when the real cause is an un-enabled model.
+        """
+        body = json.dumps(
+            {
+                "success": False,
+                "error": {
+                    "message": "Model 'ir.attachment' is not enabled for MCP access.",
+                    "code": "E403",
+                },
+            }
+        ).encode("utf-8")
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            None, 403, "Forbidden", {}, io.BytesIO(body)
+        )
+
+        with pytest.raises(AccessControlError, match="not enabled for MCP access"):
+            controller._make_request("/test/endpoint")
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"<html>not json</html>",
+            json.dumps({"success": False}).encode("utf-8"),
+            json.dumps({"success": False, "error": {"message": "   "}}).encode("utf-8"),
+            json.dumps({"success": False, "error": {"message": None}}).encode("utf-8"),
+        ],
+        ids=["not-json", "no-error-key", "blank-message", "null-message"],
+    )
+    @patch("urllib.request.urlopen")
+    def test_make_request_http_403_falls_back_when_body_is_unusable(
+        self, mock_urlopen, controller, body
+    ):
+        """An unreadable or empty body must not produce an empty error string."""
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            None, 403, "Forbidden", {}, io.BytesIO(body)
+        )
+
+        with pytest.raises(AccessControlError, match="Access denied to MCP endpoints"):
             controller._make_request("/test/endpoint")
 
     @patch("urllib.request.urlopen")
@@ -306,13 +353,19 @@ class TestAccessControl:
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
         with patch.object(controller, "_ensure_session") as mock_session:
-            controller._session_id = "sess123"
+            # The header must be built from _ensure_session's return value:
+            # a concurrent 401 handler nulls the attribute, so leave it None
+            # here — code that re-reads it would send "session_id=None".
+            mock_session.return_value = "fresh_session"
+            controller._session_id = None
             controller._do_request("/mcp/models", timeout=5, allow_session_retry=True)
             mock_session.assert_called_once()
 
         request = mock_urlopen.call_args[0][0]
         assert request.get_header("X-api-key") is None
-        assert "session_id=sess123" in request.get_header("Cookie", "")
+        cookie = request.get_header("Cookie", "")
+        assert "session_id=fresh_session" in cookie
+        assert "session_id=None" not in cookie
 
     @patch("urllib.request.urlopen")
     def test_api_key_auth_method_still_sends_key(self, mock_urlopen):
@@ -762,3 +815,37 @@ class TestAccessControlIntegration:
 if __name__ == "__main__":
     # Run integration tests when executed directly
     pytest.main([__file__, "-v", "-k", "Integration"])
+
+
+class TestAccessDeniedMessage:
+    """The MCP module labels its own refusals; do not label them twice."""
+
+    def test_self_labelled_refusal_is_not_double_prefixed(self):
+        e = AccessControlError(
+            "Access denied: your user is not authorized for MCP. "
+            "Ask your Odoo administrator for the 'MCP User' group."
+        )
+
+        message = access_denied_message(e)
+
+        assert message.lower().count("access denied") == 1
+        assert message.startswith("Access denied: your user is not authorized")
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["Access denied", "access denied: nope", "ACCESS DENIED: nope"],
+        ids=["bare", "lower", "upper"],
+    )
+    def test_prefix_detection_is_case_insensitive(self, raw):
+        assert (
+            not access_denied_message(AccessControlError(raw))
+            .lower()
+            .startswith("access denied: access denied")
+        )
+
+    def test_unlabelled_refusal_gets_the_prefix(self):
+        e = AccessControlError("Operation 'create' not allowed on model 'res.partner'")
+
+        assert access_denied_message(e) == (
+            "Access denied: Operation 'create' not allowed on model 'res.partner'"
+        )

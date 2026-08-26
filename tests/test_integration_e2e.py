@@ -276,18 +276,37 @@ class TestResourceOperations:
 
     @pytest.mark.asyncio
     async def test_record_safe_field_filtering(self, connected_env):
-        """Test that binary/html/serialized fields are excluded from record retrieval."""
+        """Stored binaries render as fetchable URIs, never as inlined base64."""
         handler = connected_env["resource_handler"]
         conn = connected_env["connection"]
 
         partner_ids = conn.search("res.partner", [], limit=1)
         assert partner_ids
+        partner_id = partner_ids[0]
 
-        result = await handler._handle_record_retrieval("res.partner", str(partner_ids[0]))
+        result = await handler._handle_record_retrieval("res.partner", str(partner_id))
 
-        # Binary fields like image_1920 should NOT appear in the output
-        assert "image_1920:" not in result
-        assert "image_128:" not in result
+        # A POPULATED binary is advertised as a resource URI plus its size, so
+        # the client fetches it on demand instead of paying for base64 inline.
+        # An empty one still renders its label ("image_1920: Not set"), so the
+        # field being present says nothing about which form to expect — assert
+        # per value, not per field name. (A demo database has partner images;
+        # CI initializes with --without-demo, so both cases occur.)
+        expected_uri = f"odoo://res.partner/record/{partner_id}/"
+        checked = 0
+        for line in result.splitlines():
+            label, _, value = line.strip().partition(":")
+            if label not in ("image_1920", "image_128"):
+                continue
+            checked += 1
+            value = value.strip()
+            assert value == "Not set" or value.startswith(f"{expected_uri}{label}"), (
+                f"{label} rendered as {value!r}; expected 'Not set' or a resource URI"
+            )
+        assert checked, "no image field rendered — the record resource dropped binaries"
+        # Whatever is rendered, no raw base64 payload leaks into the text
+        assert "data:image" not in result
+        assert "iVBORw0KGgo" not in result  # PNG base64 preamble
 
 
 class TestToolOperations:
@@ -430,7 +449,7 @@ class TestToolOperations:
     async def test_aggregate_records_count_only(self, connected_env):
         """aggregate_records: count partners by country via formatted_read_group.
 
-        Requires the much-mcp-server addon's whitelist to include
+        Requires the MCP module's whitelist to include
         ``"formatted_read_group": "read"`` (matches the Post-Completion step
         of the aggregate_records plan).
         """
@@ -488,21 +507,30 @@ class TestToolOperations:
             assert "partner_share:count_distinct" in bucket
 
     @pytest.mark.asyncio
-    async def test_aggregate_records_empty_groupby_rejected(self, connected_env):
-        """Validation runs before the network call."""
+    async def test_aggregate_records_empty_groupby_overall_count(self, connected_env):
+        """groupby=[] collapses to one overall row — the filtered-count path."""
         handler = connected_env["tool_handler"]
+        ac = connected_env["access_controller"]
 
-        with pytest.raises(ValidationError) as exc_info:
-            await handler._handle_aggregate_records_tool(
-                model="res.partner",
-                groupby=[],
-                aggregates=None,
-                domain=None,
-                order=None,
-                limit=None,
-                offset=0,
-            )
-        assert "groupby must not be empty" in str(exc_info.value)
+        try:
+            ac.validate_model_access("res.partner", "read")
+        except Exception:
+            pytest.skip("No read permission on res.partner in current MCP config")
+
+        result = await handler._handle_aggregate_records_tool(
+            model="res.partner",
+            groupby=[],
+            aggregates=None,
+            domain=[["active", "=", True]],
+            order=None,
+            limit=None,
+            offset=0,
+        )
+
+        assert result["groupby"] == []
+        assert result["aggregates"] == ["__count"]
+        assert len(result["groups"]) == 1
+        assert isinstance(result["groups"][0]["__count"], int)
 
 
 class TestErrorHandling:

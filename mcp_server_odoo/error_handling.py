@@ -1,10 +1,9 @@
-"""Error handling and monitoring for Odoo MCP Server.
+"""Error handling for Odoo MCP Server.
 
 This module provides a centralized error handling system with:
 - Error categorization and classification
-- User-friendly error message generation
-- Structured logging and monitoring
-- MCP-compliant error response formatting
+- Typed MCPError subclasses per category
+- Structured logging
 """
 
 import logging
@@ -203,7 +202,7 @@ class ErrorHandler:
         context: Optional[ErrorContext] = None,
         reraise: bool = True,
     ) -> Optional[MCPError]:
-        """Handle an error with logging and monitoring.
+        """Handle an error: convert it to an MCPError and log it.
 
         Args:
             error: The exception to handle
@@ -211,24 +210,20 @@ class ErrorHandler:
             reraise: Whether to re-raise the error after handling
 
         Returns:
-            MCPError instance if created, None otherwise
+            The MCPError (converted if needed) when reraise=False
 
         Raises:
-            The original error if reraise=True and it's not already an MCPError
+            MCPError: The (possibly converted) error when reraise=True
         """
-        # Convert to MCPError if needed
         if isinstance(error, MCPError):
             mcp_error = error
             if context:
                 mcp_error.context = context
         else:
-            # Map common exceptions to MCPError types
             mcp_error = self._convert_to_mcp_error(error, context)
 
-        # Log the error
         self._log_error(mcp_error)
 
-        # Re-raise if requested
         if reraise:
             raise mcp_error
 
@@ -244,7 +239,6 @@ class ErrorHandler:
         # Log the full traceback internally
         logger.debug(f"Full error details: {error_type}: {error_message}\n{traceback.format_exc()}")
 
-        # Map common builtin exceptions with sanitized messages
         if isinstance(error, (ConnectionError, TimeoutError)):
             return MCPConnectionError(
                 f"Connection failed: {error_message}",
@@ -273,8 +267,6 @@ class ErrorHandler:
                 context=context,
             )
         else:
-            # Default to system error for unknown exceptions
-            # Don't include traceback in user-facing error
             return MCPSystemError(
                 f"Unexpected error: {error_message}",
                 details={"category": "internal_error"},

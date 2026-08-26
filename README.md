@@ -20,7 +20,9 @@ An MCP server that enables AI assistants like Claude to interact with Odoo ERP s
 - 🔢 **Count records** matching specific criteria
 - 📋 **Inspect model fields** to understand data structure
 - 📊 **Server-side aggregation** — group, sum, and count without pulling raw rows
-- ⚡ **Workflow actions** — invoke any public Odoo method (post invoice, confirm SO, etc.) via an opt-in escape hatch
+- ⚡ **Workflow actions** — invoke public business methods (post invoice, confirm SO, etc.) via an opt-in escape hatch
+- 📎 **Binary & attachment resources** — fetch images, documents, and `ir.attachment` files via resource URIs
+- 👤 **Personalized session context** — the connected user, timezone, and company scope injected into the session instructions
 - 🔐 **Secure access** with API key or username/password authentication
 - 🎯 **Smart pagination** for large datasets
 - 🧠 **Smart field selection** — automatically picks the most relevant fields per model
@@ -307,7 +309,7 @@ The server requires the following environment variables:
 | `ODOO_YOLO` | No | YOLO mode - bypasses MCP security (⚠️ DEV ONLY) | `off`, `read`, `true` |
 | `ODOO_MCP_ENABLE_METHOD_CALLS` | No | Enable the `call_model_method` tool — requires `ODOO_YOLO=true` (⚠️ Dangerous, see [`call_model_method`](#call_model_method)) | `false`, `true` |
 
-*Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required.
+*Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required. In YOLO mode, `ODOO_USER` is required even when using an API key.
 
 **Notes:**
 - If database listing is restricted on your server, you must specify `ODOO_DB`
@@ -324,11 +326,14 @@ The server requires the following environment variables:
 | `ODOO_MCP_LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
 | `ODOO_MCP_LOG_JSON` | `false` | Enable structured JSON log output |
 | `ODOO_MCP_LOG_FILE` | — | Path for rotating log file (10 MB, 5 backups) |
+| `ODOO_MCP_LOG_FORMAT` | — | Custom Python logging format string (default: `%(asctime)s - %(name)s - %(levelname)s - %(message)s`) |
+| `ODOO_MCP_SLOW_OPERATION_THRESHOLD_MS` | `1000` | Threshold in milliseconds above which an operation is logged as slow |
 | `ODOO_MCP_TRANSPORT` | `stdio` | Transport type (`stdio`, `streamable-http`) |
 | `ODOO_MCP_HOST` | `localhost` | Host to bind for HTTP transport |
 | `ODOO_MCP_PORT` | `8000` | Port to bind for HTTP transport |
-| `ODOO_MCP_ALLOWED_HOSTS` | — | Comma-separated `Host` headers to accept for HTTP transport (DNS-rebinding protection). Set when running `streamable-http` behind a reverse proxy that forwards an external host, e.g. `odoo.example.com,localhost`. Unset leaves the default (no host validation). |
+| `ODOO_MCP_ALLOWED_HOSTS` | — | Comma-separated `Host` headers to accept for HTTP transport (DNS-rebinding protection). Set when running `streamable-http` behind a reverse proxy that forwards an external host, e.g. `odoo.example.com,localhost`. IPv6 literals may be bracketed or bare (`[::1]:8000`, `::1`). **Unset, protection is only auto-enabled for a loopback bind** — binding any other host (e.g. `0.0.0.0`) runs with no `Host`/`Origin` validation at all. |
 | `ODOO_MCP_SESSION_IDLE_TIMEOUT` | — | Seconds of inactivity before a `streamable-http` session is closed and its server-side state freed, e.g. `600`. Unset means sessions never expire. |
+| `ODOO_MCP_MAX_BINARY_SIZE` | `52428800` | Maximum bytes returned by a single binary/attachment `resources/read`. Checked before the payload is fetched (a `bin_size` probe for record fields, the stored `file_size` for attachments), so an oversized read is refused with a clean error instead of being pulled into memory and re-encoded to base64 for the wire. |
 
 ### Transport Options
 
@@ -363,7 +368,7 @@ uvx mcp-server-odoo
 
 The HTTP endpoint will be available at: `http://localhost:8000/mcp/`
 
-> **Note**: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication. Requires MCP library v1.9.4 or higher for proper session management.
+> **Note**: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication. Requires MCP library v1.27.0 or higher.
 
 <details>
 <summary>Running streamable-http transport for remote access</summary>
@@ -529,7 +534,7 @@ Search for records in any Odoo model with filters.
 - Omit `fields` or set to `null`: Returns smart selection of common fields
 - Specify field list: Returns only those specific fields
 - An empty list `[]` is treated like `null` (smart defaults)
-- Use `["__all__"]`: Returns all fields (use with caution)
+- Use `["__all__"]`: Returns all fields (use with caution) — credential-like fields are withheld and listed in the response's `note`; request them explicitly by name if needed
 
 ### `get_record`
 Retrieve a specific record by ID.
@@ -546,7 +551,26 @@ Retrieve a specific record by ID.
 - Omit `fields` or set to `null`: Returns smart selection of common fields with metadata
 - Specify field list: Returns only those specific fields
 - An empty list `[]` is treated like `null` (smart defaults)
-- Use `["__all__"]`: Returns all fields without metadata
+- Use `["__all__"]`: Returns all fields — credential-like fields are withheld and noted in the response metadata; request them explicitly by name if needed
+
+Responses also include `related_summaries`: display names for one2many/many2many collections holding at most 5 ids, so small relations are readable without extra lookups.
+
+### `get_fields`
+Describe a model's fields — type, label, required/readonly, relation target, and selection options. Use it to discover a model's schema before reading or writing records. Omit `attributes` for the curated default set (`type`, `string`, `required`, `readonly`, `relation`, `selection`); an explicit list replaces the curated set — include the defaults in your list if you still need them (e.g. `["type", "string", "help", "store"]`). Omit `field_names` to describe every field on the model. An empty list `[]` for either parameter is treated like omitting it.
+
+```json
+{
+  "model": "res.partner",
+  "field_names": ["name", "email", "parent_id"]
+}
+```
+
+### `get_current_context`
+Return the current session context: the connected user, their timezone, the active company plus any other allowed companies, and UTC datetime-handling guidance. Useful when unsure which user or company a request runs as, or how to interpret datetimes. Spec-compliant clients also receive this context through the `initialize` response instructions.
+
+```json
+{}
+```
 
 ### `list_models`
 List all models enabled for MCP access.
@@ -601,7 +625,7 @@ Delete a record from Odoo.
 ```
 
 ### `post_message`
-Post a message to a record's chatter (`mail.thread`). `subtype="note"` (default) is an internal log; `subtype="comment"` notifies followers. Set `body_is_html=true` for HTML markup. Optional `partner_ids` and `attachment_ids` reference existing partners and attachments.
+Post a message to a record's chatter (`mail.thread`). `subtype="note"` (default) is an internal log; `subtype="comment"` notifies followers. Set `body_is_html=true` for HTML markup. Optional `subject` sets a message subject line; optional `partner_ids` and `attachment_ids` reference existing partners and attachments.
 
 ```json
 {
@@ -622,7 +646,7 @@ Post a message to a record's chatter (`mail.thread`). `subtype="note"` (default)
 ```
 
 ### `aggregate_records`
-Server-side aggregation. Use this whenever the question is "totals/counts/groupings" rather than "list of records" — it pushes the work down to PostgreSQL instead of pulling raw rows. Dispatches to `formatted_read_group` on Odoo 19+ (the new dedicated method) and falls back to `read_group` with response normalization on older versions. Callers see a consistent response shape on every supported version. When `aggregates` is omitted, defaults to `["__count"]` so each group always carries a count.
+Server-side aggregation. Use this whenever the question is "totals/counts/groupings" rather than "list of records" — it pushes the work down to PostgreSQL instead of pulling raw rows. Dispatches to `formatted_read_group` on Odoo 19+ (the new dedicated method) and falls back to `read_group` with response normalization on older versions. Callers see a consistent response shape on every supported version. When `aggregates` is omitted, defaults to `["__count"]` so each group always carries a count. When more groups exist beyond the requested page, the response sets `has_more: true` and a `next_hint` with the follow-up offset.
 
 ```json
 {
@@ -641,10 +665,19 @@ Server-side aggregation. Use this whenever the question is "totals/counts/groupi
 ```
 
 ### `call_model_method`
-Generic XML-RPC `execute_kw` escape hatch — invokes any **public** method on any model, for workflow actions not covered by CRUD (post invoice, confirm sale order, validate picking, etc.). Available **only** when both `ODOO_YOLO=true` (full YOLO) and `ODOO_MCP_ENABLE_METHOD_CALLS=true` are set; otherwise the tool is not registered. Only public ASCII Python identifiers are accepted as method names — dotted, dashed, whitespace, non-ASCII, and `_`-prefixed names are rejected.
+Generic XML-RPC `execute_kw` escape hatch — invokes public **business** methods, for workflow actions not covered by CRUD (post invoice, confirm sale order, validate picking, etc.). Available **only** when both `ODOO_YOLO=true` (full YOLO) and `ODOO_MCP_ENABLE_METHOD_CALLS=true` are set; otherwise the tool is not registered. Only public ASCII Python identifiers are accepted as method names — dotted, dashed, whitespace, non-ASCII, and `_`-prefixed names are rejected.
+
+Some calls are blocked for safety even in full YOLO mode:
+
+- **`ir.actions.*` / `ir.cron` models** — their methods run with elevated privileges (server actions, scheduled jobs)
+- **`run` / `method_direct_trigger`** on any model — same escalation risk via proxies
+- **ORM CRUD/data-access primitives** (`create`, `write`, `unlink`, `read`, `search*`, `copy`, `sudo`, ...) — use the dedicated tools instead
+- **`web_*` methods** — the web-client data-access family
+
+List results are truncated to 100 items.
 
 > [!WARNING]
-> This tool can invoke **any** public method, including destructive ones (e.g. `unlink`, `button_draft`, custom workflow methods). Enable only in trusted environments where you accept the blast radius. Odoo's record rules and ACLs still apply for the authenticated user.
+> This tool can still invoke destructive workflow methods (e.g. `button_draft`, `action_cancel`, `toggle_active`, custom methods). Enable only in trusted environments where you accept the blast radius. Odoo's record rules and ACLs still apply for the authenticated user.
 
 ```json
 {
@@ -670,7 +703,8 @@ When you omit the `fields` parameter (or set it to `null`), the server automatic
 - **Essential fields** like `id`, `name`, `display_name`, and `active` are always included
 - **Business-relevant fields** (state, amount, email, phone, partner, etc.) are prioritized
 - **Technical fields** (message threads, activity tracking, website metadata) are excluded
-- **Expensive fields** (binary, HTML, large text, computed non-stored) are skipped
+- **Expensive fields** (binary, HTML, large text) are skipped; computed non-stored fields are deprioritized
+- **Credential-like fields** (names ending in `*password`, `*_pass` like `smtp_pass`, `passwd`, `*secret`, `*_token`, `*apikey`, or a `*_key` compound such as `api_key`/`secret_key`) are excluded from smart defaults and withheld from `["__all__"]` reads with an explanatory note — requesting such a field explicitly by name still returns it
 
 The default limit is 15 fields per request. Responses include metadata showing which fields were returned and how many total fields are available. You can adjust the limit with `ODOO_MCP_MAX_SMART_FIELDS` or bypass it entirely with `fields: ["__all__"]`.
 
@@ -684,12 +718,22 @@ The server also provides direct access to Odoo data through resource URIs:
 | `odoo://{model}/search` | Search records with default settings (first 10 records) |
 | `odoo://{model}/count` | Count all records in a model |
 | `odoo://{model}/fields` | Get field definitions and metadata for a model |
+| `odoo://{model}/record/{id}/{field}` | Fetch a binary/image field from a record, served with the correct mimeType |
+| `odoo://attachment/{id}` | Fetch an `ir.attachment` by ID (url-type attachments return their URL as text) |
 
 **Examples:**
 - `odoo://res.partner/record/1` — Get partner with ID 1
 - `odoo://product.product/search` — List first 10 products
 - `odoo://res.partner/count` — Count all partners
 - `odoo://product.product/fields` — Show all fields for products
+- `odoo://res.partner/record/1/image_128` — Get partner 1's avatar image
+- `odoo://attachment/42` — Download attachment 42
+
+Populated binary fields in `get_record`/`search_records` results are returned as these resource URIs instead of inline base64 — read the URI to retrieve the actual bytes. Binary content is served exclusively via MCP resources: tool results carry URIs, never inline base64, so your MCP client must support `resources/read` to fetch it.
+
+Record and search resource reads withhold credential-like fields the same way the tools' bulk reads do — to read such a field, request it explicitly by name via the tools' `fields` parameter.
+
+Binary and attachment reads are served whole, up to `ODOO_MCP_MAX_BINARY_SIZE` (default 50 MB). The size is checked before the payload is fetched, so an oversized field or attachment is refused with a clean error rather than buffered into a correspondingly large response.
 
 > **Note:** Resource URIs don't support query parameters (like `?domain=...`). For filtering, pagination, and field selection, use the `search_records` tool instead.
 

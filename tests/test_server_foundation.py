@@ -5,6 +5,7 @@ lifecycle management, and connection to Odoo.
 """
 
 import asyncio
+import contextlib
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -191,8 +192,12 @@ class TestServerFoundation:
         """Test run_stdio with connection failure — cleanup still runs."""
         server = server_with_mock_connection
 
-        # Make connection fail
+        # Make connection fail. The eager dynamic-instructions connect
+        # swallows the first failure; make sure the lifespan's reauth
+        # attempt on the half-built connection fails too.
         server._mock_connection.connect.side_effect = OdooConnectionError("Failed to connect")
+        server._mock_connection.is_authenticated = False
+        server._mock_connection.is_connected = False
 
         # Make run_stdio_async invoke the lifespan (which will fail on connect)
         async def mock_run_that_invokes_lifespan():
@@ -210,17 +215,36 @@ class TestServerFoundation:
 
     @pytest.mark.asyncio
     async def test_run_stdio_keyboard_interrupt(self, server_with_mock_connection):
-        """Test run_stdio with keyboard interrupt."""
+        """An interrupt while serving still tears the connection down."""
         server = server_with_mock_connection
 
-        # Mock the FastMCP run_stdio_async to raise KeyboardInterrupt
+        # Real FastMCP raises from inside the lifespan (interrupt happens
+        # while serving), so its finally-cleanup must run.
+        async def mock_run_interrupted():
+            async with server._odoo_lifespan(server.app):
+                raise KeyboardInterrupt
+
+        with patch("mcp_server_odoo.server.AccessController"):
+            with patch("mcp_server_odoo.server.register_resources", return_value=Mock()):
+                with patch("mcp_server_odoo.server.register_tools", return_value=Mock()):
+                    server.app.run_stdio_async = mock_run_interrupted
+                    # Should not raise (handled gracefully)
+                    await server.run_stdio()
+
+        # Lifespan teardown disconnected and cleared the connection
+        server._mock_connection.disconnect.assert_called_once()
+        assert server.connection is None
+
+    @pytest.mark.asyncio
+    async def test_run_stdio_keyboard_interrupt_before_lifespan(self, server_with_mock_connection):
+        """An interrupt before the lifespan is entered exits gracefully; the
+        eagerly-connected connection stays set (process exits right after)."""
+        server = server_with_mock_connection
         server.app.run_stdio_async = AsyncMock(side_effect=KeyboardInterrupt)
 
-        # Should not raise (handled gracefully)
-        await server.run_stdio()
+        await server.run_stdio()  # must not raise
 
-        # Verify cleanup ran despite interrupt
-        assert server.connection is None
+        assert server.connection is server._mock_connection
 
     @pytest.mark.asyncio
     async def test_lifespan_setup_and_teardown(self, server_with_mock_connection):
@@ -393,6 +417,132 @@ class TestServerFoundation:
         result = await handler(req)
         values = result.root.completion.values
         assert len(values) == 20
+
+
+class TestDynamicInstructions:
+    """Dynamic initialize.instructions applied via eager connect.
+
+    The SDK freezes instructions before the lifespan runs, so run_stdio/
+    run_http must connect eagerly and personalize them first — and startup
+    must never fail on it.
+    """
+
+    ADMIN_USER = {
+        "id": 2,
+        "name": "Mitchell Admin",
+        "login": "admin",
+        "tz": "Europe/Brussels",
+        "company_id": [1, "My Company"],
+        "company_ids": [1],
+    }
+
+    @pytest.fixture
+    def server_with_user_read(self):
+        """Server whose mocked connection serves the res.users context read."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key_12345",
+            database="test_db",
+        )
+        with (
+            patch("mcp_server_odoo.server.OdooConnection") as conn_cls,
+            patch("mcp_server_odoo.server.AccessController"),
+        ):
+            mock_connection = Mock()
+            mock_connection.is_authenticated = True
+            mock_connection.uid = 2
+            mock_connection.read.return_value = [dict(self.ADMIN_USER)]
+            conn_cls.return_value = mock_connection
+
+            server = OdooMCPServer(config)
+            server._mock_connection = mock_connection
+            yield server
+
+    @pytest.mark.asyncio
+    async def test_run_stdio_applies_personalized_instructions(self, server_with_user_read):
+        server = server_with_user_read
+        static = server.app.instructions
+        server.app.run_stdio_async = AsyncMock()
+
+        await server.run_stdio()
+
+        instructions = server.app._mcp_server.instructions
+        assert instructions.startswith(static), "static description retained as first line"
+        assert "You are connected to Odoo via MCP as:" in instructions
+        assert "- User: Mitchell Admin (login: admin)" in instructions
+        assert "- Timezone: Europe/Brussels" in instructions
+        assert "- Active company: My Company (ID: 1)" in instructions
+        assert "Datetime handling:" in instructions
+
+    @pytest.mark.asyncio
+    async def test_run_http_applies_personalized_instructions(self, server_with_user_read):
+        server = server_with_user_read
+        server.app.run_streamable_http_async = AsyncMock()
+
+        await server.run_http()
+
+        instructions = server.app._mcp_server.instructions
+        assert "- User: Mitchell Admin (login: admin)" in instructions
+
+    @pytest.mark.asyncio
+    async def test_run_http_users_read_failure_falls_back_to_utc_guidance(
+        self, server_with_user_read
+    ):
+        """The HTTP transport shares the stdio degradation behavior."""
+        server = server_with_user_read
+        static = server.app.instructions
+        server._mock_connection.read.side_effect = Exception("res.users not MCP-enabled")
+        server.app.run_streamable_http_async = AsyncMock()
+
+        await server.run_http()
+
+        instructions = server.app._mcp_server.instructions
+        assert instructions.startswith(static)
+        assert "Datetime handling:" in instructions
+        assert "You are connected to Odoo via MCP as:" not in instructions
+
+    @pytest.mark.asyncio
+    async def test_users_read_failure_falls_back_to_utc_guidance(self, server_with_user_read):
+        """Standard mode may gate res.users — instructions degrade, startup proceeds."""
+        server = server_with_user_read
+        static = server.app.instructions
+        server._mock_connection.read.side_effect = Exception("res.users not MCP-enabled")
+        server.app.run_stdio_async = AsyncMock()
+
+        await server.run_stdio()
+
+        instructions = server.app._mcp_server.instructions
+        assert instructions.startswith(static)
+        assert "Datetime handling:" in instructions
+        assert "You are connected to Odoo via MCP as:" not in instructions
+
+    @pytest.mark.asyncio
+    async def test_apply_dynamic_instructions_idempotent(self, server_with_user_read):
+        """Repeated application rebuilds from the static base — the context
+        block must never compound when one instance runs more than once."""
+        server = server_with_user_read
+        static = server.app.instructions
+
+        await server._apply_dynamic_instructions()
+        await server._apply_dynamic_instructions()
+
+        instructions = server.app._mcp_server.instructions
+        assert instructions.startswith(static)
+        assert instructions.count("You are connected to Odoo via MCP as:") == 1
+        assert instructions.count("Datetime handling:") == 1
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_keeps_static_instructions(self, server_with_user_read):
+        """Eager connect failure never aborts startup; instructions stay static."""
+        server = server_with_user_read
+        static = server.app.instructions
+        server._mock_connection.connect.side_effect = OdooConnectionError("Odoo down")
+        server._mock_connection.is_authenticated = False
+        server.app.run_stdio_async = AsyncMock()
+
+        await server.run_stdio()  # must not raise
+
+        assert server.app._mcp_server.instructions == static
 
 
 class TestServerIntegration:
@@ -748,6 +898,8 @@ class TestConnectionPersistsAcrossHttpSessions:
             mock_connection.is_authenticated = True
             conn_cls.return_value = mock_connection
             server = OdooMCPServer(config)
+            # run_http() sets this; these tests drive the lifespan directly.
+            server._http_transport_active = transport == "streamable-http"
             yield server, conn_cls, mock_connection, reg_res, reg_tools
 
     @pytest.mark.asyncio
@@ -841,8 +993,16 @@ class TestConnectionPersistsAcrossHttpSessions:
 class TestTransportSecurity:
     """Test transport security configuration for DNS rebinding protection."""
 
-    def test_no_transport_security_by_default(self):
-        """Test that no transport security is configured when allowed_hosts is empty."""
+    def test_loopback_bind_auto_enables_protection_when_allowed_hosts_is_empty(self):
+        """Empty allowed_hosts does NOT mean "no host validation".
+
+        _build_transport_security returns None, which hands the decision to
+        the SDK — and FastMCP auto-enables its loopback allowlist for a
+        127.0.0.1/localhost/::1 bind. This is the claim `.env.example`, the
+        README and _build_transport_security's own docstring all make, so it
+        needs an executable copy: the previous version of this test asserted
+        the opposite in its name, docstring and comment.
+        """
         config = OdooConfig(
             url="http://localhost:8069",
             api_key="test_api_key",
@@ -850,9 +1010,64 @@ class TestTransportSecurity:
         )
         server = OdooMCPServer(config)
 
-        # FastMCP should not have transport_security set
-        # We check via the settings or internal state
+        # The constructor forwards config.host rather than letting FastMCP
+        # fall back to its own 127.0.0.1 default.
         assert server.app.settings.host == "localhost"
+
+        settings = server.app.settings.transport_security
+        assert settings is not None
+        assert settings.enable_dns_rebinding_protection is True
+        assert "localhost:*" in settings.allowed_hosts
+
+    @pytest.mark.parametrize("host", ["localhost", "0.0.0.0"])
+    @pytest.mark.asyncio
+    async def test_run_http_binds_config_port_and_leaves_host_alone(self, host):
+        """run_http() takes no host/port, and the last hop config -> settings
+        is otherwise unasserted.
+
+        settings.port is the ONLY place the port reaches FastMCP — the
+        constructor passes host= and transport_security= but no port — so
+        losing that line silently binds 8000 whatever --port said. And host
+        must stay exactly as the constructor left it: reassigning it here
+        moves the bind without moving the transport-security decision FastMCP
+        already made from it, which is how a 0.0.0.0 config ends up on a
+        loopback bind with protection off. Both hosts are exercised because a
+        reintroduced ``host: str = "localhost"`` default is invisible when
+        config.host is already localhost — the 0.0.0.0 case is what tells them
+        apart.
+        """
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            host=host,
+            port=9000,
+        )
+        server = OdooMCPServer(config)
+        constructed_host = server.app.settings.host
+        assert constructed_host == host
+        constructed_security = server.app.settings.transport_security
+
+        server.app.run_streamable_http_async = AsyncMock()
+        with patch.object(server, "_apply_dynamic_instructions", new=AsyncMock()):
+            await server.run_http()
+
+        assert server.app.settings.port == 9000
+        assert server.app.settings.host == constructed_host
+        assert server.app.settings.transport_security is constructed_security
+
+    def test_non_loopback_bind_leaves_protection_off_when_allowed_hosts_is_empty(self):
+        """The other half, and the reason the docs tell 0.0.0.0 deployments to
+        set ODOO_MCP_ALLOWED_HOSTS: no Host/Origin validation runs at all.
+        """
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            host="0.0.0.0",
+            allowed_hosts=[],
+        )
+        server = OdooMCPServer(config)
+
+        assert server.app.settings.transport_security is None
 
     def test_transport_security_with_single_host(self):
         """Test transport security is configured with a single allowed host."""
@@ -916,8 +1131,10 @@ class TestTransportSecurity:
             assert "http://example.com:*" in call_kwargs["allowed_origins"]
             assert "https://example.com:*" in call_kwargs["allowed_origins"]
 
-    def test_transport_security_host_with_port_extracts_base(self):
-        """Test that base hostname is extracted from host:port for origins."""
+    def test_transport_security_host_with_port_pins_the_port(self):
+        """An entry that pins a port pins it for origins too — a ":*" origin
+        would trust a page served from any OTHER port on the same hostname,
+        making the Origin allowlist looser than the Host one."""
         from mcp.server.transport_security import TransportSecuritySettings
 
         config = OdooConfig(
@@ -933,9 +1150,11 @@ class TestTransportSecurity:
 
             # Host with port should be preserved as-is (already has port)
             assert "example.com:8080" in call_kwargs["allowed_hosts"]
-            # Origins should use base hostname with wildcard port
-            assert "http://example.com:*" in call_kwargs["allowed_origins"]
-            assert "https://example.com:*" in call_kwargs["allowed_origins"]
+            assert call_kwargs["allowed_origins"] == [
+                "http://example.com:8080",
+                "https://example.com:8080",
+            ]
+            assert "http://example.com:*" not in call_kwargs["allowed_origins"]
 
     def test_transport_security_not_configured_when_empty(self):
         """Test we pass None as transport_security when allowed_hosts is empty."""
@@ -974,14 +1193,21 @@ class TestTransportSecurity:
 
         assert settings is not None
         assert settings.enable_dns_rebinding_protection is True
-        # bare host gets :*, host:port is preserved as-is
-        assert settings.allowed_hosts == ["odoo.example.com:*", "localhost:9000"]
-        # origins use the base hostname (port stripped) on both schemes
+        # A port-less entry matches any port AND the bare authority a proxy
+        # sends on 80/443; host:port is preserved as-is.
+        assert settings.allowed_hosts == [
+            "odoo.example.com:*",
+            "odoo.example.com",
+            "localhost:9000",
+        ]
+        # origins mirror each host entry on both schemes, port included
         assert settings.allowed_origins == [
             "http://odoo.example.com:*",
             "https://odoo.example.com:*",
-            "http://localhost:*",
-            "https://localhost:*",
+            "http://odoo.example.com",
+            "https://odoo.example.com",
+            "http://localhost:9000",
+            "https://localhost:9000",
         ]
 
 
@@ -1031,3 +1257,152 @@ class TestSessionIdleTimeoutPreseed:
         server.app.streamable_http_app()
 
         assert server.app._session_manager is preseeded
+
+
+class TestAllowedHostsIPv6:
+    """A naive split(":") mangles IPv6 both ways, producing an allowlist that
+    rejects the very host the operator allowlisted."""
+
+    def _settings(self, hosts):
+        server = OdooMCPServer(
+            OdooConfig(url="http://localhost:8069", api_key="k", allowed_hosts=hosts)
+        )
+        return server._build_transport_security()
+
+    def test_bracketed_ipv6_with_port(self):
+        s = self._settings(["[::1]:8000"])
+        assert s.allowed_hosts == ["[::1]:8000"]
+        assert s.allowed_origins == ["http://[::1]:8000", "https://[::1]:8000"]
+
+    def test_bracketed_ipv6_without_port_gets_wildcard(self):
+        s = self._settings(["[::1]"])
+        assert s.allowed_hosts == ["[::1]:*", "[::1]"]
+        assert s.allowed_origins == [
+            "http://[::1]:*",
+            "https://[::1]:*",
+            "http://[::1]",
+            "https://[::1]",
+        ]
+
+    def test_bare_ipv6_normalized_to_bracket_form(self):
+        """Host headers and URL authorities carry IPv6 bracketed."""
+        s = self._settings(["::1"])
+        assert s.allowed_hosts == ["[::1]:*", "[::1]"]
+        assert s.allowed_origins == [
+            "http://[::1]:*",
+            "https://[::1]:*",
+            "http://[::1]",
+            "https://[::1]",
+        ]
+
+    def test_bare_global_ipv6_normalized(self):
+        s = self._settings(["2001:db8::1"])
+        assert s.allowed_hosts == ["[2001:db8::1]:*", "[2001:db8::1]"]
+        assert "http://[2001:db8::1]:*" in s.allowed_origins
+
+    def test_ipv6_origin_actually_matches_a_real_header(self):
+        """The SDK matches with startswith(base + ':') — the old 'http://[:*'
+        pattern could never match a real bracketed origin."""
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        mw = TransportSecurityMiddleware(self._settings(["[::1]:8000"]))
+        assert mw._validate_host("[::1]:8000") is True
+        assert mw._validate_origin("http://[::1]:8000") is True
+
+    def test_ipv4_and_dns_unchanged(self):
+        s = self._settings(["odoo.example.com", "localhost:9000"])
+        assert s.allowed_hosts == ["odoo.example.com:*", "odoo.example.com", "localhost:9000"]
+
+
+class TestTeardownGateTracksRunningTransport:
+    """The lifespan teardown must key off the transport that actually started,
+    not off config.transport — run_http() is public and binds config.host /
+    config.port, so it can run with ODOO_MCP_TRANSPORT unset."""
+
+    @contextlib.contextmanager
+    def _server(self, transport):
+        """Patches must stay live for the whole test — a suspended generator
+        keeps them only until GC, which made this order-dependent."""
+        config = OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key_12345",
+            database="test_db",
+            transport=transport,
+        )
+        with (
+            patch("mcp_server_odoo.server.OdooConnection") as conn_cls,
+            patch("mcp_server_odoo.server.AccessController"),
+            patch("mcp_server_odoo.server.register_resources"),
+            patch("mcp_server_odoo.server.register_tools"),
+        ):
+            mock_connection = Mock()
+            mock_connection.is_authenticated = True
+            conn_cls.return_value = mock_connection
+            yield OdooMCPServer(config), mock_connection
+
+    def test_default_is_stdio_semantics(self):
+        with self._server("stdio") as (server, _):
+            assert server._http_transport_active is False
+
+    @pytest.mark.asyncio
+    async def test_run_http_under_default_stdio_config_keeps_connection(self):
+        """The #70 failure: an HTTP session teardown must not disconnect and
+        null the handlers just because config.transport was never set."""
+        with self._server("stdio") as (server, mock_connection):
+            with patch.object(server.app, "run_streamable_http_async", new=AsyncMock()):
+                with patch.object(server, "_apply_dynamic_instructions", new=AsyncMock()):
+                    await server.run_http()
+
+            assert server._http_transport_active is True
+
+            async with server._odoo_lifespan(server.app):
+                pass
+
+            mock_connection.disconnect.assert_not_called()
+            assert server.connection is mock_connection
+            assert server.tool_handler is not None
+
+
+class TestAllowedHostsPortlessAuthority:
+    """A browser and a reverse proxy omit the default port from Host and
+    Origin entirely, and the SDK matches ':*' with startswith(base + ':') —
+    so a port-less entry has to allow the bare authority too, or the
+    documented 'odoo.example.com behind TLS' deployment rejects everything.
+    """
+
+    def _middleware(self, hosts):
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        server = OdooMCPServer(
+            OdooConfig(url="http://localhost:8069", api_key="k", allowed_hosts=hosts)
+        )
+        return TransportSecurityMiddleware(server._build_transport_security())
+
+    def test_portless_host_header_accepted(self):
+        mw = self._middleware(["odoo.example.com"])
+        assert mw._validate_host("odoo.example.com") is True
+        assert mw._validate_host("odoo.example.com:443") is True
+        assert mw._validate_host("odoo.example.com:8000") is True
+
+    def test_portless_origin_accepted(self):
+        mw = self._middleware(["odoo.example.com"])
+        assert mw._validate_origin("https://odoo.example.com") is True
+        assert mw._validate_origin("https://odoo.example.com:443") is True
+
+    def test_portless_ipv6_authority_accepted(self):
+        mw = self._middleware(["::1"])
+        assert mw._validate_host("[::1]") is True
+        assert mw._validate_host("[::1]:8000") is True
+
+    def test_other_hosts_still_rejected(self):
+        mw = self._middleware(["odoo.example.com"])
+        assert mw._validate_host("evil.example.com") is False
+        assert mw._validate_host("odoo.example.com.evil.com") is False
+        assert mw._validate_origin("https://evil.example.com") is False
+
+    def test_explicit_port_entry_stays_exact(self):
+        """An operator who names a port means that port."""
+        mw = self._middleware(["localhost:9000"])
+        assert mw._validate_host("localhost:9000") is True
+        assert mw._validate_host("localhost") is False
+        assert mw._validate_host("localhost:9001") is False

@@ -4,6 +4,7 @@ This module tests complete YOLO mode workflows with real Odoo instances.
 Tests are marked with @pytest.mark.yolo and require a running Odoo instance.
 """
 
+import base64
 import os
 import time
 from unittest.mock import MagicMock
@@ -504,6 +505,142 @@ class TestYoloOptInValidation:
 
 
 @pytest.mark.yolo
+class TestDynamicInstructionsE2E:
+    """initialize carries personalized instructions; get_current_context matches."""
+
+    @pytest.mark.asyncio
+    async def test_initialize_instructions_and_tool_match(self, monkeypatch):
+        from tests.helpers.mcp_test_client import MCPTestClient
+
+        # Spawn the real server (stdio) in YOLO read mode
+        monkeypatch.setenv("ODOO_URL", os.getenv("ODOO_URL", "http://localhost:8069"))
+        monkeypatch.setenv("ODOO_USER", os.getenv("ODOO_USER", "admin"))
+        monkeypatch.setenv("ODOO_PASSWORD", os.getenv("ODOO_PASSWORD", "admin"))
+        monkeypatch.setenv("ODOO_YOLO", "read")
+        if os.getenv("ODOO_DB"):
+            monkeypatch.setenv("ODOO_DB", os.getenv("ODOO_DB"))
+
+        client = MCPTestClient()
+        async with client.connect():
+            instructions = client.initialize_result.instructions
+            assert instructions, "initialize must carry instructions"
+            # Static description retained as the first line
+            assert instructions.startswith("MCP server for accessing and managing Odoo ERP data")
+            assert "You are connected to Odoo via MCP as:" in instructions
+            assert "(login: admin)" in instructions
+            assert "Datetime handling:" in instructions
+
+            result = await client.call_tool("get_current_context", {})
+            structured = result.structuredContent
+            assert structured is not None
+            assert structured["login"] == "admin"
+            # The tool text is exactly the dynamic block inside the instructions
+            assert structured["text"] in instructions
+
+
+@pytest.mark.yolo
+class TestBinaryResourcesE2E:
+    """Binary field & attachment resources round-trip against live Odoo."""
+
+    # 1x1 transparent PNG — starts with the PNG magic bytes
+    PNG_BYTES = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    PDF_BYTES = b"%PDF-1.4 binary e2e test payload"
+
+    @pytest.fixture
+    def config_full_access(self):
+        return OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            database=os.getenv("ODOO_DB"),
+            username=os.getenv("ODOO_USER", "admin"),
+            password=os.getenv("ODOO_PASSWORD", "admin"),
+            yolo_mode="true",
+        )
+
+    async def _read_resource(self, app, uri: str):
+        """Invoke the registered low-level resources/read handler."""
+        from mcp import types
+
+        handler = app._mcp_server.request_handlers[types.ReadResourceRequest]
+        request = types.ReadResourceRequest(
+            method="resources/read",
+            params=types.ReadResourceRequestParams(uri=uri),
+        )
+        result = await handler(request)
+        return result.root.contents[0]
+
+    @pytest.mark.asyncio
+    async def test_binary_field_and_attachment_round_trip(self, config_full_access):
+        from mcp import types
+        from mcp.server.fastmcp import FastMCP
+
+        from mcp_server_odoo.resources import register_resources
+
+        connection = OdooConnection(config_full_access)
+        connection.connect()
+        connection.authenticate()
+        access_controller = AccessController(config_full_access)
+
+        # Create inside try so a partial setup failure still cleans up
+        partner_id = None
+        attachment_id = None
+        try:
+            partner_id = connection.create(
+                "res.partner",
+                {
+                    "name": "Binary E2E Test Partner",
+                    "image_1920": base64.b64encode(self.PNG_BYTES).decode("ascii"),
+                },
+            )
+            attachment_id = connection.create(
+                "ir.attachment",
+                {
+                    "name": "binary-e2e.pdf",
+                    "datas": base64.b64encode(self.PDF_BYTES).decode("ascii"),
+                    "mimetype": "application/pdf",
+                },
+            )
+
+            app = FastMCP("test-binary-e2e")
+            register_resources(app, connection, access_controller, config_full_access)
+            tool_handler = OdooToolHandler(
+                MagicMock(), connection, access_controller, config_full_access
+            )
+
+            # Binary field: correct mimeType, blob byte-identical to the field
+            content = await self._read_resource(
+                app, f"odoo://res.partner/record/{partner_id}/image_1920"
+            )
+            assert isinstance(content, types.BlobResourceContents)
+            assert content.mimeType == "image/png"
+            stored = connection.read("res.partner", [partner_id], ["image_1920"])[0]["image_1920"]
+            assert base64.b64decode(content.blob) == base64.b64decode(stored)
+
+            # Attachment: correct mimeType, blob byte-identical to the upload
+            content = await self._read_resource(app, f"odoo://attachment/{attachment_id}")
+            assert isinstance(content, types.BlobResourceContents)
+            assert content.mimeType == "application/pdf"
+            assert base64.b64decode(content.blob) == self.PDF_BYTES
+
+            # get_record never inlines base64: binary value arrives as a URI
+            record_result = await tool_handler._handle_get_record_tool(
+                "res.partner", partner_id, ["name", "image_1920"]
+            )
+            assert (
+                record_result.record["image_1920"]
+                == f"odoo://res.partner/record/{partner_id}/image_1920"
+            )
+
+        finally:
+            if attachment_id:
+                connection.unlink("ir.attachment", [attachment_id])
+            if partner_id:
+                connection.unlink("res.partner", [partner_id])
+            connection.disconnect()
+
+
+@pytest.mark.yolo
 class TestYoloAggregateRecordsE2E:
     """Live YOLO mode tests for the aggregate_records tool (Odoo 17+)."""
 
@@ -577,16 +714,21 @@ class TestYoloAggregateRecordsE2E:
             assert "partner_share:count_distinct" in bucket
 
     @pytest.mark.asyncio
-    async def test_empty_groupby_rejected(self, handler):
-        """Empty groupby is rejected before any network call."""
-        with pytest.raises(ValidationError) as exc_info:
-            await handler._handle_aggregate_records_tool(
-                model="res.partner",
-                groupby=[],
-                aggregates=None,
-                domain=None,
-                order=None,
-                limit=None,
-                offset=0,
-            )
-        assert "groupby must not be empty" in str(exc_info.value)
+    async def test_empty_groupby_returns_overall_count(self, handler):
+        """groupby=[] collapses to one overall row — the filtered-count path."""
+        result = await handler._handle_aggregate_records_tool(
+            model="res.partner",
+            groupby=[],
+            aggregates=None,
+            domain=[["active", "=", True]],
+            order=None,
+            limit=None,
+            offset=0,
+        )
+
+        assert result["groupby"] == []
+        assert result["aggregates"] == ["__count"]
+        assert len(result["groups"]) == 1
+        assert isinstance(result["groups"][0]["__count"], int)
+        assert result["groups"][0]["__count"] >= 0
+        assert result["has_more"] is False
