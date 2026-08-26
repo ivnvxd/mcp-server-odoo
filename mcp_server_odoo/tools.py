@@ -161,6 +161,56 @@ MAX_LISTED_MODELS = 500
 # guards against pathological inputs.
 _MAX_JSON_PARAM_BYTES = 1_000_000
 
+# Deeply nested parameter strings are refused on their own shape, never on the
+# parser happening to fail: CPython 3.12 raised the JSON scanner's recursion
+# ceiling, so `json.loads` raises RecursionError on 3.11 and earlier but
+# accepts 1000-deep input on 3.12+. Relying on that difference made the same
+# request an "invalid parameter" on one interpreter and a stack-exhausting
+# success on another. A byte cap does not help — 2 KB nests 1000 deep.
+#
+# Real domains sit at 2-4 levels (`[("id", "in", [1, 2])]` is 3), so this
+# ceiling is far above anything legitimate.
+_MAX_PARAM_NESTING = 32
+
+
+def _nesting_depth(raw: str) -> int:
+    """Deepest bracket nesting in `raw`, ignoring brackets inside strings.
+
+    Scanned character-wise rather than by parsing, so nothing large is built
+    and no recursion happens. Quote-aware (with escapes) so a value that
+    merely contains a bracket — a URL, a JSON blob in a char field — does not
+    inflate the depth and trip the guard.
+    """
+    depth = deepest = 0
+    quote: Optional[str] = None
+    escaped = False
+    for char in raw:
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+        elif char in "[{":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif char in "]}":
+            depth -= 1
+    return deepest
+
+
+def _check_param_nesting(raw: str, label: str) -> None:
+    """Refuse a parameter string nested deeper than `_MAX_PARAM_NESTING`."""
+    if _nesting_depth(raw) > _MAX_PARAM_NESTING:
+        raise ValidationError(
+            f"Invalid {label} parameter: nested deeper than {_MAX_PARAM_NESTING} levels."
+        )
+
+
 # Compact attribute set get_fields returns when the caller does not request
 # specific attributes — enough to discover a model's schema without the noise.
 CURATED_FIELD_ATTRIBUTES = (
@@ -787,6 +837,7 @@ class OdooToolHandler:
             check_domain_balance(domain)
             return domain
 
+        _check_param_nesting(domain, "domain")
         try:
             parsed = json.loads(domain)
         except (json.JSONDecodeError, RecursionError) as e:
@@ -1355,6 +1406,7 @@ class OdooToolHandler:
                 parsed_fields = fields
                 if fields is not None and isinstance(fields, str):
                     # Parse string to list
+                    _check_param_nesting(fields, "fields")
                     try:
                         parsed_fields = json.loads(fields)
                         if not isinstance(parsed_fields, list):

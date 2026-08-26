@@ -5122,11 +5122,14 @@ class TestResourceTemplateReadFilter:
 
 
 class TestDeeplyNestedParameterStrings:
-    """json.loads recurses per nesting level, so a 2 KB "[[[[...]]]]" string
-    exhausts the stack. Uncaught, that surfaced as an unexpected failure —
-    logged at ERROR and rewritten to a generic sanitized message — instead of
-    the clean "invalid parameter" the same input deserves. A byte cap would
-    not have helped; the input is tiny.
+    """A 2 KB "[[[[...]]]]" string must be refused as an invalid parameter.
+
+    Rejection keys on the string's own nesting depth, never on the parser
+    failing: CPython 3.12 raised the JSON scanner's recursion ceiling, so
+    `json.loads` raises RecursionError on 3.11 and earlier but accepts the
+    same 1000-deep input on 3.12+. Keying on that made this input an
+    "invalid parameter" on one interpreter and a stack-exhausting success on
+    another. A byte cap would not have helped; the input is tiny.
     """
 
     @pytest.fixture
@@ -5164,6 +5167,7 @@ class TestDeeplyNestedParameterStrings:
             await handler._handle_search_tool("res.partner", self.NESTED, None, 5, 0, None)
 
         assert "Invalid domain parameter" in str(exc.value)
+        assert "nested deeper than" in str(exc.value)
         assert "recursion" not in str(exc.value).lower()
 
     @pytest.mark.asyncio
@@ -5172,7 +5176,24 @@ class TestDeeplyNestedParameterStrings:
             await handler._handle_search_tool("res.partner", None, self.NESTED, 5, 0, None)
 
         assert "Invalid fields parameter" in str(exc.value)
+        assert "nested deeper than" in str(exc.value)
         assert "recursion" not in str(exc.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_brackets_inside_string_values_do_not_trip_the_guard(self, handler):
+        """Depth is counted quote-aware, so a value that merely CONTAINS
+        brackets — a URL, a serialized blob in a char field — is not mistaken
+        for nesting."""
+        domain = '[["name", "=", "' + "[" * 200 + '"]]'
+
+        await handler._handle_search_tool("res.partner", domain, None, 5, 0, None)
+
+    @pytest.mark.asyncio
+    async def test_ordinary_nested_domain_is_accepted(self, handler):
+        """A realistic domain nests ~3 deep and must pass untouched."""
+        domain = '["|", ["id", "in", [1, 2, 3]], ["name", "=", "x"]]'
+
+        await handler._handle_search_tool("res.partner", domain, None, 5, 0, None)
 
 
 class TestAttachmentScopeDomain:

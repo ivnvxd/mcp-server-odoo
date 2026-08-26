@@ -286,11 +286,24 @@ class TestResourceOperations:
 
         result = await handler._handle_record_retrieval("res.partner", str(partner_id))
 
-        # A stored binary is advertised as a resource URI plus its size, so the
-        # client can fetch it on demand instead of paying for base64 inline.
-        for field in ("image_1920", "image_128"):
-            if f"{field}:" in result:
-                assert f"{field}: odoo://res.partner/record/{partner_id}/{field}" in result
+        # A POPULATED binary is advertised as a resource URI plus its size, so
+        # the client fetches it on demand instead of paying for base64 inline.
+        # An empty one still renders its label ("image_1920: Not set"), so the
+        # field being present says nothing about which form to expect — assert
+        # per value, not per field name. (A demo database has partner images;
+        # CI initializes with --without-demo, so both cases occur.)
+        expected_uri = f"odoo://res.partner/record/{partner_id}/"
+        checked = 0
+        for line in result.splitlines():
+            label, _, value = line.strip().partition(":")
+            if label not in ("image_1920", "image_128"):
+                continue
+            checked += 1
+            value = value.strip()
+            assert value == "Not set" or value.startswith(f"{expected_uri}{label}"), (
+                f"{label} rendered as {value!r}; expected 'Not set' or a resource URI"
+            )
+        assert checked, "no image field rendered — the record resource dropped binaries"
         # Whatever is rendered, no raw base64 payload leaks into the text
         assert "data:image" not in result
         assert "iVBORw0KGgo" not in result  # PNG base64 preamble
