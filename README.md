@@ -1,5 +1,7 @@
 # MCP Server for Odoo
 
+[![Beacon Verified](https://registry-ruby.vercel.app/api/v1/agents/ivnvxd%2Fmcp-server-odoo/badge.svg)](https://portal-five-phi-54.vercel.app/?q=odoo+mcp)
+
 [![CI](https://github.com/ivnvxd/mcp-server-odoo/actions/workflows/ci.yml/badge.svg)](https://github.com/ivnvxd/mcp-server-odoo/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/ivnvxd/mcp-server-odoo/branch/main/graph/badge.svg)](https://codecov.io/gh/ivnvxd/mcp-server-odoo)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
