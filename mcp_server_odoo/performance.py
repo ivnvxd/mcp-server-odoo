@@ -1,9 +1,8 @@
 """Performance optimization and caching for Odoo MCP Server.
 
-This module provides performance optimizations including:
-- Connection pooling and reuse
-- Intelligent response caching
-- Request batching and optimization
+This module provides:
+- Per-endpoint XML-RPC proxy creation and reuse (`ConnectionPool`)
+- `fields_get` result caching
 - Performance monitoring and metrics
 """
 
@@ -192,47 +191,6 @@ class Cache:
         with self._lock:
             return self._remove(key, reason="manual")
 
-    def invalidate_pattern(self, pattern: str) -> int:
-        """Invalidate all entries matching pattern.
-
-        Args:
-            pattern: Pattern to match (e.g., "model:res.partner:*")
-
-        Returns:
-            Number of entries invalidated
-        """
-        with self._lock:
-            count = 0
-            keys_to_remove = []
-
-            # Enhanced pattern matching with * wildcard
-            if "*" in pattern:
-                # Handle patterns with wildcards
-                parts = pattern.split("*")
-                keys_to_remove = []
-                for k in self._cache.keys():
-                    # Check if all non-wildcard parts are in the key in order
-                    key_matches = True
-                    search_from = 0
-                    for part in parts:
-                        if part:  # Skip empty parts from consecutive wildcards
-                            idx = k.find(part, search_from)
-                            if idx == -1:
-                                key_matches = False
-                                break
-                            search_from = idx + len(part)
-                    if key_matches:
-                        keys_to_remove.append(k)
-            else:
-                if pattern in self._cache:
-                    keys_to_remove = [pattern]
-
-            for key in keys_to_remove:
-                if self._remove(key, reason="manual"):
-                    count += 1
-
-            return count
-
     def clear(self):
         """Clear all cache entries."""
         with self._lock:
@@ -404,11 +362,8 @@ class ConnectionPool:
         self._database: Optional[str] = None
         self._lock = threading.Lock()
         self._connections_created = 0
-        # One SSL context shared by all HTTPS transports: amortizes context
-        # construction and lets TLS session tickets ride between the
-        # per-proxy keepalive sockets. ssl.SSLContext is documented
-        # thread-safe for use across connections; a future refactor that
-        # mutates it per-call would silently break this contract.
+        # One shared context amortizes construction and lets TLS session
+        # resumption work across sockets; never mutate it per-call.
         self._ssl_context: Optional[ssl.SSLContext] = (
             ssl.create_default_context() if config.url.startswith("https://") else None
         )

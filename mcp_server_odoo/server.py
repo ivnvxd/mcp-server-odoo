@@ -6,7 +6,7 @@ and functionality through the Model Context Protocol.
 
 import asyncio
 import contextlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from mcp.server import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -24,9 +24,34 @@ from .odoo_connection import OdooConnection, OdooConnectionError
 from .performance import PerformanceManager
 from .resources import register_resources
 from .tools import register_tools
+from .user_context import build_user_context
 
 # Set up logging
 logger = get_logger(__name__)
+
+
+def _split_allowed_host(entry: str) -> Tuple[str, Optional[str]]:
+    """Split one ODOO_MCP_ALLOWED_HOSTS entry into ``(host, port)``.
+
+    A naive ``split(":")`` mangles IPv6 in both directions: ``[::1]:8000``
+    yields the host ``"["``, and a bare ``::1`` looks like it already carries
+    a port, so it never gets the ``:*`` wildcard it needs. Both produce an
+    allowlist that rejects the very host the operator allowlisted.
+
+    Bare IPv6 literals are normalized to bracket form because that is what a
+    Host header and a URL authority actually carry (``Host: [::1]:8000``).
+    """
+    entry = entry.strip()
+    if entry.startswith("["):  # [::1] or [::1]:8000
+        host, _, rest = entry.partition("]")
+        host += "]"
+        port = rest[1:] if rest.startswith(":") and len(rest) > 1 else None
+        return host, port
+    if entry.count(":") > 1:  # bare IPv6 literal: a port needs brackets
+        return f"[{entry}]", None
+    host, sep, port = entry.partition(":")
+    return host, (port or None) if sep else None
+
 
 # Server version — single-sourced from the package
 SERVER_VERSION = __version__
@@ -64,10 +89,20 @@ class OdooMCPServer:
         # entries (streamable-http enters the lifespan per session)
         self._connect_lock = asyncio.Lock()
 
+        # Set by run_http() — the lifespan teardown keys off which transport
+        # actually started, not off config.transport. run_http() is public and
+        # can be called with ODOO_MCP_TRANSPORT unset (it binds config.host /
+        # config.port either way); tearing the connection down per HTTP
+        # session then leaves every
+        # registered tool closure bound to a disconnected handler (FastMCP
+        # keeps the first registration for a duplicate tool name), which is
+        # exactly the failure the gate exists to prevent.
+        self._http_transport_active = False
+
         # Configure transport security for DNS rebinding protection. Left as
-        # None (no allowed_hosts configured) the SDK middleware defaults to
-        # protection DISABLED — preserving prior behavior for stdio and for
-        # HTTP deployments that don't set ODOO_MCP_ALLOWED_HOSTS.
+        # None (no allowed_hosts configured), the SDK enables protection only
+        # for a loopback bind and leaves it OFF for any other host — see
+        # _build_transport_security.
         transport_security = self._build_transport_security()
 
         # Create FastMCP instance with server metadata
@@ -78,6 +113,12 @@ class OdooMCPServer:
             host=self.config.host,
             transport_security=transport_security,
         )
+
+        # Pristine static instructions, captured before any personalization.
+        # _apply_dynamic_instructions() rebuilds from this base so repeated
+        # calls (run_stdio/run_http reuse of one instance) never compound
+        # the personalized context block.
+        self._static_instructions = self.app.instructions or ""
 
         @self.app.custom_route("/health", methods=["GET"])
         async def health_check(request):
@@ -127,7 +168,7 @@ class OdooMCPServer:
                 self._register_tools()
             yield {}
         finally:
-            if self.config.transport != "streamable-http":
+            if not self._http_transport_active:
                 self._cleanup_connection()
 
     def _ensure_connection(self):
@@ -201,6 +242,11 @@ class OdooMCPServer:
                     auth_method=self.connection.auth_method,
                 )
             except Exception as e:
+                # self.connection is deliberately NOT cleared here: it is
+                # assigned before connect()/authenticate() run, and a later
+                # session reauthenticates that same object IN PLACE (see
+                # _ensure_connection and the recovery test). Replacing it
+                # would strand any handler already holding a reference.
                 context = ErrorContext(operation="connection_setup")
                 # Let specific errors propagate as-is
                 if isinstance(e, (OdooConnectionError, ConfigurationError)):
@@ -217,7 +263,16 @@ class OdooMCPServer:
             except Exception as e:
                 logger.error(f"Error closing connection: {e}")
             finally:
-                # Always clear connection reference
+                # Always clear connection reference. Handlers already
+                # registered on self.app stay registered (FastMCP has no
+                # deregistration); reusing this instance for another run is
+                # not a supported flow (__main__ builds a fresh server per
+                # process). If it happens anyway, re-registration is benign
+                # at the FastMCP layer: resource templates are overwritten
+                # (dict assignment), duplicate tool names keep the existing
+                # registration (a warning is logged), and the low-level
+                # binary read override replaces itself without chaining
+                # (see resources._install_binary_read_override).
                 self.connection = None
                 self.access_controller = None
                 self.resource_handler = None
@@ -252,10 +307,41 @@ class OdooMCPServer:
             )
             logger.info("Registered MCP tools")
 
+    async def _apply_dynamic_instructions(self):
+        """Personalize ``initialize.instructions`` with the user context.
+
+        Must run BEFORE the transport starts: the SDK freezes instructions
+        when the transport calls ``create_initialization_options()``, which
+        happens before the lifespan (where the connection is normally
+        established) is entered — hence the eager connect here. Guarded so
+        startup never fails on it: on any error the static instructions are
+        kept, and a real connection failure will still surface properly from
+        the lifespan.
+        """
+        try:
+            async with self._connect_lock:
+                await asyncio.to_thread(self._ensure_connection)
+            if not (self.connection and self.connection.is_authenticated):
+                return
+            # build_user_context does sync XML-RPC I/O — keep it off the loop
+            context = await asyncio.to_thread(build_user_context, self.connection)
+            # Rebuild from the pristine static base (captured at __init__) —
+            # reading self.app.instructions here would compound the context
+            # block on repeated calls, since it reflects prior mutations.
+            static = self._static_instructions
+            # FastMCP (mcp 1.27) exposes `instructions` as a read-only
+            # property over the low-level server attribute — assign the
+            # private attr, which create_initialization_options() reads
+            # when the transport starts.
+            self.app._mcp_server.instructions = f"{static}\n\n{context}" if static else context
+        except Exception as e:
+            logger.warning(f"Dynamic instructions unavailable, keeping static instructions: {e}")
+
     async def run_stdio(self):
         """Run the server using stdio transport."""
         try:
             logger.info("Starting MCP server with stdio transport...")
+            await self._apply_dynamic_instructions()
             await self.app.run_stdio_async()
         except KeyboardInterrupt:
             logger.info("Server interrupted by user")
@@ -274,21 +360,28 @@ class OdooMCPServer:
 
         asyncio.run(self.run_stdio())
 
-    # SSE transport has been deprecated in MCP protocol version 2025-03-26
-    # Use streamable-http transport instead
+    # No SSE transport (deprecated in MCP; streamable-http replaces it).
 
-    async def run_http(self, host: str = "localhost", port: int = 8000):
+    async def run_http(self):
         """Run the server using streamable HTTP transport.
 
-        Args:
-            host: Host to bind to
-            port: Port to bind to
+        Takes no host/port. FastMCP is constructed with ``config.host`` and
+        decides transport security from it right there (``__init__`` passes
+        ``transport_security``, which is None whenever ODOO_MCP_ALLOWED_HOSTS
+        is empty — the SDK then auto-enables its loopback allowlist, or not,
+        from that host). Reassigning ``app.settings.host`` here would move the
+        bind without moving that decision, so a caller could bind loopback
+        with protection left off. The bind and the decision stay tied to one
+        value instead.
         """
+        host = self.config.host
+        port = self.config.port
         try:
             logger.info(f"Starting MCP server with HTTP transport on {host}:{port}...")
+            self._http_transport_active = True
             self._warn_if_exposed(host)
-            self.app.settings.host = host
             self.app.settings.port = port
+            await self._apply_dynamic_instructions()
             self._preseed_session_manager()
             await self.app.run_streamable_http_async()
         except KeyboardInterrupt:
@@ -331,21 +424,47 @@ class OdooMCPServer:
     def _build_transport_security(self) -> Optional[TransportSecuritySettings]:
         """Build DNS-rebinding-protection settings from ODOO_MCP_ALLOWED_HOSTS.
 
-        Returns None when no hosts are configured, which leaves the SDK
-        middleware at its default (protection disabled) — unchanged behavior
-        for stdio and for HTTP deployments behind a proxy that don't set the
-        variable. When hosts are configured, each is allowed on any port and
-        matching http/https origins are derived.
+        Returns None when no hosts are configured, which hands the decision to
+        the SDK. Note what that actually means (mcp.server.fastmcp.server):
+        the SDK auto-enables protection ONLY when the bind host is loopback
+        (``127.0.0.1``/``localhost``/``::1``); for any other bind — notably
+        ``0.0.0.0``, the usual Docker setting — it leaves protection DISABLED
+        and no Host/Origin validation runs at all. Such a deployment must set
+        ODOO_MCP_ALLOWED_HOSTS (and, as ``_warn_if_exposed`` says, front the
+        server with an authenticating proxy).
+
+        When hosts are configured, an entry WITHOUT a port matches that host
+        on any port — including the implicit 80/443 that browsers and reverse
+        proxies omit from ``Host`` and ``Origin`` entirely. The SDK matches a
+        ``:*`` pattern with ``startswith(base + ":")``, so the bare form has
+        to be listed alongside it; without it the documented
+        "odoo.example.com behind a TLS proxy" deployment rejects every
+        request. An entry WITH a port is matched exactly.
         """
         if not self.config.allowed_hosts:
             return None
 
         allowed_hosts: list[str] = []
         allowed_origins: list[str] = []
-        for host in self.config.allowed_hosts:
-            base = host.split(":")[0] if ":" in host else host
-            allowed_hosts.append(host if ":" in host else f"{host}:*")
-            allowed_origins.extend([f"http://{base}:*", f"https://{base}:*"])
+        for entry in self.config.allowed_hosts:
+            host, port = _split_allowed_host(entry)
+            if not host:
+                continue
+            if port:
+                # Origins mirror the host entry exactly. A wildcard ":*" here
+                # would trust a page served from ANY other port on the same
+                # hostname as a cross-origin caller, making the Origin
+                # allowlist strictly looser than the Host one it exists to
+                # complement — and looser than this docstring promises.
+                allowed_hosts.append(f"{host}:{port}")
+                allowed_origins.extend([f"http://{host}:{port}", f"https://{host}:{port}"])
+            else:
+                # ":*" only matches an authority that HAS a port; a port-less
+                # Host header needs the bare form listed too.
+                allowed_hosts.extend([f"{host}:*", host])
+                allowed_origins.extend(
+                    [f"http://{host}:*", f"https://{host}:*", f"http://{host}", f"https://{host}"]
+                )
 
         return TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
@@ -370,6 +489,11 @@ class OdooMCPServer:
             "the server's stored credentials. Bind to localhost or front this "
             "server with an authenticating reverse proxy."
         )
+        if not self.config.allowed_hosts:
+            message += (
+                " DNS-rebinding protection is also OFF for this bind: set "
+                "ODOO_MCP_ALLOWED_HOSTS to the Host header(s) you serve."
+            )
         if self.config.yolo_mode == "true":
             message += (
                 " YOLO FULL-ACCESS MODE IS ENABLED: unauthenticated clients could "
@@ -390,7 +514,7 @@ class OdooMCPServer:
             "capabilities": {
                 "resources": True,  # Exposes Odoo data as resources
                 "tools": True,  # Provides tools for Odoo operations
-                "prompts": False,  # Prompts will be added in later phases
+                "prompts": False,  # No prompt support.
             }
         }
 

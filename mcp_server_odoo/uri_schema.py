@@ -9,6 +9,10 @@ Supported operations:
 - search: Search for records using domain
 - count: Count matching records
 - fields: Get field definitions
+
+Binary/attachment schemes (no query parameters, strict match):
+- odoo://{model}/record/{id}/{field}: Fetch a record's binary/image field
+- odoo://attachment/{id}: Fetch an ir.attachment by ID
 """
 
 import re
@@ -78,6 +82,21 @@ class URIValidationError(URIError):
 # This pattern is permissive in what it captures, validation happens later
 # It requires at least one non-slash character for the model name
 URI_PATTERN = re.compile(r"^odoo://([^/]+)/([^/?]+)(?:/(\d+))?(?:\?(.*))?$")
+
+# Strict patterns for the binary/attachment schemes. These URIs replace inline
+# base64 payloads in tool output so the LLM can fetch blobs on demand via
+# resources/read; no query parameters, no trailing slash.
+BINARY_FIELD_URI_PATTERN = re.compile(
+    r"^odoo://([a-zA-Z][a-zA-Z0-9_.]*)/record/(\d+)/([a-zA-Z][a-zA-Z0-9_]*)$"
+)
+ATTACHMENT_URI_PATTERN = re.compile(r"^odoo://attachment/(\d+)$")
+
+# Binary-bearing Odoo field types covered by the binary-field URI scheme:
+# tools swap populated values of these types for odoo:// resource URIs, and
+# the record-field resource serves them.
+BINARY_FIELD_TYPES = ("binary", "image")
+
+_FIELD_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
 
 
 def parse_uri(uri: str) -> OdooURI:
@@ -217,29 +236,59 @@ def build_uri(
     return uri
 
 
-def build_search_uri(
-    model: str,
-    domain: Optional[str] = None,
-    fields: Optional[List[str]] = None,
-    limit: Optional[int] = None,
-    offset: Optional[int] = None,
-    order: Optional[str] = None,
-) -> str:
-    """Build a search URI for the given model and parameters.
-
-    This is a convenience function for building search URIs.
-    """
-    return build_uri(
-        model, "search", domain=domain, fields=fields, limit=limit, offset=offset, order=order
-    )
-
-
 def build_record_uri(model: str, record_id: int) -> str:
-    """Build a record URI for a specific record.
-
-    This is a convenience function for building record URIs.
-    """
+    """Build a record URI for a specific record."""
     return build_uri(model, "record", record_id=record_id)
+
+
+def build_binary_field_uri(model: str, record_id: int, field: str) -> str:
+    """Build an ``odoo://{model}/record/{id}/{field}`` binary-field URI.
+
+    Used to replace populated binary/image fields in tool output with a
+    fetchable resource reference instead of inline base64.
+
+    Raises:
+        URIValidationError: If the model name, record ID, or field name is invalid
+    """
+    if not _is_valid_model_name(model):
+        raise URIValidationError(f"Invalid model name: {model}")
+    if not isinstance(record_id, int) or record_id <= 0:
+        raise URIValidationError(f"Invalid record ID: {record_id}")
+    if not field or not _FIELD_NAME_PATTERN.match(field):
+        raise URIValidationError(f"Invalid field name: {field}")
+    return f"odoo://{model}/record/{record_id}/{field}"
+
+
+def build_attachment_uri(attachment_id: int) -> str:
+    """Build an ``odoo://attachment/{id}`` URI for an ``ir.attachment``.
+
+    Preferred over the generic record-field URI for ``ir.attachment.datas``
+    because the attachment read path honors the stored mimetype and
+    ``type='url'`` attachments.
+
+    Raises:
+        URIValidationError: If the attachment ID is invalid
+    """
+    if not isinstance(attachment_id, int) or attachment_id <= 0:
+        raise URIValidationError(f"Invalid attachment ID: {attachment_id}")
+    return f"odoo://attachment/{attachment_id}"
+
+
+def build_binary_uri(model: str, record_id: int, field: str) -> str:
+    """Build the ``odoo://`` URI that serves a record's binary/image field.
+
+    ``ir.attachment.datas`` gets the attachment-specific
+    ``odoo://attachment/{id}`` URI so its stored mimetype and ``type='url'``
+    handling apply on read; every other binary field gets the generic
+    ``odoo://{model}/record/{id}/{field}`` URI. Centralizes the special-case
+    so the tool and resource output paths stay in sync.
+
+    Raises:
+        URIValidationError: If the model name, record ID, or field name is invalid
+    """
+    if model == "ir.attachment" and field == "datas":
+        return build_attachment_uri(record_id)
+    return build_binary_field_uri(model, record_id, field)
 
 
 def build_pagination_uri(base_uri: str, offset: int, limit: int) -> str:
@@ -290,7 +339,7 @@ def _is_valid_model_name(model: str) -> bool:
 
 def _parse_query_parameters(query_string: str) -> Dict[str, str]:
     """Parse URL query parameters."""
-    # parse_qsl returns a list of tuples, filter out empty values
+    # keep blank values so '?domain=' parses as an empty string, not a missing key
     params = {}
     for key, value in urllib.parse.parse_qsl(query_string, keep_blank_values=True):
         params[key] = value

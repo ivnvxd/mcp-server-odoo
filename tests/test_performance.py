@@ -194,24 +194,6 @@ class TestCache:
         removed = cache.invalidate("non_existent")
         assert removed is False
 
-    def test_cache_invalidate_pattern(self):
-        """Test pattern-based cache invalidation."""
-        cache = Cache()
-
-        # Put values with pattern
-        cache.put("model:res.partner:1", "partner1")
-        cache.put("model:res.partner:2", "partner2")
-        cache.put("model:res.users:1", "user1")
-        cache.put("other:key", "other_value")
-
-        # Invalidate all partner entries
-        count = cache.invalidate_pattern("model:res.partner:*")
-        assert count == 2
-        assert cache.get("model:res.partner:1") is None
-        assert cache.get("model:res.partner:2") is None
-        assert cache.get("model:res.users:1") == "user1"
-        assert cache.get("other:key") == "other_value"
-
     def test_cache_clear(self):
         """Test clearing the cache."""
         cache = Cache()

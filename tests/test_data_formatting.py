@@ -109,7 +109,7 @@ class TestRecordFormatter:
         assert "country_id: Not set" in result
 
     def test_format_one2many_field(self, formatter):
-        """Test formatting of one2many fields."""
+        """One2many with an inverse field: view-all hint filters on it."""
         record = {"id": 5, "name": "Parent", "child_ids": [1, 2, 3, 4, 5]}
 
         fields_metadata = {
@@ -124,16 +124,92 @@ class TestRecordFormatter:
 
         assert "Relationships:" in result
         assert "child_ids: 5 record(s)" in result
-        # View-all hints reference the search_records tool with the related
-        # ids — resource URIs cannot carry query parameters
+        # A one2many is exactly the records whose inverse many2one points at
+        # the parent — the hint filters on it instead of an id-in domain
         assert (
             "→ View all: use the search_records tool with model='res.partner', "
-            'domain=[["id", "in", [1, 2, 3, 4, 5]]]' in result
+            'domain=[["parent_id", "=", 5]]' in result
         )
         assert "odoo://res.partner/search?" not in result
 
+    def test_format_one2many_field_without_relation_field(self, formatter):
+        """One2many lacking an inverse field falls back to the id-in domain."""
+        record = {"id": 5, "name": "Parent", "child_ids": [1, 2, 3]}
+
+        fields_metadata = {"child_ids": {"type": "one2many", "relation": "res.partner"}}
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert (
+            "→ View all: use the search_records tool with model='res.partner', "
+            'domain=[["id", "in", [1, 2, 3]]]' in result
+        )
+
+    def test_format_one2many_generic_res_id_inverse_keeps_id_in_domain(self, formatter):
+        """A generic `res_id` inverse (mail.activity-style) needs a res_model
+        constraint the formatter cannot know — the hint keeps the exact
+        id-in domain instead of a bare res_id filter."""
+        record = {"id": 5, "name": "Parent", "activity_ids": [1, 2, 3]}
+
+        fields_metadata = {
+            "activity_ids": {
+                "type": "one2many",
+                "relation": "mail.activity",
+                "relation_field": "res_id",
+            }
+        }
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert (
+            "→ View all: use the search_records tool with model='mail.activity', "
+            'domain=[["id", "in", [1, 2, 3]]]' in result
+        )
+        assert '"res_id"' not in result
+
+    def test_format_one2many_with_field_domain_keeps_id_in_domain(self, formatter):
+        """A domain-restricted one2many (e.g. account.move.invoice_line_ids
+        with domain excluding tax/payment-term lines) holds a SUBSET of the
+        inverse-pointing records — an inverse-only hint would over-return, so
+        the hint keeps the exact id-in domain. Any truthy `domain` (string
+        form for dynamic domains included) disqualifies the inverse hint."""
+        record = {"id": 5, "name": "INV/001", "invoice_line_ids": [1, 2, 3]}
+
+        fields_metadata = {
+            "invoice_line_ids": {
+                "type": "one2many",
+                "relation": "account.move.line",
+                "relation_field": "move_id",
+                "domain": "[('display_type', '=', False)]",
+            }
+        }
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert (
+            "→ View all: use the search_records tool with model='account.move.line', "
+            'domain=[["id", "in", [1, 2, 3]]]' in result
+        )
+        assert '"move_id"' not in result
+
+    def test_format_one2many_field_without_parent_id(self, formatter):
+        """One2many with inverse field but no usable parent id keeps id-in domain."""
+        record = {"id": "Unknown", "name": "Parent", "child_ids": [1, 2]}
+
+        fields_metadata = {
+            "child_ids": {
+                "type": "one2many",
+                "relation": "res.partner",
+                "relation_field": "parent_id",
+            }
+        }
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert 'domain=[["id", "in", [1, 2]]]' in result
+
     def test_format_many2many_field(self, formatter):
-        """Test formatting of many2many fields."""
+        """Many2many (no scalar inverse) keeps the id-in domain, capped at 50."""
         record = {"id": 6, "name": "Test", "tag_ids": [10, 20, 30]}
 
         fields_metadata = {"tag_ids": {"type": "many2many", "relation": "res.partner.category"}}
@@ -195,14 +271,102 @@ class TestRecordFormatter:
         assert "company_id: Agrolait (ID: 5)" in result
 
     def test_format_binary_field(self, formatter):
-        """Test formatting of binary fields."""
+        """Populated binary fields render as a fetchable resource URI."""
         record = {"id": 7, "name": "Test", "image": b"fake_binary_data"}
 
         fields_metadata = {"image": {"type": "binary"}}
 
         result = formatter.format_record(record, fields_metadata)
 
-        assert "[Binary data - use res.partner/image to retrieve]" in result
+        assert "image: odoo://res.partner/record/7/image" in result
+        assert "[Binary data - use" not in result
+
+    def test_format_binary_field_with_size_placeholder(self, formatter):
+        """bin_size placeholders (short strings) are appended to the URI."""
+        record = {"id": 7, "name": "Test", "image": "12.5 KB"}
+
+        fields_metadata = {"image": {"type": "binary"}}
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert "image: odoo://res.partner/record/7/image (12.5 KB)" in result
+
+    def test_format_binary_field_long_string_value_omits_blob(self, formatter):
+        """A long string value (raw base64, not a short bin_size placeholder)
+        is dropped — only the bare URI is rendered, never the blob."""
+        blob = "A" * 200  # > MAX_BINARY_PLACEHOLDER_LENGTH (32)
+        record = {"id": 7, "name": "Test", "image": blob}
+
+        fields_metadata = {"image": {"type": "binary"}}
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert "image: odoo://res.partner/record/7/image" in result
+        assert blob not in result
+        assert "AAAA" not in result
+
+    def test_format_binary_field_empty_is_not_set(self, formatter):
+        """Empty binary fields render as 'Not set', not as a URI."""
+        record = {"id": 7, "name": "Test", "image": False}
+
+        fields_metadata = {"image": {"type": "binary"}}
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert "image: Not set" in result
+        assert "odoo://res.partner/record/7/image" not in result
+
+    def test_format_attachment_datas_uses_attachment_uri(self):
+        """ir.attachment.datas renders as odoo://attachment/{id}; other
+        binary fields on ir.attachment keep the record-field URI."""
+        formatter = RecordFormatter("ir.attachment")
+        record = {"id": 7, "name": "report.pdf", "datas": "12.5 KB", "thumbnail": "1 KB"}
+
+        fields_metadata = {"datas": {"type": "binary"}, "thumbnail": {"type": "image"}}
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert "datas: odoo://attachment/7 (12.5 KB)" in result
+        assert "thumbnail: odoo://ir.attachment/record/7/thumbnail (1 KB)" in result
+
+    def test_private_binary_field_is_dropped_before_uri_building(self, formatter):
+        """Odoo permits a leading underscore in a field name (core's barcode
+        mixin ships `_barcode_scanned`) and the URI grammar rejects one, so
+        this is the reason _format_field_value needs no URIValidationError
+        guard: format_record drops private fields before the type dispatch.
+        """
+        record = {"id": 7, "name": "Test", "_scan": "12.5 KB", "image": "3 KB"}
+        fields_metadata = {"_scan": {"type": "binary"}, "image": {"type": "binary"}}
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert "_scan" not in result
+        assert "image: odoo://res.partner/record/7/image (3 KB)" in result
+
+    def test_format_binary_field_without_record_id(self, formatter):
+        """No usable record ID → generic marker, no broken URI."""
+        record = {"name": "Test", "image": "12.5 KB"}
+
+        fields_metadata = {"image": {"type": "binary"}}
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert "image: [Binary data]" in result
+
+    def test_format_file_type_renders_placeholder_not_base64(self, formatter):
+        """A non-core binary-like 'file' field (custom/OCA) renders a
+        placeholder — no fetchable URI exists for it (the resource handler
+        rejects the type), and the unknown-type branch would dump base64."""
+        blob = "QUJD" * 1000  # 4000 chars of base64
+        record = {"id": 7, "name": "Test", "attachment_file": blob}
+
+        fields_metadata = {"attachment_file": {"type": "file"}}
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert "attachment_file: [Binary data]" in result
+        assert "QUJD" not in result
+        assert "odoo://res.partner/record/7/attachment_file" not in result
 
     def test_omit_internal_fields(self, formatter):
         """Test that internal fields are omitted."""
@@ -638,3 +802,53 @@ class TestFormattingIntegration:
 
         finally:
             connection.disconnect()
+
+
+class TestBinaryTypedNonPayloadValues:
+    """Odoo declares several non-stored widget fields as fields.Binary while
+    returning a dict (sale.order.tax_totals, account.move.tax_totals /
+    invoice_payments_widget / needed_terms / payment_term_details). bin_size
+    does not apply to them, so the formatter must not hand out a URI that
+    fails on read — mirroring tools._replace_binary_values.
+    """
+
+    @pytest.fixture
+    def formatter(self):
+        return RecordFormatter("sale.order")
+
+    def test_dict_valued_binary_renders_value_not_uri(self, formatter):
+        record = {"id": 5, "name": "S0005", "tax_totals": {"amount_total": 6152.5}}
+
+        result = formatter.format_record(record, {"tax_totals": {"type": "binary"}})
+
+        assert "odoo://sale.order/record/5/tax_totals" not in result, (
+            "a dict payload must not be advertised as a fetchable binary"
+        )
+        assert "amount_total" in result
+
+    def test_list_valued_binary_renders_value_not_uri(self, formatter):
+        record = {"id": 5, "name": "S0005", "widget": [1, 2, 3]}
+
+        result = formatter.format_record(record, {"widget": {"type": "binary"}})
+
+        assert "odoo://sale.order/record/5/widget" not in result
+
+    @pytest.mark.parametrize(
+        "payload", [b"fake_binary_data", bytearray(b"raw"), "12.5 KB", "A" * 200]
+    )
+    def test_real_payloads_still_get_a_uri(self, formatter, payload):
+        """str / bytes / bytearray are all servable by the binary resource."""
+        record = {"id": 5, "name": "S0005", "image": payload}
+
+        result = formatter.format_record(record, {"image": {"type": "binary"}})
+
+        assert "image: odoo://sale.order/record/5/image" in result
+
+    def test_xmlrpc_binary_still_gets_a_uri(self, formatter):
+        import xmlrpc.client
+
+        record = {"id": 5, "name": "S0005", "image": xmlrpc.client.Binary(b"bytes")}
+
+        result = formatter.format_record(record, {"image": {"type": "binary"}})
+
+        assert "image: odoo://sale.order/record/5/image" in result

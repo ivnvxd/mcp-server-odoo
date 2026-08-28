@@ -8,7 +8,6 @@ from mcp_server_odoo.uri_schema import (
     URIValidationError,
     build_pagination_uri,
     build_record_uri,
-    build_search_uri,
     build_uri,
     extract_model_from_uri,
     parse_uri,
@@ -170,12 +169,12 @@ class TestURIBuilding:
         uri = build_uri("res.partner", "record", record_id=42)
         assert uri == "odoo://res.partner/record/42"
 
-    def test_build_search_uri_simple(self):
+    def test_build_uri_search_simple(self):
         """Test building simple search URIs."""
         uri = build_uri("product.product", "search")
         assert uri == "odoo://product.product/search"
 
-    def test_build_search_uri_with_domain(self):
+    def test_build_uri_search_with_domain(self):
         """Test building search URIs with domain."""
         uri = build_uri("res.partner", "search", domain="[('is_company','=',True)]")
         assert (
@@ -183,7 +182,7 @@ class TestURIBuilding:
             == "odoo://res.partner/search?domain=%5B%28%27is_company%27%2C%27%3D%27%2CTrue%29%5D"
         )
 
-    def test_build_search_uri_with_all_params(self):
+    def test_build_uri_search_with_all_params(self):
         """Test building search URIs with all parameters."""
         uri = build_uri(
             "sale.order",
@@ -234,19 +233,6 @@ class TestURIBuilding:
 
 class TestURIConvenienceFunctions:
     """Test convenience functions for URI building."""
-
-    def test_build_search_uri_convenience(self):
-        """Test the build_search_uri convenience function."""
-        uri = build_search_uri(
-            "res.partner", domain="[('is_company','=',True)]", fields=["name", "email"], limit=20
-        )
-
-        parsed = parse_uri(uri)
-        assert parsed.model == "res.partner"
-        assert parsed.operation == OdooOperation.SEARCH
-        assert parsed.domain == "[('is_company','=',True)]"
-        assert parsed.fields == ["name", "email"]
-        assert parsed.limit == 20
 
     def test_build_record_uri_convenience(self):
         """Test the build_record_uri convenience function."""

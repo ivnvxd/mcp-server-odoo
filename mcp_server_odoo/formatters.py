@@ -6,12 +6,23 @@ hierarchical text format optimized for LLM consumption.
 
 import json
 import logging
+import xmlrpc.client
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Set
 
-from .uri_schema import build_record_uri
+from .uri_schema import (
+    BINARY_FIELD_TYPES,
+    build_binary_uri,
+    build_record_uri,
+)
 
 logger = logging.getLogger(__name__)
+
+# x2many preview cap, shared with the tools' inline related-summary
+# resolution: a collection holding at most this many items gets expanded
+# inline (formatter) / its display names resolved (get_record tool). Kept
+# low so the extra reads stay cheap and the output short.
+MAX_RELATED_ITEMS = 5
 
 
 class RecordFormatter:
@@ -33,14 +44,26 @@ class RecordFormatter:
         "message_main_attachment_id",
     }
 
-    # Binary field types
-    BINARY_FIELDS = {"binary", "image", "file"}
+    # Binary field types — kept in lockstep with the shared tuple so the
+    # formatter never emits a fetchable binary URI for a type the resource
+    # handler would reject (e.g. the non-ORM "file").
+    BINARY_FIELDS = frozenset(BINARY_FIELD_TYPES)
+
+    # Binary-LIKE field types NOT served by the binary resource (non-core
+    # types, e.g. OCA modules' "file"): no fetchable URI exists for them, so
+    # their values render as a placeholder — falling through to the
+    # unknown-type branch would dump up to 2000 chars of raw base64.
+    _BINARY_LIKE_UNSERVED = ("file",)
 
     # Per-field display cap — long values (pasted documents, base64 blobs)
     # are truncated with an explicit marker to protect the LLM context
     MAX_FIELD_DISPLAY_LENGTH = 2000
 
-    def __init__(self, model: str, max_related_items: int = 5):
+    # A bin_size read delivers a short human-readable placeholder (e.g.
+    # "12.5 KB"); anything longer is a raw base64 blob and is omitted.
+    MAX_BINARY_PLACEHOLDER_LENGTH = 32
+
+    def __init__(self, model: str, max_related_items: int = MAX_RELATED_ITEMS):
         """Initialize the formatter.
 
         Args:
@@ -103,12 +126,15 @@ class RecordFormatter:
             else:
                 simple_fields.append((field_name, field_value, field_meta))
 
+        # Record ID for building binary-field resource URIs
+        record_id_int = record_id if isinstance(record_id, int) and record_id > 0 else None
+
         # Format simple fields first
         if simple_fields:
             lines.append(f"{indent}Fields:")
             for field_name, field_value, field_meta in simple_fields:
                 formatted_value = self._format_field_value(
-                    field_name, field_value, field_meta, indent_level + 1
+                    field_name, field_value, field_meta, indent_level + 1, record_id_int
                 )
                 lines.append(f"{indent}  {field_name}: {formatted_value}")
 
@@ -118,7 +144,11 @@ class RecordFormatter:
             for field_name, field_value, field_meta in relation_fields:
                 lines.extend(
                     self._format_relation_field(
-                        field_name, field_value, field_meta, indent_level + 1
+                        field_name,
+                        field_value,
+                        field_meta,
+                        indent_level + 1,
+                        parent_id=record_id_int,
                     )
                 )
 
@@ -150,7 +180,12 @@ class RecordFormatter:
         return "\n".join(lines)
 
     def _format_field_value(
-        self, field_name: str, value: Any, field_meta: Dict[str, Any], indent_level: int
+        self,
+        field_name: str,
+        value: Any,
+        field_meta: Dict[str, Any],
+        indent_level: int,
+        record_id: Optional[int] = None,
     ) -> str:
         """Format a field value based on its type.
 
@@ -159,6 +194,7 @@ class RecordFormatter:
             value: The field value
             field_meta: Field metadata
             indent_level: Current indentation level
+            record_id: Record ID, used to build binary-field resource URIs
 
         Returns:
             Formatted field value
@@ -177,7 +213,6 @@ class RecordFormatter:
             if field_type == "monetary":
                 # Try to get currency information
                 # TODO: Use currency_field to get proper currency formatting
-                # currency_field = field_meta.get("currency_field", "currency_id")
                 return f"{value:,.2f}"  # Format with thousand separators
             elif field_type == "float":
                 # XML-RPC unmarshals Odoo's digits tuple as a list
@@ -237,9 +272,44 @@ class RecordFormatter:
                     return f"{label} ({value})"
             return str(value)
 
-        # Binary fields
+        # Binary fields: point at the fetchable resource URI instead of the
+        # value ("Not set" for empty binaries is handled by the falsy check
+        # above). Reads with bin_size=True deliver a short size placeholder
+        # (e.g. "12.5 KB") — append it; long values (raw base64) are omitted.
+        # ir.attachment.datas gets the attachment-specific URI so its stored
+        # mimetype and type='url' handling apply on read.
         elif field_type in self.BINARY_FIELDS:
-            return f"[Binary data - use {self.model}/{field_name} to retrieve]"
+            # Only an actual payload earns a URI. The binary resource can
+            # serve a base64 str, raw bytes or an xmlrpc Binary (see
+            # resources._decode_binary_value) — anything else is not binary
+            # data at all. Odoo declares several non-stored widget fields as
+            # Binary while returning a dict (sale.order.tax_totals,
+            # account.move.invoice_payments_widget, needed_terms,
+            # payment_term_details); bin_size does not apply to them, so
+            # emitting a URI would drop the payload AND advertise a link whose
+            # read fails with "Unexpected binary value type: dict". Mirrors
+            # the guard in tools._replace_binary_values.
+            if not isinstance(value, (str, bytes, bytearray, xmlrpc.client.Binary)):
+                return self._truncate_value(str(value))
+            if record_id is None:
+                return "[Binary data]"
+            # No URIValidationError guard here, unlike the tools' copy:
+            # leading-underscore field names are filtered by format_record
+            # before the type dispatch, though the URI grammar would also
+            # reject non-ASCII identifiers. record_id is already a validated
+            # positive int, and self.model reached the formatter by surviving
+            # a real Odoo query.
+            uri = build_binary_uri(self.model, record_id, field_name)
+            # Only a bin_size read yields a short size placeholder to append.
+            if isinstance(value, str) and len(value) <= self.MAX_BINARY_PLACEHOLDER_LENGTH:
+                return f"{uri} ({value})"
+            return uri
+
+        # Binary-like types the binary resource does not serve (non-core,
+        # e.g. "file"): a placeholder without a URI — the URI would be
+        # rejected on read, and the raw value is base64, not prose.
+        elif field_type in self._BINARY_LIKE_UNSERVED:
+            return "[Binary data]"
 
         # Unknown type (typically: field metadata unavailable)
         else:
@@ -263,7 +333,12 @@ class RecordFormatter:
         return text
 
     def _format_relation_field(
-        self, field_name: str, value: Any, field_meta: Dict[str, Any], indent_level: int
+        self,
+        field_name: str,
+        value: Any,
+        field_meta: Dict[str, Any],
+        indent_level: int,
+        parent_id: Optional[int] = None,
     ) -> List[str]:
         """Format a relationship field.
 
@@ -272,6 +347,9 @@ class RecordFormatter:
             value: The field value
             field_meta: Field metadata
             indent_level: Current indentation level
+            parent_id: ID of the record holding the field — lets a one2many
+                with a clean dedicated inverse (no field-level domain) hint a
+                "view all" filter on that inverse instead of an id-in domain
 
         Returns:
             List of formatted lines
@@ -298,18 +376,48 @@ class RecordFormatter:
 
                 lines.append(f"{indent}{field_name}: {count} record(s)")
 
-                # Point at the search_records tool with the related ids —
-                # resource URIs cannot carry query parameters, so emitting
-                # odoo://...?domain=... links would produce dead links.
+                # Point at the search_records tool — resource URIs cannot
+                # carry query parameters, so emitting odoo://...?domain=...
+                # links would produce dead links.
                 related_ids = [
                     item["id"] if isinstance(item, dict) else item
                     for item in value
                     if isinstance(item, (int, dict))
                 ]
                 if related_ids and related_model != "unknown":
-                    shown_ids = related_ids[:50]
-                    domain_str = json.dumps([["id", "in", shown_ids]])
-                    suffix = " (first 50 ids)" if len(related_ids) > 50 else ""
+                    relation_field = field_meta.get("relation_field")
+                    if (
+                        field_type == "one2many"
+                        and relation_field
+                        and relation_field != "res_id"
+                        and not field_meta.get("domain")
+                        and isinstance(parent_id, int)
+                    ):
+                        # A one2many with a clean dedicated inverse is exactly
+                        # the records whose inverse many2one points back here
+                        # — filtering on it returns the whole collection with
+                        # a compact domain (no id cap). Only when the field
+                        # declares no domain of its own: a domain-restricted
+                        # o2m (e.g. account.move.invoice_line_ids excludes
+                        # tax/payment-term lines) holds a SUBSET of the
+                        # inverse-pointing records, so the inverse-only search
+                        # would over-return. Any truthy `domain` (a list, or a
+                        # string for dynamic domains) disqualifies the hint.
+                        domain_str = json.dumps([[relation_field, "=", parent_id]])
+                        suffix = ""
+                    else:
+                        # many2many (no scalar inverse), a one2many without
+                        # one, a domain-restricted one2many (see above), or a
+                        # generic `res_id` inverse (mail.message /
+                        # mail.activity / ir.attachment-style fields such as
+                        # message_ids): a bare res_id domain would need a
+                        # res_model constraint the formatter has no metadata
+                        # for and would match every model's records with that
+                        # id — fall back to an id-in domain, capped so the
+                        # hint stays bounded.
+                        shown_ids = related_ids[:50]
+                        domain_str = json.dumps([["id", "in", shown_ids]])
+                        suffix = " (first 50 ids)" if len(related_ids) > 50 else ""
                     lines.append(
                         f"{indent}  → View all: use the search_records tool with "
                         f"model='{related_model}', domain={domain_str}{suffix}"

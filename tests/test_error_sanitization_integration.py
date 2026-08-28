@@ -46,7 +46,7 @@ class TestErrorSanitizationIntegration:
         not in the tool layer. This test verifies the tool's error wrapping.
         """
         tool_handler.connection.is_authenticated = True
-        tool_handler.connection.search_count.side_effect = OdooConnectionError(
+        tool_handler.connection.search.side_effect = OdooConnectionError(
             "Operation failed: Invalid field 'bogus_field' in search criteria"
         )
 

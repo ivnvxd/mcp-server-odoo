@@ -45,7 +45,7 @@ def main(argv: Optional[list[str]] = None) -> int:
   ODOO_LOCALE        Locale for formatting (e.g. en_US, de_DE)
 
 Optional environment variables:
-  ODOO_MCP_LOG_LEVEL       Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)
+  ODOO_MCP_LOG_LEVEL       Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
   ODOO_MCP_LOG_JSON        Enable structured JSON log output (default: false)
   ODOO_MCP_LOG_FILE        Path for rotating log file (10 MB, 5 backups)
   ODOO_MCP_DEFAULT_LIMIT   Default record limit (default: 10)
@@ -59,6 +59,8 @@ Optional environment variables:
                            DNS rebinding protection (e.g., odoo.example.com,localhost)
   ODOO_MCP_SESSION_IDLE_TIMEOUT  Seconds of inactivity before an HTTP session
                            is closed and its resources freed (default: never)
+  ODOO_MCP_MAX_BINARY_SIZE Max bytes for one binary/attachment resource read
+                           (default: 52428800 = 50 MB)
 
 For more information, visit: https://github.com/ivnvxd/mcp-server-odoo""",
     )
@@ -116,7 +118,7 @@ For more information, visit: https://github.com/ivnvxd/mcp-server-odoo""",
         if config.transport == "stdio":
             asyncio.run(server.run_stdio())
         elif config.transport == "streamable-http":
-            asyncio.run(server.run_http(host=config.host, port=config.port))
+            asyncio.run(server.run_http())
         else:
             raise ValueError(f"Unsupported transport: {config.transport}")
 
