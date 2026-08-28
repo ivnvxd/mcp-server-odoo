@@ -23,6 +23,7 @@ from .logging_config import get_logger, logging_config, perf_logger
 from .odoo_connection import OdooConnection, OdooConnectionError
 from .performance import PerformanceManager
 from .resources import register_resources
+from .schema_sanitizer import apply_n8n_schema_sanitization
 from .tools import register_tools
 from .user_context import build_user_context
 
@@ -305,6 +306,8 @@ class OdooMCPServer:
             self.tool_handler = register_tools(
                 self.app, self.connection, self.access_controller, self.config
             )
+            # Apply schema sanitization for n8n compatibility
+            apply_n8n_schema_sanitization(self.app)
             logger.info("Registered MCP tools")
 
     async def _apply_dynamic_instructions(self):
