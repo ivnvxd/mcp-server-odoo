@@ -5,8 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- **`ODOO_UID`**: optional integer environment variable / config field to supply user ID directly and bypass `common.authenticate` XML-RPC call on startup.
 ## [0.8.0] - 2026-08-26
-
 ### Added
 - **`get_current_context` tool**: returns the connected user, timezone, company scope and UTC guidance as structured data.
 - **Personalized `initialize` instructions**: the same context block is sent at handshake. When the user read fails it falls back to the UTC guidance plus a note naming the server's own reason (e.g. the caller is not in the MCP User group), or the likely cause when the server gives none.
@@ -21,7 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`post_message` subject**: optional `subject` argument.
 - **Archived records**: the record resource serves them (`active_test=False`), matching what `get_record` already returned.
 - **`all_fields_fallback`**: new `field_selection_method` value, reported when smart selection is unavailable and every field was read.
-
 ### Security
 - **Attachment reads gate on the attached-to model**: `res_model` is checked alongside `ir.attachment`, so enabling that one model no longer exposes every attachment body on the database.
 - **Attachment metadata is gated too**: the `search_records`/`get_record`/`aggregate_records` tools and the record/search/count resources scope `ir.attachment` to `res_model`s the caller may read — a row carries `url` and `index_content` (the extracted document text). An allowlist the module cannot report fails closed, as a retryable "could not verify access".
@@ -35,7 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`call_model_method` alias gaps**: `copy_data`, `copy_multi`, `update`, `get_view` and `get_views` are refused alongside the primitives they alias.
 - **Sanitized error mappings**: captured fault text is scrubbed before interpolation — file paths, host:port pairs and memory addresses no longer reach the client through `ERROR_MAPPINGS`.
 - **`call_model_method` hardening**: rejects `ir.actions.*`/`ir.cron`, the `web_*` family, and ORM CRUD primitives; list results truncate at 100 items.
-
 ### Fixed
 - **Smart field selection**: the non-stored score cap gated on a `compute` key `fields_get()` never returns; it now gates on `store=False` (related fields exempt).
 - **Oversized record ids**: ids outside the XML-RPC 32-bit range are rejected with a clean validation error before any RPC.
@@ -66,7 +66,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Doubled "Access denied: " prefix**: refusals that already label themselves are no longer prefixed again across the tool and resource handlers.
 - **`list_models` swallowed the reason**: an access failure reported `Failed to list models: Permission denied for this operation` instead of what the server actually said.
 - **Discarded 403 diagnostics**: the MCP module's own message (`Model 'x' is not enabled for MCP access.`) is surfaced instead of a generic `Access denied to MCP endpoints`, which pointed at a credential problem that did not exist.
-
 ### Changed
 - **Documentation pass**: corrected stale claims (mcp ≥1.27 floor, YOLO auth needing `ODOO_USER`, Odoo 17+ HTML escaping, `handle_error` contract), documented `ODOO_MCP_LOG_FORMAT`/`ODOO_MCP_SLOW_OPERATION_THRESHOLD_MS`, and consolidated duplicated comments.
 - **`list_models` counts**: `total` is the number of models returned and `total_available` the database count; both are emitted in every mode.
@@ -74,11 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Default search resource reads**: `odoo://{model}/search` reads only the fields its one-line summary renders, instead of every safe field of every record and then discarding them.
 - **CI targets Odoo 19**: both integration jobs run on `odoo:19`, and the MCP job now sources the module from `much-GmbH/much-mcp-server@19.0` (was `ivnvxd/odoo-apps@18.0`) using the `MCP_MODULE_PAT` secret. The module's declared Python dependencies are installed into the Odoo image so `mcp_server` can install.
 - **`mcp` floor raised to 1.27**: `session_idle_timeout` is passed to `StreamableHTTPSessionManager`, which does not accept it before 1.27.
-
 ### Removed
 - **`build_search_uri`**: unused public helper removed from `uri_schema`.
 - **`Cache.invalidate_pattern`**: orphaned when the record cache was removed.
-
 ## [0.7.1] - 2026-06-12
 
 ### Added
