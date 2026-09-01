@@ -118,6 +118,40 @@ class TestLoadConfig:
         assert config.default_limit == 20
         assert config.max_limit == 200
 
+    def test_load_config_allowed_companies(self, monkeypatch):
+        """Test parsing of ODOO_ALLOWED_COMPANIES into a list of ints."""
+        monkeypatch.setenv("ODOO_URL", "http://test.odoo.com")
+        monkeypatch.setenv("ODOO_API_KEY", "env-api-key")
+        monkeypatch.setenv("ODOO_ALLOWED_COMPANIES", "1, 4")
+
+        config = load_config()
+
+        assert config.allowed_companies == [1, 4]
+
+    def test_load_config_allowed_companies_unset(self, monkeypatch):
+        """ODOO_ALLOWED_COMPANIES absent or empty means no company scoping."""
+        monkeypatch.setenv("ODOO_URL", "http://test.odoo.com")
+        monkeypatch.setenv("ODOO_API_KEY", "env-api-key")
+        monkeypatch.delenv("ODOO_ALLOWED_COMPANIES", raising=False)
+
+        assert load_config().allowed_companies is None
+
+        monkeypatch.setenv("ODOO_ALLOWED_COMPANIES", "")
+        assert load_config().allowed_companies is None
+
+        # Only separators/whitespace parses to nothing usable -> unset
+        monkeypatch.setenv("ODOO_ALLOWED_COMPANIES", " , ")
+        assert load_config().allowed_companies is None
+
+    def test_load_config_allowed_companies_invalid(self, monkeypatch):
+        """Non-integer entries in ODOO_ALLOWED_COMPANIES are rejected."""
+        monkeypatch.setenv("ODOO_URL", "http://test.odoo.com")
+        monkeypatch.setenv("ODOO_API_KEY", "env-api-key")
+        monkeypatch.setenv("ODOO_ALLOWED_COMPANIES", "1,main")
+
+        with pytest.raises(ValueError, match="comma-separated list of integer IDs"):
+            load_config()
+
     def test_load_config_from_env_file(self, monkeypatch):
         """Test loading configuration from .env file."""
         # Clear environment variables

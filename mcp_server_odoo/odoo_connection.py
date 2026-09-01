@@ -999,6 +999,15 @@ class OdooConnection:
                 kwargs["context"] = {}
             kwargs["context"].setdefault("lang", self.config.locale)
 
+        # Company scoping (patch): force allowed_company_ids on every call so
+        # record rules and company defaults are limited to the configured
+        # companies. Deliberately overrides any caller-provided value.
+        if self.config.allowed_companies:
+            if "context" not in kwargs:
+                kwargs["context"] = {}
+            # Copy so callers mutating the context cannot alter the config.
+            kwargs["context"]["allowed_company_ids"] = list(self.config.allowed_companies)
+
         try:
             # Log the operation (values redacted — write payloads can carry
             # passwords/PII that must not land in log files)
