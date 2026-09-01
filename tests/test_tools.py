@@ -1,5 +1,6 @@
 """Test suite for MCP tools functionality."""
 
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -3696,6 +3697,131 @@ class TestParseDomainInput:
         with pytest.raises(ValidationError) as exc_info:
             handler._parse_domain_input([token, ["id", ">", 0]])
         assert "Invalid domain term" in str(exc_info.value)
+
+
+class TestToolSchemaTypes:
+    """Published tool schemas must be typed, never free-form.
+
+    A parameter annotated ``Any`` serializes to an empty JSON Schema (``{}``),
+    which means "anything". Clients that constrain generation from the schema
+    (llama.cpp compiles tool schemas to a GBNF grammar) treat a constraint-free
+    schema as a free-form *object*, so the model becomes unable to emit ``[``
+    for that parameter -- it sends ``{"search": "[[...]]"}`` instead of a domain
+    and retries forever. Keep every published parameter explicitly typed.
+    """
+
+    @pytest.fixture
+    def schemas(self):
+        app = FastMCP("test")
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+        OdooToolHandler(app, connection, MagicMock(spec=AccessController), config)
+
+        async def collect():
+            return {t.name: t.inputSchema for t in await app.list_tools()}
+
+        return asyncio.run(collect())
+
+    @staticmethod
+    def _admits_anything(param_schema: dict) -> bool:
+        """True if the schema places no constraint (bare {} or {} inside anyOf)."""
+        if param_schema == {}:
+            return True
+        return any(branch == {} for branch in param_schema.get("anyOf", []))
+
+    @staticmethod
+    def _find_bare_object(node) -> bool:
+        """True if a bare, constraint-free ``{}`` appears anywhere under `node`.
+
+        Recurses through the whole schema tree, not just its top-level
+        properties: a leaf position nested inside an already-typed container
+        (e.g. the value slot of a domain condition triplet) serializes to
+        ``{}`` just as readily as an untyped top-level parameter, and a
+        grammar-constrained client is equally unable to emit anything but an
+        object there.
+        """
+        if node == {}:
+            return True
+        if isinstance(node, dict):
+            return any(
+                TestToolSchemaTypes._find_bare_object(v)
+                for v in node.values()
+                if isinstance(v, (dict, list))
+            )
+        if isinstance(node, list):
+            return any(TestToolSchemaTypes._find_bare_object(v) for v in node)
+        return False
+
+    def test_no_parameter_is_constraint_free(self, schemas):
+        offenders = [
+            f"{tool}.{param}"
+            for tool, schema in schemas.items()
+            for param, param_schema in schema.get("properties", {}).items()
+            if self._admits_anything(param_schema)
+        ]
+        assert not offenders, f"Untyped (free-form) tool parameters: {offenders}"
+
+    @pytest.mark.parametrize(
+        "tool,param", [("search_records", "domain"), ("aggregate_records", "domain")]
+    )
+    def test_domain_schema_has_no_bare_object_anywhere(self, schemas, tool, param):
+        """Regression test: the condition triplet's VALUE slot was typed ``Any``,
+
+        which serialized to a bare ``{}`` nested inside the already-typed
+        triplet array. llama.cpp's grammar converter reads that as a
+        free-form object, so a grammar-constrained model could not emit a
+        string/int/bool there -- observed live emitting
+        ``[["model", "=", {}]]`` instead of
+        ``[["model", "=", "res.partner"]]``.
+        """
+        domain_schema = schemas[tool]["properties"][param]
+        assert not self._find_bare_object(domain_schema), (
+            f"{tool}.{param} schema still contains a bare {{}} somewhere in its tree"
+        )
+
+    @pytest.mark.parametrize(
+        "tool,param", [("search_records", "domain"), ("aggregate_records", "domain")]
+    )
+    def test_domain_schema_publishes_list_form_only(self, schemas, tool, param):
+        """The schema advertises the list form; the string form stays runtime-only.
+
+        A visible ``string`` branch is an escape hatch a grammar-constrained
+        model will take -- observed emitting ``domain="name ilike 'inno'"`` and
+        burning turns on the rejection. Strings are still accepted at runtime
+        via BeforeValidator (see test_domain_string_still_accepted_at_runtime),
+        so legacy clients keep working; they are just no longer advertised.
+        """
+        branches = schemas[tool]["properties"][param]["anyOf"]
+        types = {b.get("type") for b in branches}
+        assert "array" in types and "null" in types
+        assert "string" not in types
+
+    @pytest.mark.parametrize(
+        "tool,param", [("search_records", "domain"), ("aggregate_records", "domain")]
+    )
+    def test_domain_condition_triplet_is_shaped(self, schemas, tool, param):
+        """Each condition must be a 3-element ["field", "operator", value]."""
+        array_branch = next(
+            b for b in schemas[tool]["properties"][param]["anyOf"] if b.get("type") == "array"
+        )
+        cond = next(b for b in array_branch["items"]["anyOf"] if b.get("type") == "array")
+        assert cond["minItems"] == 3 and cond["maxItems"] == 3
+        assert [p.get("type") for p in cond["prefixItems"][:2]] == ["string", "string"]
+
+    def test_domain_string_still_accepted_at_runtime(self):
+        """Legacy stringified-JSON domains keep working despite the hidden branch."""
+        from mcp_server_odoo.tools import _coerce_domain_string
+
+        assert _coerce_domain_string('[["name","ilike","acme"]]') == [["name", "ilike", "acme"]]
+        assert _coerce_domain_string("[['name','ilike','acme']]") == [["name", "ilike", "acme"]]
+        assert _coerce_domain_string([["name", "ilike", "acme"]]) == [["name", "ilike", "acme"]]
+        with pytest.raises(ValueError, match=r'\["field", "operator", value\]'):
+            _coerce_domain_string("name = acme")
+
+    def test_fields_accepts_array_or_string(self, schemas):
+        branches = schemas["search_records"]["properties"]["fields"]["anyOf"]
+        assert {"array", "string", "null"} <= {b.get("type") for b in branches}
 
 
 class TestCallModelMethodTool:

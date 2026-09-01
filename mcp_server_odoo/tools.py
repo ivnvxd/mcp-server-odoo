@@ -12,10 +12,11 @@ import re
 import xmlrpc.client
 from ast import literal_eval as _parse_python_literal
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, Union
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import BeforeValidator
 
 from .access_control import (
     AccessControlError,
@@ -317,6 +318,61 @@ def _validate_offset(offset: int, limit: int) -> None:
             f"limit {limit} — narrow the domain or use 'order' to bring "
             "the target records into earlier pages"
         )
+
+
+# --- Domain typing -----------------------------------------------------------
+# An Odoo domain is a flat list mixing condition triplets with logical operator
+# strings, e.g. ["|", ["name", "ilike", "acme"], ["is_company", "=", True]].
+#
+# Why the explicit Tuple: a bare List[Any] serializes to {"items": {}} — a
+# free-form JSON Schema. Clients that constrain generation with a grammar
+# (llama.cpp and friends, i.e. every local model) then get NO structural signal
+# and happily emit `domain="name = acme"`, which only fails server-side. Typing
+# the triplet emits prefixItems, so the malformed call becomes unrepresentable
+# rather than merely wrong. Small models cannot recover from a type error they
+# were never prevented from making.
+#
+# The condition's VALUE position needs the same treatment. `Any` there still
+# serializes to a bare `{}` — llama.cpp's schema→GBNF converter turns a
+# constraint-free `{}` into a free-form OBJECT rule (not "anything"), so the
+# sampler literally cannot emit a string/int/bool there. Observed live:
+# `[["model", "=", {}]]` instead of `[["model", "=", "res.partner"]]`. Bound
+# it to the concrete Odoo value types instead — bool must precede int so
+# pydantic doesn't coerce True/False into 1/0.
+DomainValue = Union[bool, int, float, str, List[Union[bool, int, float, str]]]
+DomainCondition = Tuple[str, str, DomainValue]
+DomainElement = Union[DomainCondition, str]  # str covers "&", "|", "!"
+
+
+def _coerce_domain_string(value: Any) -> Any:
+    """Accept the legacy '[["name","ilike","acme"]]' string form at runtime.
+
+    Kept as a BeforeValidator rather than a `str` branch in the annotation so
+    the published JSON Schema advertises ONLY the list form. A visible string
+    branch is an escape hatch a weak model will take — it emitted
+    domain="name ilike 'inno'" and burned turns on the rejection — while the
+    clients that legitimately send stringified JSON still work here.
+    """
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            try:
+                return _parse_python_literal(value)
+            except (ValueError, SyntaxError):
+                raise ValueError(
+                    f"Invalid domain parameter. Expected a list of "
+                    f'["field", "operator", value] conditions, e.g. {_DOMAIN_EXAMPLE} — '
+                    f"got: {value[:100]}"
+                ) from None
+    return value
+
+
+DomainInput = Annotated[Optional[List[DomainElement]], BeforeValidator(_coerce_domain_string)]
+
+# Shown in error messages: small models copy a concrete example, they cannot
+# infer one from a type name.
+_DOMAIN_EXAMPLE = '[["name", "ilike", "acme"]]'
 
 
 def _json_safe(value: Any) -> Any:
@@ -827,8 +883,18 @@ class OdooToolHandler:
         if domain is None:
             return []
         if not isinstance(domain, str):
-            if not isinstance(domain, list):
-                raise ValidationError(f"Domain must be a list, got {type(domain).__name__}")
+            if not isinstance(domain, (list, tuple)):
+                raise ValidationError(
+                    f"Domain must be a list, got {type(domain).__name__}. "
+                    f"Example: {_DOMAIN_EXAMPLE}"
+                )
+            # Pydantic coerces the typed triplets to tuples; left as-is rather
+            # than normalized to lists — XML-RPC marshals both identically,
+            # Odoo's own domain literals are conventionally tuples, and
+            # normalizing here would rebuild every caller-supplied domain
+            # (including ones already carrying tuples on purpose, e.g. the
+            # ir.attachment scope appended below) just to change a type that
+            # doesn't matter downstream.
             # Same guard the write paths use: an oversized int anywhere in the
             # domain would raise OverflowError mid-marshal and surface as a
             # transport-flavoured "Connection error", which is exactly the
@@ -853,12 +919,15 @@ class OdooToolHandler:
                 parsed = _parse_python_literal(domain)
             except (ValueError, SyntaxError, RecursionError):
                 raise ValidationError(
-                    f"Invalid domain parameter. Expected JSON array or Python list, "
-                    f"got: {domain[:100]}..."
+                    f"Invalid domain parameter. Expected a list of "
+                    f'["field", "operator", value] conditions, e.g. {_DOMAIN_EXAMPLE} — '
+                    f"got: {domain[:100]}"
                 ) from e
 
         if not isinstance(parsed, list):
-            raise ValidationError(f"Domain must be a list, got {type(parsed).__name__}")
+            raise ValidationError(
+                f"Domain must be a list, got {type(parsed).__name__}. Example: {_DOMAIN_EXAMPLE}"
+            )
         _check_xmlrpc_int_bounds(parsed, "domain")
         check_domain_balance(parsed)
 
@@ -895,8 +964,12 @@ class OdooToolHandler:
         )
         async def search_records(
             model: str,
-            domain: Optional[Any] = None,
-            fields: Optional[Any] = None,
+            # Explicitly typed rather than Any: Any serializes to an empty JSON
+            # Schema ({}), which grammar-constrained clients read as a free-form
+            # object, leaving the model unable to emit a list here. The runtime
+            # already accepts both forms (see _parse_domain_input).
+            domain: DomainInput = None,
+            fields: Optional[Union[List[str], str]] = None,
             limit: Optional[int] = None,
             offset: int = 0,
             order: Optional[str] = None,
@@ -910,6 +983,12 @@ class OdooToolHandler:
                     - A list: [['is_company', '=', True]]
                     - A JSON string: "[['is_company', '=', true]]"
                     - None: returns all records (default)
+                    Operators: use 'ilike' for case-insensitive substring
+                    match - Odoo adds the wildcards itself, so write
+                    ['name', 'ilike', 'acme'] and NEVER '%acme%'. 'like' is
+                    case-sensitive and matches the literal string. Conditions
+                    are ANDed by default; for OR put '|' BEFORE the two it
+                    joins: ['|', ['name', 'ilike', 'a'], ['ref', '=', 'b']].
                 fields: Field selection options - can be:
                     - None (default): Returns smart selection of common fields
                     - A list: ["field1", "field2", ...] - Returns only specified fields
@@ -1231,7 +1310,9 @@ class OdooToolHandler:
             model: str,
             groupby: Optional[List[str]] = None,
             aggregates: Optional[List[str]] = None,
-            domain: Optional[Any] = None,
+            # Explicitly typed, not Any: see search_records (empty schema breaks
+            # grammar-constrained clients).
+            domain: DomainInput = None,
             order: Optional[str] = None,
             limit: Optional[int] = None,
             offset: int = 0,
@@ -1265,6 +1346,9 @@ class OdooToolHandler:
                     group carries a count. Pass ``["__count", "amount_total:sum"]``
                     to get both.
                 domain: Odoo domain filter — list, JSON string, or None.
+                    Use 'ilike' for case-insensitive substring match
+                    (no '%' wildcards — Odoo adds them). OR is written
+                    as '|' BEFORE the two conditions it joins.
                 order: Sort expression over groupby keys / aggregates,
                     e.g. ``"date_order:month"`` or ``"amount_total:sum desc"``.
                 limit: Maximum number of groups. Defaults to
