@@ -590,6 +590,11 @@ def _validate_offset(offset: int, limit: int) -> None:
         )
 
 
+# Shown in error messages: small models copy a concrete example, they cannot
+# infer one from a type name.
+_DOMAIN_EXAMPLE = '[["name", "ilike", "acme"]]'
+
+
 def _json_safe(value: Any) -> Any:
     """Coerce XML-RPC return types Pydantic can't serialize (Binary, DateTime)."""
     if isinstance(value, xmlrpc.client.Binary):
@@ -1682,7 +1687,10 @@ class OdooToolHandler:
             return []
         if not isinstance(domain, str):
             if not isinstance(domain, list):
-                raise ValidationError(f"Domain must be a list, got {type(domain).__name__}")
+                raise ValidationError(
+                    f"Domain must be a list, got {type(domain).__name__}. "
+                    f"Example: {_DOMAIN_EXAMPLE}"
+                )
             # Same guard the write paths use: an oversized int anywhere in the
             # domain would raise OverflowError mid-marshal and surface as a
             # transport-flavoured "Connection error", which is exactly the
@@ -1707,13 +1715,15 @@ class OdooToolHandler:
                 parsed = _parse_python_literal(domain)
             except (ValueError, SyntaxError, RecursionError):
                 raise ValidationError(
-                    f"Invalid domain parameter. Expected JSON array or Python list, "
-                    f"got: {domain[:100]}..."
+                    f"Invalid domain parameter. Expected a list of "
+                    f'["field", "operator", value] conditions, e.g. {_DOMAIN_EXAMPLE}; '
+                    f"got: {domain[:100]}"
                 ) from e
 
         if not isinstance(parsed, list):
             raise ValidationError(
-                f"Domain must be a list, got {type(parsed).__name__}{_double_encoded_hint(parsed)}"
+                f"Domain must be a list, got {type(parsed).__name__}"
+                f"{_double_encoded_hint(parsed)}. Example: {_DOMAIN_EXAMPLE}"
             )
         _check_xmlrpc_int_bounds(parsed, "domain")
         check_domain_balance(parsed)
@@ -1769,9 +1779,15 @@ class OdooToolHandler:
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
                 domain: Odoo domain filter - can be:
-                    - A list: [['is_company', '=', True]]
+                    - A list: [["is_company", "=", true]]
                     - None: returns all records (default)
                     The 'any' and 'not any' sub-domain operators need Odoo 17+.
+                    Operators: use "ilike" for a case-insensitive substring
+                    match. Odoo adds the wildcards itself, so write
+                    ["name", "ilike", "acme"] and never "%acme%". "like" is
+                    case-sensitive and matches the literal string. Conditions
+                    are ANDed by default; for OR put "|" BEFORE the two it
+                    joins: ["|", ["name", "ilike", "a"], ["ref", "=", "b"]].
                 fields: Field selection options - can be:
                     - None (default): Returns smart selection of common fields
                     - A list: ["field1", "field2", ...] - Returns only specified fields
@@ -2339,6 +2355,9 @@ class OdooToolHandler:
                     to get both.
                 domain: Odoo domain filter, a list, or None for every record.
                     The 'any' and 'not any' sub-domain operators need Odoo 17+.
+                    Use "ilike" for a case-insensitive substring match
+                    (no "%" wildcards, Odoo adds them). OR is written
+                    as "|" BEFORE the two conditions it joins.
                 order: Sort expression over groupby keys / aggregates,
                     e.g. ``"date_order:month"`` or ``"amount_total:sum desc"``.
                     Odoo 16 cannot order by ``__count``.

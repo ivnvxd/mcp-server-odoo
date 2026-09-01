@@ -1,5 +1,6 @@
 """Test suite for MCP tools functionality."""
 
+import json
 import logging
 from unittest.mock import MagicMock
 
@@ -4198,6 +4199,75 @@ class TestParseDomainInput:
         with pytest.raises(ValidationError) as exc_info:
             handler._parse_domain_input([token, ["id", ">", 0]])
         assert "Invalid domain term" in str(exc_info.value)
+
+
+class TestDomainGuidance:
+    """Domain errors and docstrings show a concrete, valid JSON example.
+
+    Small models copy an example; they cannot infer one from a type name. So
+    every domain error carries one, and every domain example the tools publish
+    is JSON a client can send as is (double quotes, lowercase booleans).
+    """
+
+    @pytest.fixture
+    def handler(self):
+        app = MagicMock(spec=MCPServer)
+        app._tools = {}
+        app.tool = lambda **kwargs: lambda func: app._tools.setdefault(func.__name__, func)
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+        return OdooToolHandler(app, connection, MagicMock(spec=AccessController), config)
+
+    @pytest.mark.parametrize(
+        "domain",
+        ["name = acme", '{"key": "value"}', {"key": "value"}],
+        ids=["unparseable", "json-object", "dict"],
+    )
+    def test_domain_errors_show_an_example(self, handler, domain):
+        with pytest.raises(ValidationError) as exc_info:
+            handler._parse_domain_input(domain)
+
+        assert '[["name", "ilike", "acme"]]' in str(exc_info.value)
+
+    def test_double_encoded_hint_is_kept(self, handler):
+        with pytest.raises(ValidationError) as exc_info:
+            handler._parse_domain_input('"[[\\"name\\", \\"=\\", \\"x\\"]]"')
+
+        assert "JSON-encoded twice" in str(exc_info.value)
+        assert '[["name", "ilike", "acme"]]' in str(exc_info.value)
+
+    @staticmethod
+    def _bracketed(text: str) -> list:
+        """Every top-level [...] span in `text`."""
+        spans, depth, start = [], 0, 0
+        for index, char in enumerate(text):
+            if char == "[":
+                if depth == 0:
+                    start = index
+                depth += 1
+            elif char == "]" and depth:
+                depth -= 1
+                if depth == 0:
+                    spans.append(text[start : index + 1])
+        return spans
+
+    @pytest.mark.parametrize(
+        "tool,next_arg", [("search_records", "fields:"), ("aggregate_records", "order:")]
+    )
+    def test_domain_docstring_examples_are_valid_json(self, handler, tool, next_arg):
+        doc = handler.app._tools[tool].__doc__
+        section = doc.split("domain:", 1)[1].split(next_arg, 1)[0]
+
+        for example in self._bracketed(section):
+            json.loads(example)
+
+    def test_examples_found_in_search_records_docstring(self, handler):
+        doc = handler.app._tools["search_records"].__doc__
+
+        assert '[["is_company", "=", true]]' in doc
+        assert '["|", ["name", "ilike", "a"], ["ref", "=", "b"]]' in doc
+        assert "[['" not in doc
 
 
 class TestCallModelMethodTool:
