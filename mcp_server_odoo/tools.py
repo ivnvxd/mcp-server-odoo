@@ -26,6 +26,12 @@ from .access_control import (
     check_domain_balance,
 )
 from .config import OdooConfig, max_offset_for
+from .dashboard_builder import (
+    DashboardSpecError,
+    build_dashboard,
+    collect_models,
+    summarize_dashboard,
+)
 from .error_handling import (
     MCPPermissionError,
     NotFoundError,
@@ -47,6 +53,9 @@ from .schemas import (
     CompanyInfo,
     CreateResult,
     CurrentContextResult,
+    DashboardListResult,
+    DashboardResult,
+    DashboardWriteResult,
     DeleteResult,
     FieldInfo,
     FieldSelectionMetadata,
@@ -79,6 +88,14 @@ _PUBLIC_METHOD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 # these prefixes on purpose — other ir.* models (ir.attachment, ...) stay
 # callable; no blanket ir.% block.
 _BLOCKED_METHOD_CALL_MODELS = ("ir.actions", "ir.cron")
+
+# Spreadsheet dashboards (Odoo Enterprise, module `spreadsheet_dashboard`).
+DASHBOARD_MODEL = "spreadsheet.dashboard"
+DASHBOARD_GROUP_MODEL = "spreadsheet.dashboard.group"
+
+# The document format the builder writes is o-spreadsheet 18.5, and
+# o-spreadsheet only migrates forward — an older Odoo cannot open it.
+MIN_DASHBOARD_ODOO_VERSION = 18
 
 # ORM CRUD / data-access primitives call_model_method refuses even under full
 # YOLO — the business-method hatch must not silently become generic CRUD;
@@ -1305,6 +1322,139 @@ class OdooToolHandler:
                 model, groupby, aggregates, domain, order, limit, offset, ctx
             )
             return AggregateResult(**result)
+
+        @self.app.tool(
+            title="List Dashboards",
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
+        )
+        async def list_dashboards(
+            group: Optional[str] = None,
+            ctx: Optional[Context] = None,
+        ) -> DashboardListResult:
+            """List the Odoo spreadsheet dashboards and the sections holding them.
+
+            Requires the Enterprise Dashboards app (`spreadsheet_dashboard`).
+
+            Args:
+                group: Optional section name to filter on (e.g. 'Finance')
+
+            Returns:
+                The available sections and the dashboards in them
+            """
+            result = await self._handle_list_dashboards_tool(group, ctx)
+            return DashboardListResult(**result)
+
+        @self.app.tool(
+            title="Get Dashboard",
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
+        )
+        async def get_dashboard(
+            dashboard_id: int,
+            raw: bool = False,
+            ctx: Optional[Context] = None,
+        ) -> DashboardResult:
+            """Read one dashboard: its data sources, filters and figures.
+
+            Returns the dashboard as it was last *written*. Edits made in Odoo's
+            dashboard editor are stored as separate collaborative revisions
+            (`spreadsheet.revision`) and are not reflected here.
+
+            Args:
+                dashboard_id: The spreadsheet.dashboard ID
+                raw: Also return the full o-spreadsheet JSON. It is large —
+                    leave it off unless the summary omits what you need.
+
+            Returns:
+                A summary of the dashboard's contents, plus the raw document
+                when `raw` is set
+            """
+            result = await self._handle_get_dashboard_tool(dashboard_id, raw, ctx)
+            return DashboardResult(**result)
+
+        @self.app.tool(
+            title="Write Dashboard",
+            annotations=ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=True,
+                idempotentHint=True,
+                openWorldHint=True,
+            ),
+        )
+        async def write_dashboard(
+            spec: Dict[str, Any],
+            name: Optional[str] = None,
+            group: Optional[str] = None,
+            dashboard_id: Optional[int] = None,
+            publish: bool = True,
+            dry_run: bool = False,
+            ctx: Optional[Context] = None,
+        ) -> DashboardWriteResult:
+            """Build a dashboard from a declarative spec and save it to Odoo.
+
+            A dashboard is one o-spreadsheet JSON document. This tool generates
+            that document from a description of what the dashboard should show,
+            wiring each global filter to a matching field on every widget's
+            model automatically. Requires the Enterprise Dashboards app
+            (`spreadsheet_dashboard`) and Odoo 18.0 or newer.
+
+            SPEC FORMAT
+                spec = {title?, locale?, filters: [...], widgets: [...]}
+
+                filters: {type: date|relation|text|numeric|boolean|selection,
+                label, model (relation/selection), field (selection), default}
+
+                widgets, in the order they should appear:
+                  {type: 'kpi', title, model, measure, domain}
+                      consecutive kpis form one row of cards
+                  {type: 'chart', chart: bar|line|pie|radar|waterfall|pyramid|
+                      scatter|funnel|geo|treemap|sunburst, title, model,
+                      measure, group_by: ['date_order:month'], domain}
+                  {type: 'pivot', title, model, rows: ['partner_id'],
+                      columns: [], measures: ['amount_total'], sort_by, limit,
+                      domain}
+                  {type: 'list', title, model, columns: ['name', ...],
+                      order: ['amount_total desc'], limit, domain}
+                  {type: 'text', text}
+
+                A measure is 'field', 'field:avg' or '__count'. Measures must be
+                stored and aggregatable; '__count' always works. Any widget may
+                carry filters: {'<filter label>': '<field chain>'} to override
+                the automatic field matching, or filters: false to detach it
+                from the filters entirely.
+
+            Replacing an existing dashboard overwrites its whole content: edits
+            made in Odoo's dashboard editor are archived and lost. Run with
+            `dry_run` first to check what gets built, and read the dashboard
+            beforehand if it may hold work worth keeping.
+
+            Args:
+                spec: The dashboard spec (see above)
+                name: Dashboard name. Required when creating; when updating,
+                    renames the dashboard if given.
+                group: Section name or ID to file the dashboard under, e.g.
+                    'Finance'. Required when creating; created if new.
+                dashboard_id: Update this dashboard instead of creating one
+                publish: Whether the dashboard is visible to users
+                dry_run: Build and validate, report what it contains, write
+                    nothing
+
+            Returns:
+                The dashboard's ID and URL, and a summary of what was built
+            """
+            result = await self._handle_write_dashboard_tool(
+                spec, name, group, dashboard_id, publish, dry_run, ctx
+            )
+            return DashboardWriteResult(**result)
 
         # Two-key opt-in: invisible to the client unless both flags are set.
         if self.config.is_write_allowed and self.config.enable_method_calls:
@@ -2797,6 +2947,292 @@ class OdooToolHandler:
         raise ValidationError(
             f"keyword_arguments must be a dict or JSON-string, got {type(value).__name__}"
         )
+
+    # --- Dashboards ---
+
+    def _dashboard_url(self, dashboard_id: Optional[int]) -> Optional[str]:
+        """Link to the Dashboards app, which is where a dashboard is opened."""
+        if not dashboard_id:
+            return None
+        base = self.connection.build_record_url(DASHBOARD_MODEL, dashboard_id)
+        return base.split("/web#")[0].rstrip("/") + "/odoo/dashboards"
+
+    @staticmethod
+    def _dashboard_failure(action: str, error: Exception) -> ValidationError:
+        """Turn a dashboard RPC failure into something actionable.
+
+        The most common cause by far is that the model is simply not there:
+        dashboards ship with Odoo Enterprise, so on Community every call fails
+        with a bare "object doesn't exist".
+        """
+        message = ErrorSanitizer.sanitize_message(str(error))
+        if DASHBOARD_MODEL in message and (
+            "doesn't exist" in message or "does not exist" in message
+        ):
+            return ValidationError(
+                f"Failed to {action}: this Odoo has no {DASHBOARD_MODEL} model. "
+                "Dashboards are an Enterprise feature — install the Dashboards "
+                "app (spreadsheet_dashboard)."
+            )
+        return ValidationError(f"Failed to {action}: {message}")
+
+    async def _resolve_dashboard_group(self, group: Any) -> int:
+        """Return the ID of a dashboard section, creating it when it's new."""
+        if isinstance(group, int) or (isinstance(group, str) and group.isdigit()):
+            return int(group)
+        found = await asyncio.to_thread(
+            self.connection.search, DASHBOARD_GROUP_MODEL, [("name", "=", group)]
+        )
+        if found:
+            return found[0]
+        return await asyncio.to_thread(
+            self.connection.create, DASHBOARD_GROUP_MODEL, {"name": group}
+        )
+
+    async def _handle_list_dashboards_tool(
+        self,
+        group: Optional[str] = None,
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle list dashboards tool request."""
+        try:
+            with perf_logger.track_operation("tool_list_dashboards"):
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, DASHBOARD_MODEL, "read"
+                )
+                await self._ctx_info(ctx, "Listing dashboards...")
+
+                groups = await asyncio.to_thread(
+                    self.connection.search_read,
+                    DASHBOARD_GROUP_MODEL,
+                    [],
+                    ["id", "name"],
+                )
+                domain: List[Any] = []
+                if group:
+                    domain = [("dashboard_group_id.name", "=", group)]
+                dashboards = await asyncio.to_thread(
+                    self.connection.search_read,
+                    DASHBOARD_MODEL,
+                    domain,
+                    ["id", "name", "dashboard_group_id", "sequence", "is_published"],
+                )
+                return {
+                    "groups": sorted(
+                        ({"id": g["id"], "name": g["name"]} for g in groups),
+                        key=lambda g: g["name"],
+                    ),
+                    "dashboards": [
+                        {
+                            "id": d["id"],
+                            "name": d["name"],
+                            "group": (d.get("dashboard_group_id") or [None, None])[1],
+                            "sequence": d.get("sequence"),
+                            "is_published": d.get("is_published"),
+                        }
+                        for d in dashboards
+                    ],
+                    "total": len(dashboards),
+                }
+        except ValidationError:
+            raise
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in list_dashboards tool: {e}")
+            raise self._dashboard_failure("list dashboards", e) from e
+
+    async def _handle_get_dashboard_tool(
+        self,
+        dashboard_id: int,
+        raw: bool = False,
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle get dashboard tool request."""
+        try:
+            with perf_logger.track_operation("tool_get_dashboard"):
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, DASHBOARD_MODEL, "read"
+                )
+                await self._ctx_info(ctx, f"Reading dashboard {dashboard_id}...")
+
+                records = await asyncio.to_thread(
+                    self.connection.read,
+                    DASHBOARD_MODEL,
+                    [dashboard_id],
+                    ["name", "dashboard_group_id", "is_published", "spreadsheet_data"],
+                )
+                if not records:
+                    raise NotFoundError(f"No dashboard with ID {dashboard_id}")
+                record = records[0]
+
+                try:
+                    document = json.loads(record.get("spreadsheet_data") or "{}")
+                except json.JSONDecodeError:
+                    document = {}
+
+                result = {
+                    "id": dashboard_id,
+                    "name": record.get("name"),
+                    "group": (record.get("dashboard_group_id") or [None, None])[1],
+                    "is_published": record.get("is_published"),
+                    "summary": summarize_dashboard(document),
+                    "url": self._dashboard_url(dashboard_id),
+                }
+                if raw:
+                    result["document"] = document
+                return result
+        except (ValidationError, NotFoundError):
+            raise
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in get_dashboard tool: {e}")
+            raise self._dashboard_failure("read dashboard", e) from e
+
+    async def _handle_write_dashboard_tool(
+        self,
+        spec: Any,
+        name: Optional[str] = None,
+        group: Optional[str] = None,
+        dashboard_id: Optional[int] = None,
+        publish: bool = True,
+        dry_run: bool = False,
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle write dashboard tool request."""
+        try:
+            with perf_logger.track_operation("tool_write_dashboard"):
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access,
+                    DASHBOARD_MODEL,
+                    "read" if dry_run else ("write" if dashboard_id else "create"),
+                )
+
+                if isinstance(spec, str):
+                    try:
+                        spec = json.loads(spec)
+                    except json.JSONDecodeError as e:
+                        raise ValidationError(f"spec is not valid JSON: {e}") from e
+                if not isinstance(spec, dict):
+                    raise ValidationError("spec must be an object")
+
+                if not dry_run:
+                    major = self.connection.get_major_version()
+                    if major is not None and major < MIN_DASHBOARD_ODOO_VERSION:
+                        raise ValidationError(
+                            f"Writing dashboards needs Odoo {MIN_DASHBOARD_ODOO_VERSION}.0 "
+                            f"or newer; this server reports "
+                            f"{self.connection.server_version}. o-spreadsheet only "
+                            "migrates documents forward, so an older instance cannot "
+                            "open what this tool writes."
+                        )
+
+                await self._ctx_info(ctx, "Building dashboard...")
+                models = collect_models(spec)
+                fields_by_model: Dict[str, Any] = {}
+                for model in models:
+                    try:
+                        fields_by_model[model] = await asyncio.to_thread(
+                            self.connection.fields_get, model
+                        )
+                    except Exception as e:
+                        # A model we cannot introspect only costs us the
+                        # automatic filter matching, not the dashboard.
+                        logger.warning(f"fields_get failed for {model}: {e}")
+
+                document = build_dashboard(spec, fields_by_model)
+                payload = json.dumps(document)
+                summary = summarize_dashboard(document)
+                summary["models"] = models
+                unresolved = [m for m in models if m not in fields_by_model]
+                if unresolved:
+                    summary["unresolved_models"] = unresolved
+
+                if dry_run:
+                    return {
+                        "success": True,
+                        "dashboard_id": dashboard_id,
+                        "url": None,
+                        "created": False,
+                        "summary": summary,
+                        "message": (
+                            "Dry run: the dashboard was built and validated but not "
+                            f"saved. {len(payload)} bytes, {summary['widgets']} widgets."
+                        ),
+                    }
+
+                values: Dict[str, Any] = {
+                    "spreadsheet_data": payload,
+                    "is_published": publish,
+                }
+                created = False
+                if dashboard_id:
+                    existing = await asyncio.to_thread(
+                        self.connection.read, DASHBOARD_MODEL, [dashboard_id], ["id"]
+                    )
+                    if not existing:
+                        raise NotFoundError(f"No dashboard with ID {dashboard_id}")
+                    if name:
+                        values["name"] = name
+                    if group:
+                        values["dashboard_group_id"] = await self._resolve_dashboard_group(group)
+                    await asyncio.to_thread(
+                        self.connection.write, DASHBOARD_MODEL, [dashboard_id], values
+                    )
+                else:
+                    if not name:
+                        raise ValidationError("A new dashboard needs a name")
+                    if not group:
+                        raise ValidationError(
+                            "A new dashboard needs a group (section), e.g. 'Finance'"
+                        )
+                    values["name"] = name
+                    values["dashboard_group_id"] = await self._resolve_dashboard_group(group)
+                    dashboard_id = await asyncio.to_thread(
+                        self.connection.create, DASHBOARD_MODEL, values
+                    )
+                    created = True
+
+                verb = "Created" if created else "Replaced the contents of"
+                note = (
+                    ""
+                    if created
+                    else " Any edits previously made in the dashboard editor were archived."
+                )
+                return {
+                    "success": True,
+                    "dashboard_id": dashboard_id,
+                    "url": self._dashboard_url(dashboard_id),
+                    "created": created,
+                    "summary": summary,
+                    "message": (
+                        f"{verb} dashboard {dashboard_id} with {summary['widgets']} widgets.{note}"
+                    ),
+                }
+        except (ValidationError, NotFoundError):
+            raise
+        except DashboardSpecError as e:
+            raise ValidationError(f"Invalid dashboard spec: {e}") from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except OdooValidationFault as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in write_dashboard tool: {e}")
+            raise self._dashboard_failure("write dashboard", e) from e
 
     async def _handle_call_model_method_tool(
         self,

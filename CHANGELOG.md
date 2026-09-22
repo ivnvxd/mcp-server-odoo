@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Spreadsheet dashboards**: `list_dashboards`, `get_dashboard` and `write_dashboard`. A dashboard is one o-spreadsheet JSON document; `write_dashboard` generates it from a short declarative spec (filters plus `kpi`, `chart`, `pivot`, `list` and `text` widgets) instead of requiring the caller to assemble the document by hand. Global filters are wired to a matching field on each widget's model automatically, resolved once per model so a KPI card and the chart beside it cannot filter on different date fields. `dry_run` builds and reports without writing. Requires the Enterprise Dashboards app (`spreadsheet_dashboard`); writes require Odoo 18.0 or newer, since o-spreadsheet only migrates documents forward.
+
 ## [0.8.0] - 2026-08-26
 
 ### Added

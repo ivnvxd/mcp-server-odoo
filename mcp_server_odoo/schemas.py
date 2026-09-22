@@ -322,3 +322,51 @@ class CallModelMethodResult(BaseModel):
         description="Return value from Odoo (type depends on the method; may be null)",
     )
     message: str = Field(description="Human-readable summary of the call")
+
+
+# --- Dashboards ---
+
+
+class DashboardListResult(BaseModel):
+    """Result of a list dashboards operation."""
+
+    groups: List[Dict[str, Any]] = Field(
+        description="Dashboard sections (spreadsheet.dashboard.group), each {id, name}"
+    )
+    dashboards: List[Dict[str, Any]] = Field(
+        description="Dashboards, each {id, name, group, sequence, is_published}"
+    )
+    total: int = Field(description="Number of dashboards returned")
+
+
+class DashboardResult(BaseModel):
+    """Result of a get dashboard operation."""
+
+    id: int = Field(description="spreadsheet.dashboard ID")
+    name: Optional[str] = Field(default=None, description="Dashboard name")
+    group: Optional[str] = Field(default=None, description="Section the dashboard sits in")
+    is_published: Optional[bool] = Field(
+        default=None, description="Whether users can see the dashboard"
+    )
+    summary: Dict[str, Any] = Field(
+        description="What the dashboard contains: filters, scorecards, charts, pivots and lists"
+    )
+    url: Optional[str] = Field(default=None, description="Link to the Dashboards app in Odoo")
+    document: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="The full o-spreadsheet document. Only present when called with raw=True.",
+    )
+
+
+class DashboardWriteResult(BaseModel):
+    """Result of a write dashboard operation."""
+
+    success: bool = Field(description="Whether the dashboard was built successfully")
+    dashboard_id: Optional[int] = Field(
+        default=None,
+        description="ID of the dashboard written. None on a dry run that created none.",
+    )
+    url: Optional[str] = Field(default=None, description="Link to the Dashboards app in Odoo")
+    created: bool = Field(description="True if a new dashboard was created, False if replaced")
+    summary: Dict[str, Any] = Field(description="What the generated dashboard contains")
+    message: str = Field(description="Human-readable summary of what happened")

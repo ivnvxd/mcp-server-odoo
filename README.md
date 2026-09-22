@@ -20,6 +20,7 @@ An MCP server that enables AI assistants like Claude to interact with Odoo ERP s
 - 🔢 **Count records** matching specific criteria
 - 📋 **Inspect model fields** to understand data structure
 - 📊 **Server-side aggregation** — group, sum, and count without pulling raw rows
+- 📈 **Build dashboards** — generate Odoo spreadsheet dashboards (KPI cards, charts, pivots, lists, global filters) from a short spec
 - ⚡ **Workflow actions** — invoke public business methods (post invoice, confirm SO, etc.) via an opt-in escape hatch
 - 📎 **Binary & attachment resources** — fetch images, documents, and `ir.attachment` files via resource URIs
 - 👤 **Personalized session context** — the connected user, timezone, and company scope injected into the session instructions
@@ -663,6 +664,55 @@ Server-side aggregation. Use this whenever the question is "totals/counts/groupi
   "groupby": ["country_id"]
 }
 ```
+
+### `list_dashboards`
+Lists the Odoo spreadsheet dashboards and the sections holding them. Requires the Enterprise Dashboards app (`spreadsheet_dashboard`).
+
+### `get_dashboard`
+Reads one dashboard — its data sources, filters and figures. Pass `raw: true` to get the full o-spreadsheet document instead of the summary.
+
+Returns the dashboard as it was last **written**. Edits made in Odoo's dashboard editor live in separate collaborative revisions (`spreadsheet.revision`) and are not reflected here.
+
+### `write_dashboard`
+Builds a dashboard from a declarative spec and saves it. A dashboard is one o-spreadsheet JSON document in which data sources, figures, cell formulas and per-filter field matchings all have to agree with each other; this tool generates that document from a description of what the dashboard should show.
+
+Widgets are laid out top to bottom in the order given. Consecutive `kpi` widgets form one row of cards. Each global filter is wired to a matching field on every widget's model automatically — a date filter to the date field the model is already grouped by, a relation filter to the many2one pointing at its model. The date binding is resolved once per model, so a KPI card and the chart beside it cannot end up filtering on different dates and disagreeing. Override per widget with `filters: {"<label>": "<field chain>"}`, or opt out with `filters: false`.
+
+Run with `dry_run: true` first — it builds, validates, and reports the widgets, models and filter bindings without writing anything.
+
+> [!WARNING]
+> Replacing an existing dashboard overwrites its whole content. Edits made in Odoo's dashboard editor are archived and lost. Read the dashboard first if it may hold work worth keeping.
+
+Requires the Enterprise Dashboards app (`spreadsheet_dashboard`). Writes require Odoo 18.0 or newer: the document format only migrates forward, so an older instance cannot open what this tool writes.
+
+```json
+{
+  "name": "Cash",
+  "group": "Finance",
+  "spec": {
+    "filters": [
+      {"type": "date", "label": "Period", "default": "last_90_days"},
+      {"type": "relation", "label": "Customer", "model": "res.partner"}
+    ],
+    "widgets": [
+      {"type": "kpi", "title": "Open receivables", "model": "account.move",
+       "measure": "amount_residual_signed",
+       "domain": [["move_type", "=", "out_invoice"], ["payment_state", "!=", "paid"]]},
+      {"type": "chart", "chart": "line", "title": "Revenue per month",
+       "model": "account.move", "measure": "amount_untaxed_signed",
+       "group_by": ["invoice_date:month"]},
+      {"type": "pivot", "title": "Top customers", "model": "account.move",
+       "rows": ["partner_id"], "measures": ["amount_untaxed_signed"],
+       "sort_by": "amount_untaxed_signed", "limit": 10},
+      {"type": "list", "title": "Overdue", "model": "account.move",
+       "columns": ["name", "partner_id", "invoice_date_due"],
+       "order": ["invoice_date_due asc"], "limit": 10}
+    ]
+  }
+}
+```
+
+A measure is `"field"`, `"field:avg"` or `"__count"`. Measures must be stored and aggregatable — a non-stored computed field cannot be grouped, though it can still appear as a `list` column.
 
 ### `call_model_method`
 Generic XML-RPC `execute_kw` escape hatch — invokes public **business** methods, for workflow actions not covered by CRUD (post invoice, confirm sale order, validate picking, etc.). Available **only** when both `ODOO_YOLO=true` (full YOLO) and `ODOO_MCP_ENABLE_METHOD_CALLS=true` are set; otherwise the tool is not registered. Only public ASCII Python identifiers are accepted as method names — dotted, dashed, whitespace, non-ASCII, and `_`-prefixed names are rejected.
