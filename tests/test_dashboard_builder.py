@@ -372,3 +372,16 @@ class TestSummary:
         """Each KPI card is backed by a pivot; only the card should show up."""
         summary = summarize_dashboard(build_dashboard(kpi_spec(), FIELDS))
         assert summary["pivots"] == []
+
+    def test_lists_report_field_names_in_either_column_form(self):
+        """Odoo's editor saves newer documents with {name, string} list columns."""
+        doc = {
+            "lists": {
+                "1": {"name": "Ours", "model": "m", "columns": ["name", "amount"]},
+                "2": {"name": "Editor", "model": "m", "columns": [{"name": "x", "string": "X"}]},
+            }
+        }
+        assert [lst["columns"] for lst in summarize_dashboard(doc)["lists"]] == [
+            ["name", "amount"],
+            ["x"],
+        ]

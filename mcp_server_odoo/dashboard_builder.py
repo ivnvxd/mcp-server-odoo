@@ -881,7 +881,11 @@ def summarize_dashboard(document: Dict[str, Any]) -> Dict[str, Any]:
         {
             "name": lst.get("name"),
             "model": lst.get("model"),
-            "columns": list(lst.get("columns") or []),
+            # Our documents store field names; Odoo's editor saves newer
+            # documents with {name, string} objects. Report names either way.
+            "columns": [
+                c.get("name") if isinstance(c, dict) else c for c in lst.get("columns") or []
+            ],
         }
         for lst in (document.get("lists") or {}).values()
     ]
