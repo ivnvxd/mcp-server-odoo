@@ -2857,12 +2857,8 @@ class TestUpdateRecordTool:
     @pytest.mark.asyncio
     async def test_update_record_success(self, handler, mock_connection, mock_app):
         """Test successful record update with existence check and result read."""
-        # First read: existence check returns [{"id": 10}]
-        # Second read: post-update fetch returns updated record
-        mock_connection.read.side_effect = [
-            [{"id": 10}],  # existence check
-            [{"id": 10, "display_name": "Updated Partner"}],  # post-update read
-        ]
+        mock_connection.search_count.return_value = 1  # existence check
+        mock_connection.read.return_value = [{"id": 10, "display_name": "Updated Partner"}]
         mock_connection.write.return_value = True
         mock_connection.build_record_url.return_value = "http://localhost:8069/odoo/res.partner/10"
 
@@ -2877,9 +2873,10 @@ class TestUpdateRecordTool:
         assert "10" in result.message
 
         # Verify existence check then post-update read
-        assert mock_connection.read.call_count == 2
-        mock_connection.read.assert_any_call("res.partner", [10], ["id"])
-        mock_connection.read.assert_any_call("res.partner", [10], ["id", "display_name"])
+        mock_connection.search_count.assert_called_once_with(
+            "res.partner", [["id", "=", 10]], context={"active_test": False}
+        )
+        mock_connection.read.assert_called_once_with("res.partner", [10], ["id", "display_name"])
         mock_connection.write.assert_called_once_with(
             "res.partner", [10], {"name": "Updated Partner"}
         )
@@ -2887,7 +2884,7 @@ class TestUpdateRecordTool:
     @pytest.mark.asyncio
     async def test_update_record_not_found(self, handler, mock_connection, mock_app):
         """Test update_record when record doesn't exist."""
-        mock_connection.read.return_value = []  # existence check fails
+        mock_connection.search_count.return_value = 0  # existence check fails
         update_record = mock_app._tools["update_record"]
         with pytest.raises(ValidationError, match="Record not found"):
             await update_record(model="res.partner", record_id=999, values={"name": "Test"})

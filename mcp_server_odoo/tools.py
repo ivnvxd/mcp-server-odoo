@@ -2246,9 +2246,16 @@ class OdooToolHandler:
                             values["res_model"], "attachment would be moved to"
                         )
 
-                # Check if record exists (only fetch ID to verify existence)
-                existing = await asyncio.to_thread(self.connection.read, model, [record_id], ["id"])
-                if not existing:
+                # Check that the record exists. A read of only "id" cannot:
+                # Odoo 19 echoes {"id": x} back for a missing x. active_test=False
+                # so that an archived record can still be updated (unarchived).
+                existing_count = await asyncio.to_thread(
+                    self.connection.search_count,
+                    model,
+                    [["id", "=", record_id]],
+                    context={"active_test": False},
+                )
+                if not existing_count:
                     raise NotFoundError(f"Record not found: {model} with ID {record_id}")
 
                 # Update the record
