@@ -368,7 +368,9 @@ uvx mcp-server-odoo
 
 The HTTP endpoint will be available at: `http://localhost:8000/mcp/`
 
-> **Note**: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication. Requires MCP library v1.27.0 or higher.
+> **Note**: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication.
+
+> **Note**: The HTTP transport refuses request bodies over 4 MiB with HTTP 413. It holds at most 10,000 open sessions and answers new ones with HTTP 503 beyond that. If `ODOO_MCP_SESSION_IDLE_TIMEOUT` is unset, sessions never expire, so set it for a long-running public server.
 
 <details>
 <summary>Running streamable-http transport for remote access</summary>
