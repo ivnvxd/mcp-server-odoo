@@ -35,7 +35,7 @@ from .access_control import (
     attachment_scope_domain,
     check_domain_balance,
 )
-from .binary_reads import read_without_binary_payloads, reads_without_bin_size
+from .binary_reads import read_without_binary_payloads, uses_odoo_20_binaries
 from .config import OdooConfig, max_offset_for
 from .error_handling import (
     ErrorContext,
@@ -54,6 +54,7 @@ from .odoo_connection import (
     OdooValidationFault,
 )
 from .uri_schema import (
+    ATTACHMENT_CONTENT_FIELDS,
     ATTACHMENT_URI_PATTERN,
     BINARY_FIELD_TYPES,
     BINARY_FIELD_URI_PATTERN,
@@ -710,7 +711,7 @@ class OdooResourceHandler:
         # base64-decode file content and fail. Delegating all three serves
         # the right bytes with the stored mimetype, honors type='url', and
         # applies the attached-to-model gate.
-        if model == "ir.attachment" and field in ("datas", "raw", "db_datas"):
+        if model == "ir.attachment" and field in ATTACHMENT_CONTENT_FIELDS:
             return await self._handle_attachment_read(record_id, ctx)
 
         context = ErrorContext(model=model, operation="read_binary_field", record_id=record_id)
@@ -759,7 +760,7 @@ class OdooResourceHandler:
                 # ever pulled into this process. Without this the limit could
                 # only bound the decode, not the fetch that precedes it —
                 # which is where an OOM actually happens.
-                if reads_without_bin_size(self.connection):
+                if uses_odoo_20_binaries(self.connection):
                     # Odoo 20 has no bin_size; count against field.size instead
                     if field_info.get("store", True):
                         await asyncio.to_thread(
@@ -940,14 +941,16 @@ class OdooResourceHandler:
                     f"Attachment {attachment_id}",
                 )
 
+                # Odoo 20 removed datas; raw holds the same content there
+                content_field = "raw" if uses_odoo_20_binaries(self.connection) else "datas"
                 payload = await asyncio.to_thread(
                     self.connection.search_read,
                     "ir.attachment",
                     [["id", "=", attachment_id_int]],
-                    ["datas"],
+                    [content_field],
                     context={"active_test": False},
                 )
-                datas = payload[0].get("datas") if payload else None
+                datas = payload[0].get(content_field) if payload else None
                 if not datas:
                     # Same behavior as an empty binary field: a clean error
                     # instead of serving a zero-byte blob

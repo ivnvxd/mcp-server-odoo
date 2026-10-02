@@ -96,6 +96,11 @@ ATTACHMENT_URI_PATTERN = re.compile(r"^odoo://attachment/(\d+)$")
 # the record-field resource serves them.
 BINARY_FIELD_TYPES = ("binary", "image")
 
+# ir.attachment fields that hold the attachment's content. Odoo 20 removed
+# ``datas``; ``raw`` (computed) and ``db_datas`` (the column) remain. All of
+# them map to the attachment URI, whose handler knows mimetype and url type.
+ATTACHMENT_CONTENT_FIELDS = ("datas", "raw", "db_datas")
+
 
 def is_binary_payload_dict(value: Any) -> bool:
     """True for the binary read shape of Odoo 20: ``{content, size, filename?}``.
@@ -294,8 +299,8 @@ def build_attachment_uri(attachment_id: int) -> str:
 def build_binary_uri(model: str, record_id: int, field: str) -> str:
     """Build the ``odoo://`` URI that serves a record's binary/image field.
 
-    ``ir.attachment.datas`` gets the attachment-specific
-    ``odoo://attachment/{id}`` URI so its stored mimetype and ``type='url'``
+    ``ir.attachment``'s content fields (``ATTACHMENT_CONTENT_FIELDS``) get the
+    attachment-specific ``odoo://attachment/{id}`` URI so its stored mimetype and ``type='url'``
     handling apply on read; every other binary field gets the generic
     ``odoo://{model}/record/{id}/{field}`` URI. Centralizes the special-case
     so the tool and resource output paths stay in sync.
@@ -303,7 +308,7 @@ def build_binary_uri(model: str, record_id: int, field: str) -> str:
     Raises:
         URIValidationError: If the model name, record ID, or field name is invalid
     """
-    if model == "ir.attachment" and field == "datas":
+    if model == "ir.attachment" and field in ATTACHMENT_CONTENT_FIELDS:
         return build_attachment_uri(record_id)
     return build_binary_field_uri(model, record_id, field)
 

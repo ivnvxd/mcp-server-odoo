@@ -61,6 +61,7 @@ from .schemas import (
     UpdateResult,
 )
 from .uri_schema import (
+    ATTACHMENT_CONTENT_FIELDS,
     BINARY_FIELD_TYPES,
     URIValidationError,
     build_binary_uri,
@@ -672,29 +673,27 @@ class OdooToolHandler:
         Reads pass ``bin_size=True`` so populated binaries arrive as truthy
         size placeholders (e.g. ``"12.5 KB"``) — the full bytes are fetched
         only on ``resources/read`` of the swapped URI. Empty binaries stay
-        ``False``. ``ir.attachment.datas`` gets the attachment-specific
-        ``odoo://attachment/{id}`` URI so its stored mimetype and
-        ``type='url'`` handling apply on read.
+        ``False``. An ``ir.attachment`` content field (``datas``; ``raw`` and
+        ``db_datas`` on Odoo 20, which removed ``datas``) gets the
+        attachment-specific ``odoo://attachment/{id}`` URI so its stored
+        mimetype and ``type='url'`` handling apply on read.
 
         Only keys already present in ``record`` are touched — a caller that
         requested ``fields=['name', 'type']`` must never gain an unrequested
         ``datas`` key. A ``type='url'`` attachment stores its payload as a
-        URL, so ``datas`` is ``False``; that falsy ``datas`` is still swapped,
-        but only when the record carries BOTH ``type`` and ``datas`` keys and
+        URL, so its content field is ``False``; that falsy value is still
+        swapped, but only when the record carries the ``type`` key and
         ``type == 'url'`` — the attachment resource serves the URL as
         ``text/uri-list``. Empty binary attachments (``type='binary'``,
         ``datas=False``) correctly stay ``False``; when ``type`` was not read,
-        the url-vs-empty split is unknowable, so a falsy ``datas`` is left
+        the url-vs-empty split is unknowable, so a falsy content field is left
         as-is.
         """
         rid = record_id if record_id is not None else record.get("id")
         if not isinstance(rid, int) or rid <= 0:
             return
         url_attachment = (
-            model == "ir.attachment"
-            and "type" in record
-            and "datas" in record
-            and record.get("type") == "url"
+            model == "ir.attachment" and "type" in record and record.get("type") == "url"
         )
         for name in binary_names:
             if name not in record:
@@ -712,7 +711,7 @@ class OdooToolHandler:
             # shape, which a server without bin_size returns for every
             # populated binary.
             is_payload = (isinstance(value, str) and value) or is_binary_payload_dict(value)
-            if not is_payload and not (name == "datas" and url_attachment):
+            if not is_payload and not (name in ATTACHMENT_CONTENT_FIELDS and url_attachment):
                 continue
             try:
                 record[name] = build_binary_uri(model, rid, name)

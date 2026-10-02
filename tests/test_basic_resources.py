@@ -1770,6 +1770,28 @@ class TestOdoo20BinaryResources:
         assert probe_call[1] == {"context": {"active_test": False, "bin_size": True}}
         connection_20.search_count.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_attachment_content_is_read_through_raw(self, resource_handler, connection_20):
+        """Odoo 20 removed ir.attachment.datas; raw holds the content."""
+        metadata = {
+            "id": 42,
+            "name": "a.pdf",
+            "mimetype": "application/pdf",
+            "type": "binary",
+            "url": False,
+            "file_size": 4,
+            "res_model": False,
+        }
+        connection_20.search_read.side_effect = [
+            [metadata],
+            [{"id": 42, "raw": self._payload(b"%PDF")}],
+        ]
+
+        content, mimetype = await resource_handler._handle_attachment_read("42")
+
+        assert (content, mimetype) == (b"%PDF", "application/pdf")
+        assert connection_20.search_read.call_args_list[1][0][2] == ["raw"]
+
     def test_payload_dict_size_and_decode(self, resource_handler):
         payload = self._payload(b"abcde")
 

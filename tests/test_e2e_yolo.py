@@ -594,11 +594,15 @@ class TestBinaryResourcesE2E:
                     "image_1920": base64.b64encode(self.PNG_BYTES).decode("ascii"),
                 },
             )
+            # Odoo 20 removed ir.attachment.datas (a create drops it with a
+            # warning); raw takes the same base64 string there
+            major = connection.get_major_version()
+            content_field = "raw" if major is not None and major >= 20 else "datas"
             attachment_id = connection.create(
                 "ir.attachment",
                 {
                     "name": "binary-e2e.pdf",
-                    "datas": base64.b64encode(self.PDF_BYTES).decode("ascii"),
+                    content_field: base64.b64encode(self.PDF_BYTES).decode("ascii"),
                     "mimetype": "application/pdf",
                 },
             )

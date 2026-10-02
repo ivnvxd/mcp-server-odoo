@@ -15,8 +15,11 @@ from .uri_schema import BINARY_FIELD_TYPES, URIValidationError, build_binary_uri
 logger = logging.getLogger(__name__)
 
 
-def reads_without_bin_size(connection: Any) -> bool:
-    """True when the server ignores ``bin_size`` (Odoo 20 and later).
+def uses_odoo_20_binaries(connection: Any) -> bool:
+    """True for the binary API of Odoo 20 and later.
+
+    Odoo 20 ignores ``bin_size``, reads a populated binary as
+    ``{content, size, filename}``, and has no ``ir.attachment.datas``.
 
     An unknown version (``None``, or a mock in unit tests) takes the
     ``bin_size`` path; callers still recognize the 20 payload shape there.
@@ -35,7 +38,7 @@ def read_without_binary_payloads(
     search a non-stored binary (``avatar_128``), so it always gets its URI and
     the resource read decides whether it holds content.
     """
-    if not reads_without_bin_size(connection):
+    if not uses_odoo_20_binaries(connection):
         return connection.read(model, ids, fields, {"bin_size": True})
     try:
         fields_info = connection.fields_get(model)

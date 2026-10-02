@@ -6,6 +6,7 @@ from mcp_server_odoo.uri_schema import (
     OdooOperation,
     URIParseError,
     URIValidationError,
+    build_binary_uri,
     build_pagination_uri,
     build_record_uri,
     build_uri,
@@ -339,3 +340,16 @@ class TestURIEdgeCases:
         uri = "odoo://res.partner/record/999999999"
         parsed = parse_uri(uri)
         assert parsed.record_id == 999999999
+
+
+class TestAttachmentContentFieldsShareTheAttachmentUri:
+    """``datas`` is gone on Odoo 20; ``raw`` and ``db_datas`` hold the same content."""
+
+    @pytest.mark.parametrize("field", ["datas", "raw", "db_datas"])
+    def test_content_fields_map_to_the_attachment_uri(self, field):
+        assert build_binary_uri("ir.attachment", 5, field) == "odoo://attachment/5"
+
+    def test_other_attachment_binary_keeps_the_field_uri(self):
+        assert build_binary_uri("ir.attachment", 5, "thumbnail") == (
+            "odoo://ir.attachment/record/5/thumbnail"
+        )

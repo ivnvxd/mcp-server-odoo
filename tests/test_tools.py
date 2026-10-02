@@ -4982,6 +4982,14 @@ class TestOdoo20BinaryReads:
         assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
         mock_connection.search.assert_not_called()
 
+    def test_url_attachment_raw_gets_the_attachment_uri(self, handler):
+        """Odoo 20 has no datas; a URL attachment's empty raw still gets its URI."""
+        record = {"id": 5, "type": "url", "raw": False}
+
+        handler._replace_binary_values("ir.attachment", record, {"raw"})
+
+        assert record["raw"] == "odoo://attachment/5"
+
     @pytest.mark.asyncio
     async def test_payload_dict_from_unknown_version_becomes_uri(self, handler, mock_connection):
         """Odoo Online reports saas~19.x but can already return the 20 shape."""
