@@ -15,6 +15,7 @@ from contextlib import contextmanager, suppress
 from typing import Any, Dict, List, NoReturn, Optional, Tuple, Union
 from urllib.parse import urlparse
 
+from .access_control import _http_error_message
 from .config import OdooConfig
 from .error_sanitizer import ErrorSanitizer
 from .field_security import is_sensitive_field_name
@@ -125,14 +126,19 @@ class OdooValidationFault(OdooConnectionError):  # noqa: N818 — "Fault" mirror
 #   4 = RPC_FAULT_CODE_ACCESS_ERROR     -> AccessError (record rules / ACLs)
 # 3 (ACCESS_DENIED) is deliberately absent: a rejected login is auth setup,
 # not a business rule, and must keep reading as a connection problem.
-# Standard mode goes through the MCP module's own proxy, which re-wraps every
-# exception as faultCode 500 with an "Internal Server Error in
-# MCPObjectController: <message>" envelope. That envelope carries no exception
-# class, so NEITHER the code route nor the string heuristics can classify it:
-# business errors keep reading as connection failures in standard mode until
-# the module preserves Odoo's own fault codes. Fixing that is a module-side
-# change; this classifier is correct for the YOLO transport it can see.
+# Standard mode goes through the MCP module's own proxy. Its 20.0 line (and
+# later backports) sends the same codes as core for Odoo user errors, so the
+# code route works there too. Older module versions re-wrap every exception
+# as faultCode 500 ("Internal Server Error in MCPObjectController: ..."); that
+# envelope carries no exception class, so business errors keep reading as
+# connection failures against them.
 _ODOO_BUSINESS_FAULT_CODES = frozenset({2, 4})
+
+# HTTP-style codes the MCP module's proxy uses for its own refusals, each with
+# a message meant for the user: 400 (a call for another database than the
+# request's), 403 (not in the MCP User group, model not enabled), 429 (rate
+# limit). Shown as-is instead of as a transport failure.
+_MCP_MODULE_REFUSAL_FAULT_CODES = frozenset({400, 403, 429})
 
 
 def _raise_for_fault(fault: xmlrpc.client.Fault) -> NoReturn:
@@ -145,7 +151,7 @@ def _raise_for_fault(fault: xmlrpc.client.Fault) -> NoReturn:
     unclassified keeps the historical connection-flavored "Operation failed"
     wrapping.
     """
-    if fault.faultCode in _ODOO_BUSINESS_FAULT_CODES:
+    if fault.faultCode in _ODOO_BUSINESS_FAULT_CODES | _MCP_MODULE_REFUSAL_FAULT_CODES:
         # Transport says business: keep the message's prose and line
         # structure instead of running the traceback-shaped reduction.
         raise OdooValidationFault(
@@ -798,6 +804,14 @@ class OdooConnection:
             elif e.code == 429:
                 logger.warning("Rate limit exceeded during MCP API key validation")
                 return False
+            elif e.code == 403:
+                # A valid key whose user is refused, e.g. not in the MCP User
+                # group: the module says why, and a password fallback would
+                # hit the same gate.
+                reason = _http_error_message(e)
+                reason = ErrorSanitizer.sanitize_business_fault(reason) if reason else "HTTP 403"
+                logger.error(f"MCP API key refused: {reason}")
+                raise OdooConnectionError(f"Failed to validate API key: {reason}") from e
             else:
                 logger.error(f"HTTP error during MCP API key validation: {e}")
                 raise OdooConnectionError(f"Failed to validate API key: HTTP {e.code}") from e
@@ -866,6 +880,12 @@ class OdooConnection:
                 return False
 
         except xmlrpc.client.Fault as e:
+            if e.faultCode in _MCP_MODULE_REFUSAL_FAULT_CODES:
+                # The MCP module refused a verified login (e.g. not in the MCP
+                # User group) and says why
+                reason = ErrorSanitizer.sanitize_business_fault(e.faultString)
+                logger.error(f"Login refused by the MCP module: {reason}")
+                raise OdooConnectionError(f"Failed to authenticate: {reason}") from e
             logger.warning(f"Authentication fault: {e}")
             return False
         except Exception as e:
