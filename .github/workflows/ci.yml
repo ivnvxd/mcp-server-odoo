@@ -91,10 +91,15 @@ jobs:
         path: coverage-unit.xml
 
   yolo-integration-test:
-    name: YOLO Integration Tests
+    # The 19 leg keeps the historical check name
+    name: YOLO Integration Tests${{ matrix.odoo != '19' && format(' (Odoo {0})', matrix.odoo) || '' }}
     runs-on: ubuntu-latest
     needs: [lint, test]
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+    strategy:
+      fail-fast: false
+      matrix:
+        odoo: ['19', '20']
 
     services:
       postgres:
@@ -134,7 +139,7 @@ jobs:
         docker run -d --name odoo --network "${{ job.services.postgres.network }}" \
           -e HOST=postgres -e USER=odoo -e PASSWORD=odoo \
           -p 8069:8069 \
-          odoo:19 -- --database test --init base,mail --without-demo all
+          odoo:${{ matrix.odoo }} -- --database test --init base,mail --without-demo all
 
         # Wait for Odoo to finish initializing
         echo "Waiting for Odoo to initialize database..."
@@ -179,16 +184,17 @@ jobs:
         # Insert into Odoo's API key table using dollar-quoting for the hash
         # (passlib hashes contain $ characters that break normal SQL quoting).
         # Note: res_users_apikeys has _log_access=False, so no create_uid/write_uid columns.
+        # Scope 'rpc': Odoo 20 matches the scope exactly, Odoo 19 also accepts NULL.
         PGPASSWORD=odoo psql -h localhost -U odoo -d test -c \
           "INSERT INTO res_users_apikeys (name, user_id, scope, index, key)
-           VALUES ('CI Test Key', 2, NULL, '${INDEX}', \$hash\$${KEY_HASH}\$hash\$)"
+           VALUES ('CI Test Key', 2, 'rpc', '${INDEX}', \$hash\$${KEY_HASH}\$hash\$)"
 
         echo "key=${API_KEY}" >> "$GITHUB_OUTPUT"
         echo "API key generated and inserted for admin user"
 
     - name: Run YOLO integration tests
       run: |
-        pytest -m "yolo" -v --cov=mcp_server_odoo --cov-report=xml:coverage-yolo.xml --cov-report=term
+        pytest -m "yolo" -v --cov=mcp_server_odoo --cov-report=xml:coverage-yolo-${{ matrix.odoo }}.xml --cov-report=term
       env:
         ODOO_URL: http://localhost:8069
         ODOO_DB: test
@@ -202,8 +208,8 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: coverage-yolo
-        path: coverage-yolo.xml
+        name: coverage-yolo-${{ matrix.odoo }}
+        path: coverage-yolo-${{ matrix.odoo }}.xml
 
   mcp-integration-test:
     name: MCP Integration Tests

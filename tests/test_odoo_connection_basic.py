@@ -425,9 +425,9 @@ class TestOdooConnectionIntegration:
         """Test listing databases from real server."""
         with create_connection(test_config) as conn:
             try:
-                db_list = conn.db_proxy.list()
-            except Exception as e:
-                if "Access Denied" in str(e):
+                db_list = conn.list_databases()
+            except OdooConnectionError as e:
+                if "Cannot list databases" in str(e):
                     pytest.skip("Database listing is disabled on this server")
                 raise
             assert isinstance(db_list, list)

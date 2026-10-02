@@ -103,15 +103,15 @@ def _verify_db_autodetect(scenario: AuthScenario, conn: OdooConnection):
         assert conn.database is not None
 
 
-def _verify_write_cycle(conn: OdooConnection):
-    """Create and delete a res.company record."""
+def _verify_write_cycle(conn: OdooConnection, model: str = "res.company"):
+    """Create and delete a record (res.company: the model CI's MCP config opens for writes)."""
     from uuid import uuid4
 
     unique_name = f"Auth Matrix Test {uuid4().hex[:8]}"
-    record_id = conn.create("res.company", {"name": unique_name})
+    record_id = conn.create(model, {"name": unique_name})
     assert isinstance(record_id, int)
     assert record_id > 0
-    conn.unlink("res.company", [record_id])
+    conn.unlink(model, [record_id])
 
 
 def _verify_access_control_read(config: OdooConfig, database: str):
@@ -524,12 +524,16 @@ class TestYoloFullAuthMatrix:
 
     @pytest.mark.parametrize("scenario", YOLO_FULL_SCENARIOS)
     def test_write_cycle(self, scenario: AuthScenario):
-        """Create + delete res.company — writes should be allowed."""
+        """Create + delete res.partner — writes should be allowed.
+
+        Not res.company: with accounting installed, a new company gets
+        records (account.return on Odoo 20) that block its deletion.
+        """
         scenario.skip_if_missing_creds()
         config = scenario.make_config()
         conn = _connect_and_auth(config)
         try:
-            _verify_write_cycle(conn)
+            _verify_write_cycle(conn, "res.partner")
         finally:
             conn.disconnect()
 

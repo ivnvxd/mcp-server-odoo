@@ -7,13 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Odoo 20 in CI**: the YOLO integration tests run on Odoo 19 and 20. The README documents the `rpc` scope that Odoo 20 requires for API keys, and the MCP User group.
+
 ### Fixed
 - **Database auto-selection on Odoo 20**: databases are listed through `/web/database/list`, with `/xmlrpc/db` as the fallback. Odoo 20 removed the `db` RPC service. If both fail, the error asks for `ODOO_DB`.
 - **Binary fields on Odoo 20**: `get_record` and `search_records` returned populated binaries as inline base64, because Odoo 20 dropped `bin_size`. Binaries now stay out of the read, and a search per stored binary field finds the populated records. Non-stored binaries such as `avatar_128` always get their URI.
 - **Binary resources on Odoo 20**: the `ODOO_MCP_MAX_BINARY_SIZE` check runs before the fetch again. It reads the `file_size` of the backing attachment, or uses `field.size` for a plain column. The record and search resources no longer pull binary payloads.
 - **Attachments on Odoo 20**: Odoo 20 removed `ir.attachment.datas`, so every `odoo://attachment/{id}` read failed. The attachment resource reads `raw` on Odoo 20. `raw` and `db_datas` get the attachment URI in tool results, as `datas` does.
 - **MCP module refusals**: a 403 at startup shows the reason from the module, for example a user outside the MCP User group. This works for API keys and for passwords. Faults 400, 403 and 429 from the module's XML-RPC proxy reach the model with their text, not as connection errors.
-- **`update_record` on a missing id**: the existence check read only `id`, which Odoo 19 and later echo back for a missing record, so the call failed later with a generic write error. It now counts the record and reports "Record not found". Archived records still count as existing.
+- **`update_record` on a missing id**: the existence check read only `id`. Odoo 19 and later echo that back for a missing record, so the call failed later with a generic write error. It now counts the record and reports "Record not found". Archived records still count as existing.
 
 ## [0.8.0] - 2026-08-26
 
