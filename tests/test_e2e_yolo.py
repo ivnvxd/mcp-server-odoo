@@ -16,6 +16,7 @@ from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.error_handling import ValidationError
 from mcp_server_odoo.odoo_connection import OdooConnection
 from mcp_server_odoo.tools import OdooToolHandler
+from mcp_server_odoo.uri_schema import is_binary_payload_dict
 
 
 @pytest.mark.yolo
@@ -615,6 +616,8 @@ class TestBinaryResourcesE2E:
             assert isinstance(content, types.BlobResourceContents)
             assert content.mimeType == "image/png"
             stored = connection.read("res.partner", [partner_id], ["image_1920"])[0]["image_1920"]
+            if is_binary_payload_dict(stored):  # Odoo 20: {content, size, filename}
+                stored = stored["content"]
             assert base64.b64decode(content.blob) == base64.b64decode(stored)
 
             # Attachment: correct mimeType, blob byte-identical to the upload

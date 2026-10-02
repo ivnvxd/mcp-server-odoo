@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Database auto-selection on Odoo 20**: databases are listed through `/web/database/list`, with `/xmlrpc/db` as the fallback. Odoo 20 removed the `db` RPC service. If both fail, the error asks for `ODOO_DB`.
 - **Binary fields on Odoo 20**: `get_record` and `search_records` returned populated binaries as inline base64, because Odoo 20 dropped `bin_size`. Binaries now stay out of the read, and a search per stored binary field finds the populated records. Non-stored binaries such as `avatar_128` always get their URI.
+- **Binary resources on Odoo 20**: the `ODOO_MCP_MAX_BINARY_SIZE` check runs before the fetch again. It reads the `file_size` of the backing attachment, or uses `field.size` for a plain column. The record and search resources no longer pull binary payloads.
 
 ## [0.8.0] - 2026-08-26
 

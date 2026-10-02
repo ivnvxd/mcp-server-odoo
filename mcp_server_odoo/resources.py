@@ -35,6 +35,7 @@ from .access_control import (
     attachment_scope_domain,
     check_domain_balance,
 )
+from .binary_reads import read_without_binary_payloads, reads_without_bin_size
 from .config import OdooConfig, max_offset_for
 from .error_handling import (
     ErrorContext,
@@ -56,6 +57,7 @@ from .uri_schema import (
     ATTACHMENT_URI_PATTERN,
     BINARY_FIELD_TYPES,
     BINARY_FIELD_URI_PATTERN,
+    is_binary_payload_dict,
 )
 
 logger = get_logger(__name__)
@@ -422,8 +424,11 @@ class OdooResourceHandler:
         """Decode an XML-RPC binary field value to raw bytes.
 
         Odoo returns binary fields as base64 strings; some transports wrap
-        them in ``xmlrpc.client.Binary`` instead.
+        them in ``xmlrpc.client.Binary`` instead. Odoo 20 wraps the base64 in
+        ``{content, size, filename}``.
         """
+        if is_binary_payload_dict(value):
+            value = value["content"]
         if isinstance(value, xmlrpc.client.Binary):
             return value.data
         if isinstance(value, bytes):
@@ -514,7 +519,11 @@ class OdooResourceHandler:
         Mirrors ``_decode_binary_value``'s type handling so the accounting
         matches what the decode will actually produce: ``Binary`` and raw
         ``bytes`` are their own length, a ``str`` is base64 (3 bytes per 4).
+        Odoo 20's ``{content, size}`` dict states its decoded size.
         """
+        if is_binary_payload_dict(value):
+            size = value["size"]
+            return size if isinstance(size, int) else None
         if isinstance(value, xmlrpc.client.Binary):
             return len(value.data)
         if isinstance(value, bytes):
@@ -532,6 +541,80 @@ class OdooResourceHandler:
                 return f"{value:.0f} {unit}" if unit == "bytes" else f"{value:.1f} {unit}"
             value /= 1024
         return f"{size} bytes"  # pragma: no cover - loop always returns
+
+    def _preflight_stored_binary(
+        self, model: str, record_id: int, field: str, context: ErrorContext
+    ) -> None:
+        """Odoo 20 size pre-flight for a stored binary field (blocking).
+
+        Odoo 20 dropped ``bin_size``, so there is no placeholder to parse.
+        Most binaries live in an ``ir.attachment``, whose ``file_size`` gives
+        the size. A plain binary column supports ``field.size`` in a domain
+        instead; Odoo 20 refuses that domain on an attachment-stored field
+        ("not stored"). When neither answers (standard mode without
+        ``ir.attachment``), the post-fetch check stays the only checkpoint.
+        """
+        count_context = {"active_test": False}
+        populated = self.connection.search_count(
+            model, [["id", "=", record_id], [field, "!=", False]], context=count_context
+        )
+        if not populated:
+            if not self.connection.search_count(
+                model, [["id", "=", record_id]], context=count_context
+            ):
+                raise NotFoundError(
+                    f"Record not found: {model} with ID {record_id} does not exist",
+                    context=context,
+                )
+            raise NotFoundError(
+                f"Field '{field}' on {model}/{record_id} holds no data", context=context
+            )
+
+        label = f"Field '{field}' on {model}/{record_id}"
+        size = self._backing_attachment_size(model, record_id, field)
+        if size is not None:
+            self._enforce_binary_limit(size, label)
+            return
+        limit = self.config.max_binary_size
+        try:
+            over_limit = self.connection.search_count(
+                model,
+                [["id", "=", record_id], [f"{field}.size", ">", limit]],
+                context=count_context,
+            )
+        except OdooConnectionError as e:
+            logger.debug(f"No size pre-flight for {model}.{field}: {e}")
+            return
+        if over_limit:
+            raise ValidationError(
+                f"{label} is over the {self._format_bytes(limit)} limit for a single "
+                f"read. Raise ODOO_MCP_MAX_BINARY_SIZE or fetch it outside MCP."
+            )
+
+    def _backing_attachment_size(self, model: str, record_id: int, field: str) -> Optional[int]:
+        """``file_size`` of the attachment that stores ``model.field``, if readable.
+
+        The explicit ``res_field`` condition disables the ORM's default
+        res_field filtering. None when there is no such attachment (a plain
+        column) or the lookup is denied.
+        """
+        try:
+            self.access_controller.validate_model_access("ir.attachment", "read")
+            rows = self.connection.search_read(
+                "ir.attachment",
+                [
+                    ["res_model", "=", model],
+                    ["res_id", "=", record_id],
+                    ["res_field", "=", field],
+                ],
+                ["file_size"],
+                limit=1,
+            )
+        except Exception as e:
+            logger.debug(f"Backing attachment lookup failed for {model}/{record_id}/{field}: {e}")
+            return None
+        size = rows[0].get("file_size") if rows else None
+        return size if isinstance(size, int) else None
 
     def _enforce_binary_limit(self, size: Optional[int], label: str) -> None:
         """Refuse a payload over ``ODOO_MCP_MAX_BINARY_SIZE``.
@@ -672,33 +755,47 @@ class OdooResourceHandler:
                         f"Field '{field}' on '{model}' is not a binary field", context=context
                     )
 
-                # Pre-flight: bin_size returns a short size placeholder in
-                # place of the payload, so an oversized field is refused
-                # BEFORE its bytes are ever pulled into this process. Without
-                # this the limit could only bound the decode, not the fetch
-                # that precedes it — which is where an OOM actually happens.
-                probe = await asyncio.to_thread(
-                    self.connection.search_read,
-                    model,
-                    [["id", "=", record_id_int]],
-                    [field],
-                    context={"active_test": False, "bin_size": True},
-                )
-                if not probe:
-                    raise NotFoundError(
-                        f"Record not found: {model} with ID {record_id} does not exist",
-                        context=context,
+                # Pre-flight: refuse an oversized field BEFORE its bytes are
+                # ever pulled into this process. Without this the limit could
+                # only bound the decode, not the fetch that precedes it —
+                # which is where an OOM actually happens.
+                if reads_without_bin_size(self.connection):
+                    # Odoo 20 has no bin_size; count against field.size instead
+                    if field_info.get("store", True):
+                        await asyncio.to_thread(
+                            self._preflight_stored_binary,
+                            model,
+                            record_id_int,
+                            field,
+                            context,
+                        )
+                    # A non-stored binary cannot be searched on Odoo 20; the
+                    # post-fetch check below is its only checkpoint.
+                else:
+                    # bin_size returns a short size placeholder in place of
+                    # the payload
+                    probe = await asyncio.to_thread(
+                        self.connection.search_read,
+                        model,
+                        [["id", "=", record_id_int]],
+                        [field],
+                        context={"active_test": False, "bin_size": True},
                     )
-                placeholder = probe[0].get(field)
-                if not placeholder:
-                    raise NotFoundError(
-                        f"Field '{field}' on {model}/{record_id} holds no data",
-                        context=context,
+                    if not probe:
+                        raise NotFoundError(
+                            f"Record not found: {model} with ID {record_id} does not exist",
+                            context=context,
+                        )
+                    placeholder = probe[0].get(field)
+                    if not placeholder:
+                        raise NotFoundError(
+                            f"Field '{field}' on {model}/{record_id} holds no data",
+                            context=context,
+                        )
+                    self._enforce_binary_limit(
+                        self._parse_size_placeholder(placeholder),
+                        f"Field '{field}' on {model}/{record_id}",
                     )
-                self._enforce_binary_limit(
-                    self._parse_size_placeholder(placeholder),
-                    f"Field '{field}' on {model}/{record_id}",
-                )
 
                 # Single search_read round trip — a missing id yields [] (a
                 # plain read() would fault with MissingError instead). The
@@ -957,7 +1054,7 @@ class OdooResourceHandler:
                 # resources never pull full binary payloads.
                 safe_fields, withheld = await asyncio.to_thread(self._get_safe_fields, model)
                 records = await asyncio.to_thread(
-                    self.connection.read, model, record_ids, safe_fields, {"bin_size": True}
+                    read_without_binary_payloads, self.connection, model, record_ids, safe_fields
                 )
 
                 if not records:
@@ -1091,7 +1188,11 @@ class OdooResourceHandler:
                     # can use.
                     fields_to_read = await asyncio.to_thread(self._summary_fields, model)
                 records = await asyncio.to_thread(
-                    self.connection.read, model, record_ids, fields_to_read, {"bin_size": True}
+                    read_without_binary_payloads,
+                    self.connection,
+                    model,
+                    record_ids,
+                    fields_to_read,
                 )
                 if fields_list is None and fields_to_read is None:
                     # Metadata unavailable, so ALL fields came back: apply the

@@ -1217,17 +1217,25 @@ class OdooConnection:
 
         return fields
 
-    def search_count(self, model: str, domain: List[Union[str, List[Any]]]) -> int:
+    def search_count(
+        self,
+        model: str,
+        domain: List[Union[str, List[Any]]],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> int:
         """Count records matching a domain.
 
         Args:
             model: The Odoo model name
             domain: Odoo domain filter
+            context: Optional context (e.g. ``{"active_test": False}``)
 
         Returns:
             Number of records matching the domain
         """
-        return self.execute_kw(model, "search_count", [domain], {})
+        # Copy: execute_kw mutates the context dict (locale injection)
+        kwargs = {"context": dict(context)} if context else {}
+        return self.execute_kw(model, "search_count", [domain], kwargs)
 
     def create(self, model: str, values: Dict[str, Any]) -> int:
         """Create a new record.
