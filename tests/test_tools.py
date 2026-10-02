@@ -1,5 +1,6 @@
 """Test suite for MCP tools functionality."""
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -1090,9 +1091,10 @@ class TestOdooToolHandler:
 
     @pytest.mark.asyncio
     async def test_search_records_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that search_records sends context logging."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         # Setup mocks
@@ -1115,17 +1117,17 @@ class TestOdooToolHandler:
             ctx=ctx,
         )
 
-        # Verify context.info was called with operation name and model
-        ctx.info.assert_called()
-        first_call_msg = ctx.info.call_args_list[0][0][0]
-        assert "res.partner" in first_call_msg
-        assert "Searching" in first_call_msg
+        # Step messages go to the server log, not through ctx (mcp 2.x
+        # deprecates client logging)
+        assert any("Searching" in m and "res.partner" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_record_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that get_record sends context logging."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         mock_access_controller.validate_model_access.return_value = None
@@ -1137,14 +1139,12 @@ class TestOdooToolHandler:
         get_record = mock_app._tools["get_record"]
         await get_record(model="res.partner", record_id=1, fields=["name"], ctx=ctx)
 
-        ctx.info.assert_called()
-        first_msg = ctx.info.call_args_list[0][0][0]
-        assert "res.partner" in first_msg
-        assert "Getting" in first_msg
+        assert any("Getting" in m and "res.partner" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_list_models_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that list_models sends context info messages.
 
@@ -1153,6 +1153,7 @@ class TestOdooToolHandler:
         notifications can be flushed after the response under stdio transport,
         which strict MCP clients treat as a protocol violation.)
         """
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         from mcp_server_odoo.access_control import ModelPermissions
@@ -1173,17 +1174,16 @@ class TestOdooToolHandler:
         list_models = mock_app._tools["list_models"]
         await list_models(ctx=ctx)
 
-        ctx.info.assert_called()
-        first_msg = ctx.info.call_args_list[0][0][0]
-        assert "Listing" in first_msg
-        info_messages = [call.args[0] for call in ctx.info.call_args_list]
-        assert any("Enriching" in msg for msg in info_messages)
+        assert any("Listing" in m for m in caplog.messages)
+        assert any("Enriching" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_record_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app, valid_config
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog, valid_config
     ):
         """Test that create_record sends context logging."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         mock_access_controller.validate_model_access.return_value = None
@@ -1195,16 +1195,15 @@ class TestOdooToolHandler:
         create_record = mock_app._tools["create_record"]
         await create_record(model="res.partner", values={"name": "New Record"}, ctx=ctx)
 
-        ctx.info.assert_called()
-        first_msg = ctx.info.call_args_list[0][0][0]
-        assert "res.partner" in first_msg
-        assert "Creating" in first_msg
+        assert any("Creating" in m and "res.partner" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_search_all_fields_sends_warning(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that searching with __all__ fields sends a warning via context."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         mock_access_controller.validate_model_access.return_value = None
@@ -1216,9 +1215,8 @@ class TestOdooToolHandler:
         search_records = mock_app._tools["search_records"]
         await search_records(model="res.partner", fields=["__all__"], limit=10, ctx=ctx)
 
-        ctx.warning.assert_called()
-        warning_msg = ctx.warning.call_args_list[0][0][0]
-        assert "ALL fields" in warning_msg
+        assert any("ALL fields" in m for m in caplog.messages)
+        ctx.warning.assert_not_called()
 
         # Verify that __all__ was translated to fields=None (fetch all fields from Odoo)
         mock_connection.read.assert_called_once()
@@ -1262,9 +1260,8 @@ class TestOdooToolHandler:
         result = await search_records(model="res.partner", fields=["name"], limit=10, ctx=ctx)
         assert result.total == 1
         assert len(result.records) == 1
-        # search_records reports every step through _ctx_info; the attempts
-        # were made and their RuntimeErrors swallowed by its except branch.
-        ctx.info.assert_called()
+        # The steps are logged on the server; the broken context is never used
+        ctx.info.assert_not_called()
         ctx.report_progress.assert_not_called()
 
     @pytest.mark.asyncio

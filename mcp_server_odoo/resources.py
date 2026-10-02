@@ -217,12 +217,13 @@ class OdooResourceHandler:
         self._register_resources()
 
     async def _ctx_info(self, ctx, message: str):
-        """Send info to MCP client context if available."""
-        if ctx:
-            try:
-                await ctx.info(message)
-            except Exception:
-                logger.debug(f"Failed to send ctx info: {message}")
+        """Log a step message on the server.
+
+        Under mcp 1.x this also reached the client as a log notification.
+        mcp 2.x deprecates client logging (SEP-2577), so the step messages
+        stay in the server log. ``ctx`` is kept for the call sites.
+        """
+        logger.debug(message)
 
     def _register_resources(self):
         """Register all resource handlers with the MCPServer."""
