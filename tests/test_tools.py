@@ -4866,6 +4866,135 @@ class TestBinaryValueSwap:
         assert result.record["datas"] is False
 
 
+class TestOdoo20BinaryReads:
+    """Odoo 20 dropped ``bin_size``: a populated binary reads as
+    ``{content, size, filename}``, so the payload must stay out of the read."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=FastMCP)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.get_major_version.return_value = 20
+        connection.fields_get.return_value = {
+            "id": {"type": "integer", "string": "ID", "store": True},
+            "name": {"type": "char", "string": "Name", "store": True},
+            "image_1920": {"type": "image", "string": "Image", "store": True},
+            # Computed from image_1920; Odoo 20 cannot search a non-stored field
+            "avatar_128": {"type": "image", "string": "Avatar", "store": False},
+        }
+        return connection
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection):
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", default_limit=10, max_limit=100
+        )
+        return OdooToolHandler(mock_app, mock_connection, MagicMock(spec=AccessController), config)
+
+    @pytest.mark.asyncio
+    async def test_get_record_leaves_binary_out_of_the_read(self, handler, mock_connection):
+        mock_connection.read.return_value = [{"id": 7, "name": "A"}]
+        mock_connection.search.return_value = [7]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert mock_connection.read.call_args[0][2] == ["name"]
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+        mock_connection.search.assert_called_once_with(
+            "res.partner",
+            [["id", "in", [7]], ["image_1920", "!=", False]],
+            context={"active_test": False},
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_record_empty_binary_is_false(self, handler, mock_connection):
+        mock_connection.read.return_value = [{"id": 7, "name": "A"}]
+        mock_connection.search.return_value = []
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert result.record["image_1920"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_record_all_fields_reads_named_non_binary_fields(
+        self, handler, mock_connection
+    ):
+        mock_connection.read.return_value = [{"id": 7, "name": "A"}]
+        mock_connection.search.return_value = [7]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["__all__"])
+
+        assert sorted(mock_connection.read.call_args[0][2]) == ["id", "name"]
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+        assert result.record["avatar_128"] == "odoo://res.partner/record/7/avatar_128"
+        # Only the stored binary is searched
+        assert mock_connection.search.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_non_stored_binary_gets_uri_without_search(self, handler, mock_connection):
+        mock_connection.read.return_value = [{"id": 7}]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["avatar_128"])
+
+        assert mock_connection.read.call_args[0][2] == ["id"]
+        assert result.record["avatar_128"] == "odoo://res.partner/record/7/avatar_128"
+        mock_connection.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_search_records_flags_each_record(self, handler, mock_connection):
+        mock_connection.search_count.return_value = 2
+        # First call: the record search. Second call: the populated-binary flag.
+        mock_connection.search.side_effect = [[1, 2], [2]]
+        mock_connection.read.return_value = [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]
+
+        result = await handler._handle_search_tool(
+            "res.partner", None, ["name", "image_1920"], 10, 0, None
+        )
+
+        records = result["records"]
+        assert records[0]["image_1920"] is False
+        assert records[1]["image_1920"] == "odoo://res.partner/record/2/image_1920"
+        assert mock_connection.read.call_args[0][2] == ["name"]
+
+    @pytest.mark.asyncio
+    async def test_odoo_19_keeps_the_bin_size_read(self, handler, mock_connection):
+        mock_connection.get_major_version.return_value = 19
+        mock_connection.read.return_value = [{"id": 7, "name": "A", "image_1920": "12.5 KB"}]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert mock_connection.read.call_args[0][2:] == (["name", "image_1920"], {"bin_size": True})
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+        mock_connection.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_payload_dict_from_unknown_version_becomes_uri(self, handler, mock_connection):
+        """Odoo Online reports saas~19.x but can already return the 20 shape."""
+        mock_connection.get_major_version.return_value = None
+        mock_connection.read.return_value = [
+            {"id": 7, "name": "A", "image_1920": {"content": "aGk=", "size": 2}}
+        ]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+
+
 class TestBinarySwapAndRelatedBudget:
     """Guards on the two read-path enrichments added in 0.8.0."""
 

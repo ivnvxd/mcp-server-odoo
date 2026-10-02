@@ -59,7 +59,12 @@ from .schemas import (
     SearchResult,
     UpdateResult,
 )
-from .uri_schema import BINARY_FIELD_TYPES, URIValidationError, build_binary_uri
+from .uri_schema import (
+    BINARY_FIELD_TYPES,
+    URIValidationError,
+    build_binary_uri,
+    is_binary_payload_dict,
+)
 from .user_context import (
     context_unavailable_text,
     format_user_context,
@@ -654,6 +659,58 @@ class OdooToolHandler:
             )
             return set()
 
+    def _read_records(
+        self, model: str, ids: List[int], fields: Optional[List[str]]
+    ) -> List[Dict[str, Any]]:
+        """Read ``ids`` without fetching binary payloads (blocking).
+
+        Up to Odoo 19, ``bin_size`` turns a populated binary into a short size
+        placeholder that ``_replace_binary_values`` swaps for a URI. Odoo 20
+        dropped ``bin_size`` and returns every populated binary as
+        ``{content, size, filename}``, so there the binaries stay out of the
+        read and a ``search`` per stored binary field finds the populated
+        records. A non-stored binary (``avatar_128``) cannot be searched on
+        Odoo 20, so it always gets its URI and the resource read decides.
+        """
+        major = self.connection.get_major_version()
+        binary_names = (
+            self._binary_field_names(model) if isinstance(major, int) and major >= 20 else set()
+        )
+        if fields is not None:
+            binary_names &= set(fields)
+        if not binary_names:
+            return self.connection.read(model, ids, fields, {"bin_size": True})
+
+        # fields_get is cached, and already warm from _binary_field_names
+        fields_info = self.connection.fields_get(model)
+        requested = fields if fields is not None else list(fields_info)
+        readable = [name for name in requested if name not in binary_names] or ["id"]
+        records = self.connection.read(model, ids, readable, {"bin_size": True})
+
+        for name in binary_names:
+            if (fields_info.get(name) or {}).get("store"):
+                # active_test=False: an archived record keeps its binaries
+                populated = set(
+                    self.connection.search(
+                        model,
+                        [["id", "in", ids], [name, "!=", False]],
+                        context={"active_test": False},
+                    )
+                )
+            else:
+                populated = set(ids)
+            for record in records:
+                rid = record.get("id")
+                if rid not in populated:
+                    record[name] = False
+                    continue
+                try:
+                    record[name] = build_binary_uri(model, rid, name)
+                except URIValidationError:
+                    # Same rule as _replace_binary_values: no servable URI
+                    logger.debug(f"No binary URI for {model}.{name}; leaving it out")
+        return records
+
     @staticmethod
     def _replace_binary_values(
         model: str,
@@ -702,7 +759,11 @@ class OdooToolHandler:
             # for a URI would both drop data the caller explicitly asked for
             # and advertise a URI whose read fails ("Unexpected binary value
             # type: dict"), so any non-string payload passes through untouched.
-            if not (isinstance(value, str) and value) and not (name == "datas" and url_attachment):
+            # The one dict that IS a payload is Odoo 20's {content, size}
+            # shape, which a server without bin_size returns for every
+            # populated binary.
+            is_payload = (isinstance(value, str) and value) or is_binary_payload_dict(value)
+            if not is_payload and not (name == "datas" and url_attachment):
                 continue
             try:
                 record[name] = build_binary_uri(model, rid, name)
@@ -1485,18 +1546,13 @@ class OdooToolHandler:
                     )
                     logger.debug(f"Fetching all fields for {model} search")
 
-                # Read records. bin_size: binary fields come back as size
-                # placeholders instead of full base64 blobs — populated ones
-                # are swapped for odoo:// resource URIs below.
+                # Read records without binary payloads (see _read_records);
+                # populated binaries are swapped for odoo:// URIs below.
                 records = []
                 withheld_fields: Set[str] = set()
                 if record_ids:
                     records = await asyncio.to_thread(
-                        self.connection.read,
-                        model,
-                        record_ids,
-                        fields_to_fetch,
-                        {"bin_size": True},
+                        self._read_records, model, record_ids, fields_to_fetch
                     )
                     if fields_to_fetch is None:
                         # Bulk all-fields read (["__all__"] or smart-default
@@ -1607,11 +1663,10 @@ class OdooToolHandler:
                     # Specific fields requested
                     logger.debug(f"Fetching specific fields for {model}: {fields}")
 
-                # Read the record. bin_size: binary fields come back as size
-                # placeholders instead of full base64 blobs — populated ones
-                # are swapped for odoo:// resource URIs below.
+                # Read the record without binary payloads (see _read_records);
+                # populated binaries are swapped for odoo:// URIs below.
                 records = await asyncio.to_thread(
-                    self.connection.read, model, [record_id], fields_to_fetch, {"bin_size": True}
+                    self._read_records, model, [record_id], fields_to_fetch
                 )
 
                 if not records:

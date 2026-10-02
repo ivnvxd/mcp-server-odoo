@@ -19,7 +19,7 @@ import re
 import urllib.parse
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 class OdooOperation(Enum):
@@ -95,6 +95,23 @@ ATTACHMENT_URI_PATTERN = re.compile(r"^odoo://attachment/(\d+)$")
 # tools swap populated values of these types for odoo:// resource URIs, and
 # the record-field resource serves them.
 BINARY_FIELD_TYPES = ("binary", "image")
+
+
+def is_binary_payload_dict(value: Any) -> bool:
+    """True for the binary read shape of Odoo 20: ``{content, size, filename?}``.
+
+    Odoo 20 dropped the ``bin_size`` context, so ``read()`` returns every
+    populated binary in this shape. Up to Odoo 19 some non-stored "widget"
+    fields are declared Binary but return other dicts (``tax_totals``), which
+    must pass through untouched; they never carry ``content`` and ``size``.
+    """
+    return (
+        isinstance(value, dict)
+        and "content" in value
+        and "size" in value
+        and set(value) <= {"content", "size", "filename"}
+    )
+
 
 _FIELD_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
 
