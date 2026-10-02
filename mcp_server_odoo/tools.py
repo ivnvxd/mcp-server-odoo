@@ -1152,10 +1152,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Update Records (Bulk)",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=True,
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
             ),
         )
         async def update_records(
@@ -1168,8 +1168,9 @@ class OdooToolHandler:
 
             Use this instead of calling update_record in a loop when applying
             the same field values to several records of the same model — one
-            RPC round-trip instead of N. Capped at 100 records per call; for
-            larger batches, split into multiple update_records calls.
+            RPC round-trip instead of N. Capped at 100 distinct records per
+            call; for larger batches, split into multiple update_records calls.
+            Archived records can be updated (e.g. values={"active": true}).
 
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
@@ -2354,6 +2355,9 @@ class OdooToolHandler:
             with perf_logger.track_operation("tool_update_records", model=model):
                 if not record_ids:
                     raise ValidationError("No record IDs provided")
+                # A repeated id is one record: dedupe (order kept) before the
+                # cap, so the cap and the reported count are about records
+                record_ids = list(dict.fromkeys(record_ids))
                 if len(record_ids) > MAX_BULK_UPDATE_RECORDS:
                     raise ValidationError(
                         f"Too many records: {len(record_ids)} provided, maximum "
@@ -2390,9 +2394,14 @@ class OdooToolHandler:
                 # read(model, ids, ["id"]): reading only the id field never
                 # touches the table, so Odoo echoes it back for ids that
                 # don't exist instead of raising or omitting them.
+                # active_test=False: an archived record exists (and unarchiving
+                # one is a common bulk update).
                 existing_ids = set(
                     await asyncio.to_thread(
-                        self.connection.search, model, [["id", "in", record_ids]]
+                        self.connection.search,
+                        model,
+                        [["id", "in", record_ids]],
+                        context={"active_test": False},
                     )
                 )
                 missing_ids = [rid for rid in record_ids if rid not in existing_ids]

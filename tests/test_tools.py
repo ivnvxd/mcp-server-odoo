@@ -2946,7 +2946,7 @@ class TestUpdateRecordsTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3004,6 +3004,43 @@ class TestUpdateRecordsTool:
         handler.access_controller.validate_model_access.assert_called_once_with(
             "res.partner", "write"
         )
+
+    @pytest.mark.asyncio
+    async def test_update_records_finds_archived_records(self, handler, mock_connection, mock_app):
+        """Unarchiving is a common bulk update; archived ids must count as existing."""
+        mock_connection.search.return_value = [10, 11]
+        mock_connection.write.return_value = True
+        mock_connection.read.return_value = [
+            {"id": 10, "display_name": "A"},
+            {"id": 11, "display_name": "B"},
+        ]
+
+        update_records = mock_app._tools["update_records"]
+        await update_records(model="res.partner", record_ids=[10, 11], values={"active": True})
+
+        mock_connection.search.assert_called_once_with(
+            "res.partner", [["id", "in", [10, 11]]], context={"active_test": False}
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_records_dedupes_ids_before_the_cap(
+        self, handler, mock_connection, mock_app
+    ):
+        mock_connection.search.return_value = [10, 11]
+        mock_connection.write.return_value = True
+        mock_connection.read.return_value = [
+            {"id": 10, "display_name": "A"},
+            {"id": 11, "display_name": "B"},
+        ]
+
+        update_records = mock_app._tools["update_records"]
+        # 101 entries but only two records: within the cap
+        result = await update_records(
+            model="res.partner", record_ids=[10] * 100 + [11], values={"comment": "x"}
+        )
+
+        mock_connection.write.assert_called_once_with("res.partner", [10, 11], {"comment": "x"})
+        assert result.updated_count == 2
 
     @pytest.mark.asyncio
     async def test_update_records_empty_ids_rejected(self, handler, mock_app):

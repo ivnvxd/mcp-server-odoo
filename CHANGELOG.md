@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **`update_records` tool**: bulk-update multiple records of the same model with the same values in one call, instead of looping `update_record`. Capped at 100 record IDs per call; fails the whole batch (no partial write) if any id doesn't exist.
+- **`update_records` tool**: bulk-update multiple records of the same model with the same values in one call, instead of looping `update_record`. Capped at 100 distinct record IDs per call; fails the whole batch (no partial write) if any id doesn't exist. Archived records can be updated.
 - **Odoo 20 in CI**: the YOLO integration tests run on Odoo 19 and 20. The README documents the `rpc` scope that Odoo 20 requires for API keys, and the MCP User group.
 
 ### Changed
