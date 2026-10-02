@@ -572,10 +572,18 @@ class OdooResourceHandler:
             )
 
         label = f"Field '{field}' on {model}/{record_id}"
-        size = self._backing_attachment_size(model, record_id, field)
+        try:
+            size = self._backing_attachment_size(model, record_id, field)
+        except Exception as e:
+            # Lookup denied (standard mode without ir.attachment enabled). The
+            # field is most likely attachment-stored, where Odoo 20 refuses
+            # field.size, so leave the size to the post-fetch check.
+            logger.debug(f"Backing attachment lookup failed for {model}/{record_id}/{field}: {e}")
+            return
         if size is not None:
             self._enforce_binary_limit(size, label)
             return
+        # No backing attachment: a plain binary column, which supports field.size
         limit = self.config.max_binary_size
         try:
             over_limit = self.connection.search_count(
@@ -593,27 +601,24 @@ class OdooResourceHandler:
             )
 
     def _backing_attachment_size(self, model: str, record_id: int, field: str) -> Optional[int]:
-        """``file_size`` of the attachment that stores ``model.field``, if readable.
+        """``file_size`` of the attachment that stores ``model.field`` (blocking).
 
         The explicit ``res_field`` condition disables the ORM's default
         res_field filtering. None when there is no such attachment (a plain
-        column) or the lookup is denied.
+        column). Raises when the lookup is denied, so the caller can tell the
+        two apart.
         """
-        try:
-            self.access_controller.validate_model_access("ir.attachment", "read")
-            rows = self.connection.search_read(
-                "ir.attachment",
-                [
-                    ["res_model", "=", model],
-                    ["res_id", "=", record_id],
-                    ["res_field", "=", field],
-                ],
-                ["file_size"],
-                limit=1,
-            )
-        except Exception as e:
-            logger.debug(f"Backing attachment lookup failed for {model}/{record_id}/{field}: {e}")
-            return None
+        self.access_controller.validate_model_access("ir.attachment", "read")
+        rows = self.connection.search_read(
+            "ir.attachment",
+            [
+                ["res_model", "=", model],
+                ["res_id", "=", record_id],
+                ["res_field", "=", field],
+            ],
+            ["file_size"],
+            limit=1,
+        )
         size = rows[0].get("file_size") if rows else None
         return size if isinstance(size, int) else None
 

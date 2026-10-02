@@ -1711,6 +1711,31 @@ class TestOdoo20BinaryResources:
             await resource_handler._handle_binary_field_read("res.partner", "1", "image_1920")
 
     @pytest.mark.asyncio
+    async def test_denied_attachment_lookup_skips_the_size_domain(
+        self, resource_handler, connection_20, mock_access_controller
+    ):
+        """Standard mode without ir.attachment: the field is likely attachment-stored,
+        where Odoo 20 refuses field.size. The post-fetch check decides instead."""
+
+        def deny_attachments(model, operation):
+            if model == "ir.attachment":
+                raise AccessControlError("Model 'ir.attachment' is not enabled for MCP access.")
+
+        mock_access_controller.validate_model_access.side_effect = deny_attachments
+        connection_20.search_count.return_value = 1  # populated
+        connection_20.search_read.side_effect = _binary_search_read_dispatch(
+            record_rows=[{"id": 1, "image_1920": self._payload(PNG_BYTES)}], attachment_rows=[]
+        )
+
+        content, _ = await resource_handler._handle_binary_field_read(
+            "res.partner", "1", "image_1920"
+        )
+
+        assert content == PNG_BYTES
+        # Only the populated check: no field.size probe
+        assert connection_20.search_count.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_stored_binary_under_cap_decodes_the_dict(self, resource_handler, connection_20):
         connection_20.search_count.return_value = 1
         connection_20.search_read.side_effect = _binary_search_read_dispatch(
