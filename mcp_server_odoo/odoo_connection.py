@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 # and reject them with a clean validation error instead.
 XMLRPC_MAX_INT = 2**31 - 1
 
+# Both listing routes failed: /web/database/list is blocked or disabled
+# (list_db = False), and /xmlrpc/db is disabled too or gone (Odoo 20 removed
+# the db RPC service). Only an explicit database name can help then.
+DATABASE_LISTING_FAILED = "Cannot list databases on this server. Set ODOO_DB to the database name."
+
 # Keys whose values must never appear in logs. The exact-name set is kept for
 # the handful of names the heuristic deliberately does not flag; anything
 # credential-SHAPED (smtp_pass, webhook_secret, openai_api_key, ...) is caught
@@ -286,8 +291,8 @@ class OdooConnection:
         authenticate yet. Proxies are created once and reused for the
         server's lifetime.
 
-        In standard mode, resolves the target database first using the
-        server-wide ``/xmlrpc/db`` endpoint, then sets the
+        In standard mode, resolves the target database first through the
+        server-wide database listing (see ``list_databases``), then sets the
         ``X-Odoo-Database`` header on the transport so that subsequent
         requests to MCP addon routes (``/mcp/xmlrpc/*``) are routed to
         the correct database — required when multiple DBs exist.
@@ -337,9 +342,10 @@ class OdooConnection:
     def _resolve_and_set_database(self) -> None:
         """Resolve the target database and set it on the transport header.
 
-        Uses the server-wide ``/xmlrpc/db`` proxy (already created) to
-        list databases and pick one, then tells the connection pool to
-        inject ``X-Odoo-Database`` on all subsequent requests.
+        Lists databases (``/web/database/list``, falling back to the
+        ``/xmlrpc/db`` proxy created above) and picks one, then tells the
+        connection pool to inject ``X-Odoo-Database`` on all subsequent
+        requests.
         """
         # If database is explicitly configured, use it directly
         if self.config.database:
@@ -526,6 +532,16 @@ class OdooConnection:
             )
 
         try:
+            databases = self._list_databases_web()
+            logger.info(f"Found {len(databases)} databases")
+            logger.debug(f"Database names: {databases}")
+            return databases
+        except Exception as e:
+            # Route blocked by a proxy, listing disabled (list_db = False), or
+            # an unexpected body: /xmlrpc/db still answers on Odoo 19 and older.
+            logger.debug(f"/web/database/list failed ({e}); falling back to /xmlrpc/db")
+
+        try:
             # Call list_db method on database proxy
             with self._db_proxy_lock:
                 databases = self.db_proxy.list()
@@ -543,10 +559,35 @@ class OdooConnection:
                     # Return configured database as fallback
                     return [self.config.database]
             logger.error(f"Failed to list databases: {e}")
-            raise OdooConnectionError(f"Failed to list databases: {e}") from e
+            raise OdooConnectionError(DATABASE_LISTING_FAILED) from e
         except Exception as e:
             logger.error(f"Failed to list databases: {e}")
-            raise OdooConnectionError(f"Failed to list databases: {e}") from e
+            raise OdooConnectionError(DATABASE_LISTING_FAILED) from e
+
+    def _list_databases_web(self) -> List[str]:
+        """List databases through ``POST /web/database/list`` (JSON-RPC).
+
+        Odoo 20 removed the ``db`` RPC service behind ``/xmlrpc/db``. This web
+        route exists on Odoo 16 to 20, needs no database context and no addon,
+        and applies dbfilter.
+
+        Raises:
+            Exception: On any failure, so that the caller can fall back.
+        """
+        url = f"{self._url_components['base_url']}/web/database/list"
+        body = json.dumps({"jsonrpc": "2.0", "method": "call", "params": {}}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, list) or not all(isinstance(db, str) for db in result):
+            error = payload.get("error") if isinstance(payload, dict) else None
+            detail = error.get("data", {}).get("message") if isinstance(error, dict) else None
+            raise OdooConnectionError(f"Unexpected /web/database/list response: {detail}")
+        return result
 
     def database_exists(self, db_name: str) -> bool:
         """Check if a specific database exists.
@@ -589,16 +630,8 @@ class OdooConnection:
             logger.info(f"Using configured database: {db_name}")
             return db_name
 
-        # List available databases
-        try:
-            databases = self.list_databases()
-        except Exception as e:
-            # If database listing is restricted, we cannot auto-select
-            logger.warning(f"Cannot list databases (may be restricted): {e}")
-            raise OdooConnectionError(
-                "Database auto-selection failed. Database listing may be restricted. "
-                "Please specify ODOO_DB in your configuration."
-            ) from e
+        # List available databases. A failure already asks for ODOO_DB.
+        databases = self.list_databases()
 
         # Handle different scenarios
         if not databases:
