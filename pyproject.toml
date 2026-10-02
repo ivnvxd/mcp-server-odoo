@@ -35,7 +35,7 @@ dependencies = [
     # StreamableHTTPSessionManager(session_idle_timeout=...), which does not
     # exist before it — under a resolved 1.26.x wheel the HTTP transport
     # crashes at startup whenever ODOO_MCP_SESSION_IDLE_TIMEOUT is set.
-    "mcp>=1.27.0,<2",
+    "mcp>=1.27.0,<3",
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
