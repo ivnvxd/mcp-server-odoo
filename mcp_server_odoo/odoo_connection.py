@@ -4,6 +4,7 @@ This module provides the OdooConnection class for managing connections
 to Odoo via XML-RPC using MCP-specific endpoints.
 """
 
+import http.client
 import json
 import logging
 import socket
@@ -100,6 +101,30 @@ class OdooConnectionError(Exception):
     """Base exception for Odoo connection errors."""
 
     pass
+
+
+class OdooUnreachableError(OdooConnectionError):
+    """Odoo did not answer: a network failure, a timeout or a gateway error.
+
+    Unlike a refused login or a configuration problem, this can pass on its
+    own, so the server keeps running and connects on a later request.
+    """
+
+    pass
+
+
+# Gateway answers that mean "Odoo behind me is not answering"
+_UNAVAILABLE_HTTP_STATUSES = frozenset({502, 503, 504})
+
+
+def _is_unreachable(exc: BaseException) -> bool:
+    """True when ``exc`` means Odoo did not answer, not that it refused."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in _UNAVAILABLE_HTTP_STATUSES
+    if isinstance(exc, xmlrpc.client.ProtocolError):
+        return exc.errcode in _UNAVAILABLE_HTTP_STATUSES
+    # OSError covers refused connections, timeouts, DNS failures and URLError
+    return isinstance(exc, (OSError, http.client.HTTPException))
 
 
 class OdooValidationFault(OdooConnectionError):  # noqa: N818 — "Fault" mirrors xmlrpc.client.Fault
@@ -334,9 +359,9 @@ class OdooConnection:
             logger.info("Successfully connected to Odoo server")
 
         except socket.timeout:
-            raise OdooConnectionError(f"Connection timeout after {self.timeout} seconds") from None
+            raise OdooUnreachableError(f"Connection timeout after {self.timeout} seconds") from None
         except socket.error as e:
-            raise OdooConnectionError(
+            raise OdooUnreachableError(
                 f"Failed to connect to {self._url_components['host']}:"
                 f"{self._url_components['port']}: {e}"
             ) from e
@@ -386,6 +411,10 @@ class OdooConnection:
             self._server_version = version.get("server_version", "") if version else None
             logger.debug(f"Server version: {version}")
         except Exception as e:
+            if _is_unreachable(e):
+                raise OdooUnreachableError(
+                    f"Cannot reach Odoo at {self._url_components['base_url']}: {e}"
+                ) from e
             raise OdooConnectionError(f"Connection test failed: {e}") from e
 
     def disconnect(self, suppress_logging: bool = False) -> None:
@@ -546,6 +575,7 @@ class OdooConnection:
             # Route blocked by a proxy, listing disabled (list_db = False), or
             # an unexpected body: /xmlrpc/db still answers on Odoo 19 and older.
             logger.debug(f"/web/database/list failed ({e}); falling back to /xmlrpc/db")
+            web_unreachable = _is_unreachable(e)
 
         try:
             # Call list_db method on database proxy
@@ -568,6 +598,10 @@ class OdooConnection:
             raise OdooConnectionError(DATABASE_LISTING_FAILED) from e
         except Exception as e:
             logger.error(f"Failed to list databases: {e}")
+            if web_unreachable and _is_unreachable(e):
+                raise OdooUnreachableError(
+                    f"Cannot reach Odoo at {self._url_components['base_url']}: {e}"
+                ) from e
             raise OdooConnectionError(DATABASE_LISTING_FAILED) from e
 
     def _list_databases_web(self) -> List[str]:
@@ -754,6 +788,8 @@ class OdooConnection:
                 logger.warning(f"YOLO mode: Authentication error: {e.faultString}")
             return False
         except Exception as e:
+            if _is_unreachable(e):
+                raise OdooUnreachableError(f"Failed to authenticate: {e}") from e
             logger.error(f"YOLO mode: Unexpected authentication error: {e}")
             return False
 
@@ -814,10 +850,11 @@ class OdooConnection:
                 raise OdooConnectionError(f"Failed to validate API key: {reason}") from e
             else:
                 logger.error(f"HTTP error during MCP API key validation: {e}")
-                raise OdooConnectionError(f"Failed to validate API key: HTTP {e.code}") from e
+                error_class = OdooUnreachableError if _is_unreachable(e) else OdooConnectionError
+                raise error_class(f"Failed to validate API key: HTTP {e.code}") from e
         except urllib.error.URLError as e:
             logger.error(f"Network error during MCP API key validation: {e}")
-            raise OdooConnectionError(f"Network error during authentication: {e}") from e
+            raise OdooUnreachableError(f"Network error during authentication: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error during MCP API key validation: {e}")
             raise OdooConnectionError(f"Failed to validate API key: {e}") from e
@@ -890,7 +927,8 @@ class OdooConnection:
             return False
         except Exception as e:
             logger.error(f"Error during password authentication: {e}")
-            raise OdooConnectionError(f"Failed to authenticate: {e}") from e
+            error_class = OdooUnreachableError if _is_unreachable(e) else OdooConnectionError
+            raise error_class(f"Failed to authenticate: {e}") from e
 
     def authenticate(self, database: Optional[str] = None) -> None:
         """Authenticate with Odoo using available credentials.

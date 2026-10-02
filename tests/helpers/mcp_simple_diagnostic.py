@@ -46,7 +46,7 @@ async def test_server():
 
     # Test connection
     try:
-        server._ensure_connection()
+        asyncio.run(server.ensure_connected())
         print("✓ Connected to Odoo successfully")
         print(f"  Database: {server.connection.database}")
         print(f"  User ID: {server.connection.uid}")
@@ -56,7 +56,7 @@ async def test_server():
 
     # Test resource registration
     try:
-        server._register_resources()
+        # The server registers its resources at construction
         print("✓ Resources registered successfully")
 
         # Get resource handler info

@@ -5,7 +5,6 @@ lifecycle management, and connection to Odoo.
 """
 
 import asyncio
-import contextlib
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -15,8 +14,45 @@ from mcp import Client
 from starlette.testclient import TestClient
 
 from mcp_server_odoo.config import OdooConfig
-from mcp_server_odoo.odoo_connection import OdooConnectionError
+from mcp_server_odoo.odoo_connection import OdooConnectionError, OdooUnreachableError
 from mcp_server_odoo.server import SERVER_VERSION, OdooMCPServer
+
+
+class _FakeConnection:
+    """Stands in for OdooConnection: ``outcome`` decides what connect() does."""
+
+    def __init__(self, config=None, performance_manager=None):
+        self.outcome = None  # None connects; an exception instance is raised
+        self.auth_outcome = None
+        self.disconnect_outcome = None
+        self.is_connected = False
+        self.is_authenticated = False
+        self.database = "test_db"
+        self.auth_method = "api_key"
+        self.uid = 2
+        self.connect_calls = 0
+        self.authenticate_calls = 0
+        self.disconnect_calls = 0
+        self.read = Mock(return_value=[])
+        self.search_read = Mock(return_value=[])
+
+    def connect(self):
+        self.connect_calls += 1
+        if self.outcome is not None:
+            raise self.outcome
+        self.is_connected = True
+
+    def authenticate(self, database=None):
+        self.authenticate_calls += 1
+        if self.auth_outcome is not None:
+            raise self.auth_outcome
+        self.is_authenticated = True
+
+    def disconnect(self):
+        self.disconnect_calls += 1
+        if self.disconnect_outcome is not None:
+            raise self.disconnect_outcome
+        self.is_connected = self.is_authenticated = False
 
 
 class TestServerFoundation:
@@ -36,19 +72,12 @@ class TestServerFoundation:
 
     @pytest.fixture
     def server_with_mock_connection(self, valid_config):
-        """Create server with mocked connection."""
-        with patch("mcp_server_odoo.server.OdooConnection") as mock_conn_class:
-            # Mock the connection class
-            mock_connection = Mock()
-            mock_connection.connect = Mock()
-            mock_connection.authenticate = Mock()
-            mock_connection.disconnect = Mock()
-            mock_conn_class.return_value = mock_connection
-
+        """Create a server whose OdooConnection is a _FakeConnection."""
+        fake = _FakeConnection()
+        with patch("mcp_server_odoo.server.OdooConnection", return_value=fake) as conn_cls:
             server = OdooMCPServer(valid_config)
-            server._mock_connection_class = mock_conn_class
-            server._mock_connection = mock_connection
-
+            server._mock_connection_class = conn_cls
+            server._mock_connection = fake
             yield server
 
     def test_server_initialization(self, valid_config):
@@ -56,7 +85,10 @@ class TestServerFoundation:
         server = OdooMCPServer(valid_config)
 
         assert server.config == valid_config
-        assert server.connection is None  # Not connected until run
+        # The connection object exists from the start; it connects on startup
+        # or on the first request
+        assert server.connection is not None
+        assert not server.connection.is_connected
         assert server.app is not None
         assert server.app.name == "odoo-mcp-server"
 
@@ -91,129 +123,106 @@ class TestServerFoundation:
             f"Expected numeric semver parts, got {SERVER_VERSION}"
         )
 
-    def test_ensure_connection_success(self, server_with_mock_connection):
-        """Test successful connection establishment."""
+    @pytest.mark.asyncio
+    async def test_ensure_connected_success(self, server_with_mock_connection):
+        """ensure_connected connects once and updates the access controller."""
         server = server_with_mock_connection
+        fake = server._mock_connection
+        fake.database = "resolved_db"
+        fake.auth_method = "password"
 
-        # Ensure connection
-        server._ensure_connection()
+        await server.ensure_connected()
 
-        # Verify connection was created with performance manager
         assert server._mock_connection_class.call_count == 1
-        call_args = server._mock_connection_class.call_args
-        assert call_args[0][0] == server.config
-        assert "performance_manager" in call_args[1]
-        server._mock_connection.connect.assert_called_once()
-        server._mock_connection.authenticate.assert_called_once()
+        assert "performance_manager" in server._mock_connection_class.call_args[1]
+        assert fake.connect_calls == 1
+        assert server.connection.is_authenticated
+        # The controller follows the EFFECTIVE database and auth method (the
+        # API key may have fallen back to the password)
+        assert server.access_controller.database == "resolved_db"
+        assert server.access_controller.auth_method == "password"
 
-        # Verify connection is stored
-        assert server.connection == server._mock_connection
+        await server.ensure_connected()
+        assert fake.connect_calls == 1, "an authenticated connection is reused"
+
+    @pytest.mark.asyncio
+    async def test_ensure_connected_failure(self, server_with_mock_connection):
+        """A configuration error propagates."""
+        server = server_with_mock_connection
+        server._mock_connection.outcome = OdooConnectionError("Connection failed")
+
+        with pytest.raises(OdooConnectionError, match="Connection failed"):
+            await server.ensure_connected()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_connection(self, server_with_mock_connection):
+        """Cleanup disconnects but keeps the objects the handlers hold."""
+        server = server_with_mock_connection
+        await server.ensure_connected()
+
+        server._cleanup_connection()
+
+        assert server._mock_connection.disconnect_calls == 1
+        assert server.connection is server._mock_connection
         assert server.access_controller is not None
 
-    def test_ensure_connection_failure(self, server_with_mock_connection):
-        """Test connection establishment failure."""
-        server = server_with_mock_connection
-
-        # Make connection fail
-        server._mock_connection.connect.side_effect = OdooConnectionError("Connection failed")
-
-        # Ensure connection should raise an error
-        with pytest.raises(OdooConnectionError, match="Connection failed"):
-            server._ensure_connection()
-
-    def test_cleanup_connection(self, server_with_mock_connection):
-        """Test connection cleanup."""
-        server = server_with_mock_connection
-
-        # First establish connection
-        server._ensure_connection()
-        assert server.connection is not None
-
-        # Clean up
-        server._cleanup_connection()
-
-        # Verify connection was closed
-        server._mock_connection.disconnect.assert_called_once()
-        assert server.connection is None
-        assert server.access_controller is None
-        assert server.resource_handler is None
-
     def test_cleanup_connection_without_connection(self, server_with_mock_connection):
-        """Test cleanup when no connection exists."""
+        """Test cleanup when the connection never connected."""
         server = server_with_mock_connection
 
-        # Should not raise an error
         server._cleanup_connection()
 
-        # Connection disconnect should not be called
-        server._mock_connection.disconnect.assert_not_called()
+        assert server._mock_connection.disconnect_calls == 0
 
-    def test_cleanup_connection_with_error(self, server_with_mock_connection):
-        """Test cleanup when disconnect raises an error."""
+    @pytest.mark.asyncio
+    async def test_cleanup_connection_with_error(self, server_with_mock_connection):
+        """Test cleanup when disconnect raises an error (it is logged)."""
         server = server_with_mock_connection
+        await server.ensure_connected()
+        server._mock_connection.disconnect_outcome = Exception("Disconnect failed")
 
-        # Establish connection first
-        server._ensure_connection()
-
-        # Make disconnect raise an error
-        server._mock_connection.disconnect.side_effect = Exception("Disconnect failed")
-
-        # Should not raise an error (error is logged)
         server._cleanup_connection()
 
-        # Verify disconnect was attempted
-        server._mock_connection.disconnect.assert_called_once()
-        # Connection should still be cleared
-        assert server.connection is None
-        assert server.access_controller is None
-        assert server.resource_handler is None
+        assert server._mock_connection.disconnect_calls == 1
 
     @pytest.mark.asyncio
     async def test_run_stdio_success(self, server_with_mock_connection):
-        """Test successful run_stdio execution via lifespan."""
+        """run_stdio connects before the transport and disconnects at the end."""
         server = server_with_mock_connection
 
-        # Make run_stdio_async invoke the lifespan like real MCPServer does
+        # Make run_stdio_async invoke the lifespan like the real MCPServer does
         async def mock_run_with_lifespan():
             async with server._odoo_lifespan(server.app):
                 pass
 
-        with patch("mcp_server_odoo.server.AccessController"):
-            with patch("mcp_server_odoo.server.register_resources", return_value=Mock()):
-                with patch("mcp_server_odoo.server.register_tools", return_value=Mock()):
-                    server.app.run_stdio_async = mock_run_with_lifespan
-                    await server.run_stdio()
+        server.app.run_stdio_async = mock_run_with_lifespan
+        await server.run_stdio()
 
-        # Verify connection lifecycle was executed
-        server._mock_connection.connect.assert_called_once()
-        server._mock_connection.authenticate.assert_called_once()
-        server._mock_connection.disconnect.assert_called_once()
+        assert server._mock_connection.connect_calls == 1
+        assert server._mock_connection.authenticate_calls == 1
+        assert server._mock_connection.disconnect_calls == 1
 
     @pytest.mark.asyncio
-    async def test_run_stdio_connection_failure(self, server_with_mock_connection):
-        """Test run_stdio with connection failure — cleanup still runs."""
+    async def test_run_stdio_configuration_error_stops_startup(self, server_with_mock_connection):
+        """A configuration error fails before the transport starts."""
         server = server_with_mock_connection
+        server._mock_connection.outcome = OdooConnectionError("Failed to connect")
+        server.app.run_stdio_async = AsyncMock()
 
-        # Make connection fail. The eager dynamic-instructions connect
-        # swallows the first failure; make sure the lifespan's reauth
-        # attempt on the half-built connection fails too.
-        server._mock_connection.connect.side_effect = OdooConnectionError("Failed to connect")
-        server._mock_connection.is_authenticated = False
-        server._mock_connection.is_connected = False
-
-        # Make run_stdio_async invoke the lifespan (which will fail on connect)
-        async def mock_run_that_invokes_lifespan():
-            async with server._odoo_lifespan(server.app):
-                pass
-
-        server.app.run_stdio_async = mock_run_that_invokes_lifespan
-
-        # Should raise since lifespan will fail on _ensure_connection
         with pytest.raises(OdooConnectionError, match="Failed to connect"):
             await server.run_stdio()
 
-        # Cleanup should still run even when setup fails
-        server._mock_connection.disconnect.assert_called_once()
+        server.app.run_stdio_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_stdio_serves_while_odoo_is_unreachable(self, server_with_mock_connection):
+        server = server_with_mock_connection
+        server._mock_connection.outcome = OdooUnreachableError("Cannot reach Odoo")
+        server.app.run_stdio_async = AsyncMock()
+
+        await server.run_stdio()  # must not raise
+
+        server.app.run_stdio_async.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_run_stdio_keyboard_interrupt(self, server_with_mock_connection):
@@ -226,16 +235,11 @@ class TestServerFoundation:
             async with server._odoo_lifespan(server.app):
                 raise KeyboardInterrupt
 
-        with patch("mcp_server_odoo.server.AccessController"):
-            with patch("mcp_server_odoo.server.register_resources", return_value=Mock()):
-                with patch("mcp_server_odoo.server.register_tools", return_value=Mock()):
-                    server.app.run_stdio_async = mock_run_interrupted
-                    # Should not raise (handled gracefully)
-                    await server.run_stdio()
+        server.app.run_stdio_async = mock_run_interrupted
+        # Should not raise (handled gracefully)
+        await server.run_stdio()
 
-        # Lifespan teardown disconnected and cleared the connection
-        server._mock_connection.disconnect.assert_called_once()
-        assert server.connection is None
+        assert server._mock_connection.disconnect_calls == 1
 
     @pytest.mark.asyncio
     async def test_run_stdio_keyboard_interrupt_before_lifespan(self, server_with_mock_connection):
@@ -250,123 +254,73 @@ class TestServerFoundation:
 
     @pytest.mark.asyncio
     async def test_lifespan_setup_and_teardown(self, server_with_mock_connection):
-        """Test that lifespan context manager handles setup and teardown."""
+        """The lifespan connects on entry and disconnects on exit."""
         server = server_with_mock_connection
 
-        # Mock AccessController
-        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
-            with patch("mcp_server_odoo.server.register_resources") as mock_register_res:
-                with patch("mcp_server_odoo.server.register_tools") as mock_register_tools:
-                    mock_register_res.return_value = Mock()
-                    mock_register_tools.return_value = Mock()
+        async with server._odoo_lifespan(server.app) as state:
+            assert server._mock_connection.is_authenticated
+            assert state == {}
 
-                    # Use the lifespan context manager
-                    async with server._odoo_lifespan(server.app) as state:
-                        # Verify setup was called
-                        server._mock_connection.connect.assert_called_once()
-                        server._mock_connection.authenticate.assert_called_once()
-                        mock_access_ctrl.assert_called_once()
-                        mock_register_res.assert_called_once()
-                        mock_register_tools.assert_called_once()
-
-                        # State should be an empty dict
-                        assert state == {}
-
-                    # After exiting, verify cleanup was called
-                    server._mock_connection.disconnect.assert_called_once()
+        assert server._mock_connection.disconnect_calls == 1
 
     @pytest.mark.asyncio
     async def test_lifespan_cleanup_on_setup_failure(self, server_with_mock_connection):
-        """Test that lifespan cleans up if setup fails after connection is created."""
+        """A refused login stops startup, and the opened connection is closed."""
         server = server_with_mock_connection
-
-        # Connection succeeds but authenticate fails
-        server._mock_connection.authenticate.side_effect = OdooConnectionError("Auth failed")
+        server._mock_connection.auth_outcome = OdooConnectionError("Auth failed")
 
         with pytest.raises(OdooConnectionError, match="Auth failed"):
             async with server._odoo_lifespan(server.app):
                 pass
 
-        # Cleanup should still run
-        server._mock_connection.disconnect.assert_called_once()
+        assert server._mock_connection.disconnect_calls == 1
 
     @pytest.mark.asyncio
     async def test_lifespan_teardown_exception_swallowed(self, server_with_mock_connection):
         """Test that lifespan teardown exceptions are swallowed gracefully."""
         server = server_with_mock_connection
+        server._mock_connection.disconnect_outcome = RuntimeError("cleanup boom")
 
-        with patch("mcp_server_odoo.server.AccessController"):
-            with patch("mcp_server_odoo.server.register_resources", return_value=Mock()):
-                with patch("mcp_server_odoo.server.register_tools", return_value=Mock()):
-                    server._mock_connection.disconnect.side_effect = RuntimeError("cleanup boom")
-                    # Should not raise — _cleanup_connection swallows the error
-                    async with server._odoo_lifespan(server.app):
-                        pass
-                    # Connection reference should still be cleared
-                    assert server.connection is None
+        # Should not raise — _cleanup_connection swallows the error
+        async with server._odoo_lifespan(server.app):
+            pass
+
+        assert server._mock_connection.disconnect_calls == 1
 
     def test_get_model_names_returns_list(self, server_with_mock_connection):
         """Test _get_model_names returns model name strings."""
         server = server_with_mock_connection
+        server.access_controller = Mock()
+        server.access_controller.get_enabled_models.return_value = [
+            {"model": "res.partner", "name": "Contact"},
+            {"model": "sale.order", "name": "Sales Order"},
+        ]
 
-        # Set up connection and access controller
-        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
-            mock_ac = Mock()
-            mock_ac.get_enabled_models.return_value = [
-                {"model": "res.partner", "name": "Contact"},
-                {"model": "sale.order", "name": "Sales Order"},
-            ]
-            mock_access_ctrl.return_value = mock_ac
-
-            server._ensure_connection()
-
-            # Get model names
-            names = server._get_model_names()
-            assert names == ["res.partner", "sale.order"]
-
-    def test_get_model_names_no_access_controller(self, valid_config):
-        """Test _get_model_names returns empty list when no access controller."""
-        server = OdooMCPServer(valid_config)
-
-        # No connection/access controller set up
-        names = server._get_model_names()
-        assert names == []
+        assert server._get_model_names() == ["res.partner", "sale.order"]
 
     def test_get_model_names_exception_returns_empty(self, server_with_mock_connection):
         """Test _get_model_names returns empty list on exception."""
         server = server_with_mock_connection
+        server.access_controller = Mock()
+        server.access_controller.get_enabled_models.side_effect = RuntimeError("boom")
 
-        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
-            mock_ac = Mock()
-            mock_ac.get_enabled_models.side_effect = RuntimeError("boom")
-            mock_access_ctrl.return_value = mock_ac
-            server._ensure_connection()
-
-            names = server._get_model_names()
-            assert names == []
+        assert server._get_model_names() == []
 
     def test_get_model_names_yolo_mode_fallback(self, server_with_mock_connection):
         """Test _get_model_names queries ir.model when get_enabled_models returns []."""
         server = server_with_mock_connection
+        server.access_controller = Mock()
+        server.access_controller.get_enabled_models.return_value = []  # YOLO mode returns []
+        server._mock_connection.is_authenticated = True
+        server._mock_connection.search_read.return_value = [
+            {"model": "res.partner"},
+            {"model": "sale.order"},
+        ]
 
-        with patch("mcp_server_odoo.server.AccessController") as mock_access_ctrl:
-            mock_ac = Mock()
-            mock_ac.get_enabled_models.return_value = []  # YOLO mode returns []
-            mock_access_ctrl.return_value = mock_ac
-            server._ensure_connection()
-
-            # Mock the connection's search_read for ir.model fallback
-            server._mock_connection.is_authenticated = True
-            server._mock_connection.search_read.return_value = [
-                {"model": "res.partner"},
-                {"model": "sale.order"},
-            ]
-
-            names = server._get_model_names()
-            assert names == ["res.partner", "sale.order"]
-            server._mock_connection.search_read.assert_called_once_with(
-                "ir.model", [], ["model"], limit=200
-            )
+        assert server._get_model_names() == ["res.partner", "sale.order"]
+        server._mock_connection.search_read.assert_called_once_with(
+            "ir.model", [], ["model"], limit=200
+        )
 
     @pytest.mark.asyncio
     async def test_completion_handler_partial_match(self, valid_config):
@@ -382,7 +336,7 @@ class TestServerFoundation:
         ]
 
         # Ask through the in-memory MCP client; the lifespan must not dial Odoo
-        with patch.object(OdooMCPServer, "_ensure_connection"):
+        with patch.object(OdooMCPServer, "ensure_connected", new=AsyncMock()):
             async with Client(server.app, mode="legacy") as client:
                 result = await client.complete(
                     ref=types.PromptReference(type="ref/prompt", name="test"),
@@ -403,7 +357,7 @@ class TestServerFoundation:
             {"model": f"model.{i}"} for i in range(25)
         ]
 
-        with patch.object(OdooMCPServer, "_ensure_connection"):
+        with patch.object(OdooMCPServer, "ensure_connected", new=AsyncMock()):
             async with Client(server.app, mode="legacy") as client:
                 result = await client.complete(
                     ref=types.PromptReference(type="ref/prompt", name="test"),
@@ -414,11 +368,11 @@ class TestServerFoundation:
 
 
 class TestDynamicInstructions:
-    """Dynamic initialize.instructions applied via eager connect.
+    """Dynamic initialize.instructions applied after a connect.
 
-    The SDK freezes instructions before the lifespan runs, so run_stdio/
-    run_http must connect eagerly and personalize them first — and startup
-    must never fail on it.
+    stdio freezes the instructions when the transport starts, so run_stdio
+    connects before that; a later connect refreshes them for new sessions.
+    Startup never fails on personalization.
     """
 
     ADMIN_USER = {
@@ -432,24 +386,17 @@ class TestDynamicInstructions:
 
     @pytest.fixture
     def server_with_user_read(self):
-        """Server whose mocked connection serves the res.users context read."""
+        """Server whose fake connection serves the res.users context read."""
         config = OdooConfig(
             url="http://localhost:8069",
             api_key="test_api_key_12345",
             database="test_db",
         )
-        with (
-            patch("mcp_server_odoo.server.OdooConnection") as conn_cls,
-            patch("mcp_server_odoo.server.AccessController"),
-        ):
-            mock_connection = Mock()
-            mock_connection.is_authenticated = True
-            mock_connection.uid = 2
-            mock_connection.read.return_value = [dict(self.ADMIN_USER)]
-            conn_cls.return_value = mock_connection
-
+        fake = _FakeConnection()
+        fake.read.return_value = [dict(self.ADMIN_USER)]
+        with patch("mcp_server_odoo.server.OdooConnection", return_value=fake):
             server = OdooMCPServer(config)
-            server._mock_connection = mock_connection
+            server._mock_connection = fake
             yield server
 
     @pytest.mark.asyncio
@@ -516,6 +463,7 @@ class TestDynamicInstructions:
         block must never compound when one instance runs more than once."""
         server = server_with_user_read
         static = server.app.instructions
+        await server.ensure_connected()
 
         await server._apply_dynamic_instructions()
         await server._apply_dynamic_instructions()
@@ -527,11 +475,10 @@ class TestDynamicInstructions:
 
     @pytest.mark.asyncio
     async def test_connect_failure_keeps_static_instructions(self, server_with_user_read):
-        """Eager connect failure never aborts startup; instructions stay static."""
+        """An unreachable Odoo never aborts startup; instructions stay static."""
         server = server_with_user_read
         static = server.app.instructions
-        server._mock_connection.connect.side_effect = OdooConnectionError("Odoo down")
-        server._mock_connection.is_authenticated = False
+        server._mock_connection.outcome = OdooUnreachableError("Odoo down")
         server.app.run_stdio_async = AsyncMock()
 
         await server.run_stdio()  # must not raise
@@ -631,10 +578,10 @@ ODOO_MCP_LOG_LEVEL=DEBUG
             server = OdooMCPServer()
 
             # Test connection
-            server._ensure_connection()
+            await server.ensure_connected()
 
             # If we get here, connection was successful
-            assert server.connection is not None
+            assert server.connection.is_authenticated
 
             # Clean up
             server._cleanup_connection()
@@ -812,17 +759,12 @@ class TestFastMCPApp:
         assert health["version"] == SERVER_VERSION
         assert health["connection"]["connected"] is False
 
-    def test_health_status_healthy_when_connected(self, valid_config):
+    @pytest.mark.asyncio
+    async def test_health_status_healthy_when_connected(self, valid_config):
         """Test health returns healthy when connected."""
-        with patch("mcp_server_odoo.server.OdooConnection") as mock_conn_class:
-            mock_conn = Mock()
-            mock_conn.is_authenticated = True
-            mock_conn.database = "test_db"
-            mock_conn_class.return_value = mock_conn
-
+        with patch("mcp_server_odoo.server.OdooConnection", return_value=_FakeConnection()):
             server = OdooMCPServer(valid_config)
-            with patch("mcp_server_odoo.server.AccessController"):
-                server._ensure_connection()
+            await server.ensure_connected()
 
             health = server.get_health_status()
             assert health["status"] == "healthy"
@@ -867,123 +809,6 @@ class TestHttpExposureWarning:
         assert "YOLO FULL-ACCESS MODE" in message
 
 
-class TestConnectionPersistsAcrossHttpSessions:
-    """Issue #70: streamable-http enters/exits the lifespan PER SESSION.
-
-    The Odoo connection and the registered handlers must survive session
-    teardown — previously every call after the first failed with
-    'Not authenticated with Odoo'.
-    """
-
-    def _make_server(self, transport):
-        config = OdooConfig(
-            url="http://localhost:8069",
-            api_key="test_api_key_12345",
-            database="test_db",
-            transport=transport,
-        )
-        with (
-            patch("mcp_server_odoo.server.OdooConnection") as conn_cls,
-            patch("mcp_server_odoo.server.AccessController"),
-            patch("mcp_server_odoo.server.register_resources") as reg_res,
-            patch("mcp_server_odoo.server.register_tools") as reg_tools,
-        ):
-            mock_connection = Mock()
-            mock_connection.is_authenticated = True
-            conn_cls.return_value = mock_connection
-            server = OdooMCPServer(config)
-            # run_http() sets this; these tests drive the lifespan directly.
-            server._http_transport_active = transport == "streamable-http"
-            yield server, conn_cls, mock_connection, reg_res, reg_tools
-
-    @pytest.mark.asyncio
-    async def test_http_sessions_reuse_connection_and_registrations(self):
-        gen = self._make_server("streamable-http")
-        server, conn_cls, mock_connection, reg_res, reg_tools = next(gen)
-
-        # Session 1
-        async with server._odoo_lifespan(server.app):
-            pass
-        # Session 2 (e.g. after a DELETE /mcp) — must NOT disconnect or rebuild
-        async with server._odoo_lifespan(server.app):
-            pass
-
-        mock_connection.disconnect.assert_not_called()
-        assert conn_cls.call_count == 1, "connection must be created exactly once"
-        assert reg_res.call_count == 1, "resources must be registered exactly once"
-        assert reg_tools.call_count == 1, "tools must be registered exactly once"
-        assert server.connection is mock_connection, "connection survives session teardown"
-        assert server.access_controller is not None
-
-    @pytest.mark.asyncio
-    async def test_stdio_still_cleans_up_on_exit(self):
-        """stdio has one session per process — cleanup on exit stays correct."""
-        gen = self._make_server("stdio")
-        server, conn_cls, mock_connection, reg_res, reg_tools = next(gen)
-
-        async with server._odoo_lifespan(server.app):
-            assert server.connection is mock_connection
-
-        mock_connection.disconnect.assert_called_once()
-        assert server.connection is None
-
-    @pytest.mark.asyncio
-    async def test_stale_connection_reauthenticated_in_place(self):
-        """A connection that lost authentication is reconnected IN PLACE —
-        registered handlers hold references to it, so it must never be
-        replaced with a new instance."""
-        gen = self._make_server("streamable-http")
-        server, conn_cls, mock_connection, reg_res, reg_tools = next(gen)
-
-        async with server._odoo_lifespan(server.app):
-            pass
-
-        # Simulate auth loss between sessions
-        mock_connection.is_authenticated = False
-        mock_connection.is_connected = True
-
-        async with server._odoo_lifespan(server.app):
-            pass
-
-        assert conn_cls.call_count == 1, "must not build a new connection object"
-        mock_connection.authenticate.assert_called()
-        assert server.connection is mock_connection
-        # Reauth re-runs the api-key→password fallback chain — the controller
-        # must track the connection's EFFECTIVE auth method
-        assert server.access_controller.auth_method == mock_connection.auth_method
-
-    @pytest.mark.asyncio
-    async def test_recovery_after_failed_first_startup_registers_handlers(self):
-        """If the first startup fails after self.connection was assigned but
-        before auth succeeded, the next session's reauth must still create
-        the AccessController — without it, handler registration silently
-        skips and the recovered server serves zero tools while /health
-        reports healthy."""
-        gen = self._make_server("streamable-http")
-        server, conn_cls, mock_connection, reg_res, reg_tools = next(gen)
-
-        # Session 1: Odoo rejects auth — startup fails, half-built connection survives
-        mock_connection.is_authenticated = False
-        mock_connection.authenticate.side_effect = OdooConnectionError("auth failed")
-        with pytest.raises(OdooConnectionError):
-            async with server._odoo_lifespan(server.app):
-                pass
-        assert server.connection is mock_connection
-        assert server.access_controller is None
-
-        # Session 2: Odoo is back — reauth must recover a FULLY working server
-        mock_connection.authenticate.side_effect = None
-        mock_connection.is_connected = True
-        async with server._odoo_lifespan(server.app):
-            pass
-
-        assert server.access_controller is not None, (
-            "reauth recovery must create the access controller"
-        )
-        assert reg_res.call_count == 1, "resources must register after recovery"
-        assert reg_tools.call_count == 1, "tools must register after recovery"
-
-
 class TestTransportSecurity:
     """Test transport security configuration for DNS rebinding protection."""
 
@@ -994,7 +819,10 @@ class TestTransportSecurity:
             transport_security=server._transport_security, host=server.config.host
         )
         # The HTTP lifespan connects to Odoo; keep it offline
-        with patch.object(OdooMCPServer, "_ensure_connection"), TestClient(app) as client:
+        with (
+            patch.object(OdooMCPServer, "ensure_connected", new=AsyncMock()),
+            TestClient(app) as client,
+        ):
             return client.post(
                 "/mcp",
                 headers={
@@ -1294,55 +1122,6 @@ class TestAllowedHostsIPv6:
         assert s.allowed_hosts == ["odoo.example.com:*", "odoo.example.com", "localhost:9000"]
 
 
-class TestTeardownGateTracksRunningTransport:
-    """The lifespan teardown must key off the transport that actually started,
-    not off config.transport — run_http() is public and binds config.host /
-    config.port, so it can run with ODOO_MCP_TRANSPORT unset."""
-
-    @contextlib.contextmanager
-    def _server(self, transport):
-        """Patches must stay live for the whole test — a suspended generator
-        keeps them only until GC, which made this order-dependent."""
-        config = OdooConfig(
-            url="http://localhost:8069",
-            api_key="test_api_key_12345",
-            database="test_db",
-            transport=transport,
-        )
-        with (
-            patch("mcp_server_odoo.server.OdooConnection") as conn_cls,
-            patch("mcp_server_odoo.server.AccessController"),
-            patch("mcp_server_odoo.server.register_resources"),
-            patch("mcp_server_odoo.server.register_tools"),
-        ):
-            mock_connection = Mock()
-            mock_connection.is_authenticated = True
-            conn_cls.return_value = mock_connection
-            yield OdooMCPServer(config), mock_connection
-
-    def test_default_is_stdio_semantics(self):
-        with self._server("stdio") as (server, _):
-            assert server._http_transport_active is False
-
-    @pytest.mark.asyncio
-    async def test_run_http_under_default_stdio_config_keeps_connection(self):
-        """The #70 failure: an HTTP session teardown must not disconnect and
-        null the handlers just because config.transport was never set."""
-        with self._server("stdio") as (server, mock_connection):
-            with patch.object(server.app, "run_streamable_http_async", new=AsyncMock()):
-                with patch.object(server, "_apply_dynamic_instructions", new=AsyncMock()):
-                    await server.run_http()
-
-            assert server._http_transport_active is True
-
-            async with server._odoo_lifespan(server.app):
-                pass
-
-            mock_connection.disconnect.assert_not_called()
-            assert server.connection is mock_connection
-            assert server.tool_handler is not None
-
-
 class TestAllowedHostsPortlessAuthority:
     """A browser and a reverse proxy omit the default port from Host and
     Origin entirely, and the SDK matches ':*' with startswith(base + ':') —
@@ -1386,3 +1165,134 @@ class TestAllowedHostsPortlessAuthority:
         assert mw._validate_host("localhost:9000") is True
         assert mw._validate_host("localhost") is False
         assert mw._validate_host("localhost:9001") is False
+
+
+class TestOdooLifecycle:
+    """The server serves while Odoo is unreachable and connects on demand.
+
+    mcp 2.x enters the lifespan once per process; a failing lifespan stops the
+    HTTP server. So only configuration and authentication errors may fail it.
+    """
+
+    @pytest.fixture
+    def server(self):
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="test_db")
+        fake = _FakeConnection()
+        with (
+            patch("mcp_server_odoo.server.OdooConnection", return_value=fake),
+            patch(
+                "mcp_server_odoo.server.build_user_context",
+                return_value="You are connected to Odoo via MCP as:\n- User: Test",
+            ),
+        ):
+            server = OdooMCPServer(config)
+            server._fake = fake
+            yield server
+
+    @staticmethod
+    def _http_app(server):
+        return server.app.streamable_http_app(
+            transport_security=server._transport_security, host=server.config.host
+        )
+
+    @pytest.mark.asyncio
+    async def test_tools_exist_before_odoo_answers(self, server):
+        server._fake.outcome = OdooUnreachableError("Cannot reach Odoo")
+
+        tools = await server.app.list_tools()
+
+        assert {"search_records", "get_record"} <= {tool.name for tool in tools}
+
+    def test_unreachable_odoo_keeps_http_up(self, server):
+        server._fake.outcome = OdooUnreachableError("Cannot reach Odoo at http://localhost:8069")
+
+        with TestClient(self._http_app(server)) as client:
+            health = client.get("/health").json()
+
+        assert health["status"] == "unhealthy"
+        assert server._fake.connect_calls >= 1
+
+    @pytest.mark.asyncio
+    async def test_request_after_odoo_returns_connects(self, server, monkeypatch):
+        server._fake.outcome = OdooUnreachableError("Cannot reach Odoo")
+        clock = [1000.0]
+        monkeypatch.setattr("mcp_server_odoo.server.time.monotonic", lambda: clock[0])
+
+        async with server._odoo_lifespan(server.app):
+            # Odoo comes back, but the backoff holds the next attempt
+            server._fake.outcome = None
+            attempts = server._fake.connect_calls
+            with pytest.raises(OdooUnreachableError):
+                await server.ensure_connected()
+            assert server._fake.connect_calls == attempts
+
+            clock[0] += 120
+            # The tool asks the module for its enabled models; keep it offline
+            server.access_controller.get_enabled_models = Mock(return_value=[])
+            await server.app.call_tool("list_resource_templates", {})
+
+            assert server._fake.is_authenticated
+            assert server.get_health_status()["status"] == "healthy"
+            assert "- User: Test" in server.app.instructions
+
+    @pytest.mark.parametrize(
+        "connect_error,auth_error",
+        [
+            (OdooConnectionError("Cannot list databases on this server. Set ODOO_DB"), None),
+            (None, OdooConnectionError("Authentication failed")),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_configuration_and_auth_errors_stop_startup(
+        self, server, connect_error, auth_error
+    ):
+        server._fake.outcome = connect_error
+        server._fake.auth_outcome = auth_error
+
+        with pytest.raises(OdooConnectionError):
+            async with server._odoo_lifespan(server.app):
+                pass
+
+    def test_auth_error_stops_the_http_server(self, server):
+        server._fake.auth_outcome = OdooConnectionError("Authentication failed")
+
+        with pytest.raises(OdooConnectionError, match="Authentication failed"):
+            with TestClient(self._http_app(server)):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_lost_authentication_is_restored_in_place(self, server):
+        """Handlers hold the connection object, so it is reauthenticated, never replaced."""
+        await server.ensure_connected()
+        connection = server.connection
+        server._fake.is_authenticated = False
+        server._fake.auth_method = "password"
+
+        await server.ensure_connected()
+
+        assert server.connection is connection
+        assert server._fake.connect_calls == 1, "still connected: authenticate only"
+        assert server._fake.authenticate_calls == 2
+        assert server.access_controller.auth_method == "password"
+
+    @pytest.mark.asyncio
+    async def test_recovery_after_refused_first_login(self, server):
+        server._fake.auth_outcome = OdooConnectionError("Authentication failed")
+        with pytest.raises(OdooConnectionError):
+            await server.ensure_connected()
+
+        server._fake.auth_outcome = None
+        await server.ensure_connected()
+
+        assert server.get_health_status()["status"] == "healthy"
+        assert {"search_records"} <= {tool.name for tool in await server.app.list_tools()}
+
+    def test_http_requests_share_one_connection(self, server):
+        """Issue #70: the connection outlives every request and session."""
+        with TestClient(self._http_app(server)) as client:
+            client.get("/health")
+            client.get("/health")
+            assert server._fake.connect_calls == 1
+            assert server._fake.disconnect_calls == 0
+
+        assert server._fake.disconnect_calls == 1
