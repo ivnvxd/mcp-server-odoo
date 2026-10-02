@@ -15,7 +15,7 @@ class TestWriteTools:
 
     @pytest.fixture
     def mock_app(self):
-        """Create mock FastMCP app."""
+        """Create mock MCPServer app."""
         app = Mock()
         app.tool = Mock(side_effect=lambda **kwargs: lambda func: func)
         return app
@@ -367,10 +367,10 @@ class TestWriteToolsIntegration:
 
     @pytest.fixture
     def real_app(self):
-        """Create real FastMCP app."""
-        from mcp.server.fastmcp import FastMCP
+        """Create real MCPServer app."""
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP("test-app")
+        return MCPServer("test-app")
 
     @pytest.fixture
     def real_tool_handler(self, real_app, real_connection, real_access_controller, real_config):
@@ -739,9 +739,9 @@ class TestCallModelMethodIntegration:
 
     @pytest.fixture
     def real_app(self):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP("test-app")
+        return MCPServer("test-app")
 
     @pytest.fixture
     def real_tool_handler(self, real_app, real_connection, real_access_controller, real_config):
@@ -911,9 +911,9 @@ class TestPostMessageMCPIntegration:
 
     @pytest.fixture
     def mcp_app(self):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP("test-app-mcp")
+        return MCPServer("test-app-mcp")
 
     @pytest.fixture
     def mcp_tool_handler(self, mcp_app, mcp_connection, mcp_access_controller, mcp_config):

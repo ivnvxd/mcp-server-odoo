@@ -1,7 +1,7 @@
 """MCP resource handlers for Odoo data access.
 
 This module implements MCP resources for accessing Odoo data through
-standardized URIs using FastMCP decorators.
+standardized URIs using MCPServer decorators.
 
 Binary/attachment reads buffer the full content into a single MCP response,
 so ``resources/read`` on ``odoo://{model}/record/{id}/{field}`` or
@@ -22,10 +22,9 @@ import xmlrpc.client
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 from urllib.parse import unquote
 
-from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.lowlevel.helper_types import ReadResourceContents
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import Annotations
-from pydantic import AnyUrl
 
 from .access_control import (
     AccessControlError,
@@ -196,7 +195,7 @@ class OdooResourceHandler:
 
     def __init__(
         self,
-        app: FastMCP,
+        app: MCPServer,
         connection: OdooConnection,
         access_controller: AccessController,
         config: OdooConfig,
@@ -204,7 +203,7 @@ class OdooResourceHandler:
         """Initialize resource handler.
 
         Args:
-            app: FastMCP application instance
+            app: MCPServer application instance
             connection: Odoo connection instance
             access_controller: Access control instance
             config: Odoo configuration instance
@@ -226,7 +225,7 @@ class OdooResourceHandler:
                 logger.debug(f"Failed to send ctx info: {message}")
 
     def _register_resources(self):
-        """Register all resource handlers with FastMCP."""
+        """Register all resource handlers with the MCPServer."""
         # Resources with parameters (like {model}) are registered as templates,
         # not concrete resources, so they won't show in list_resources().
 
@@ -351,7 +350,7 @@ class OdooResourceHandler:
     def _register_concrete_resources(self):
         """Register concrete resources for enabled models.
 
-        Note: In the current FastMCP implementation, resources with parameters
+        Note: In the current MCPServer implementation, resources with parameters
         are registered as templates and won't show in list_resources().
         This is expected behavior - use list_resource_templates() to see them.
         """
@@ -360,47 +359,44 @@ class OdooResourceHandler:
         pass
 
     def _install_binary_read_override(self):
-        """Install a low-level ``resources/read`` handler for the binary schemes.
+        """Serve the two binary URI schemes with a mimeType per read.
 
-        SDK investigation (mcp 1.27, 2026-07-14):
+        SDK background (mcp 2.2, 2026-10-02): ``MCPServer`` fixes a
+        template's ``mimeType`` at registration time, so a decorated template
+        function cannot vary it per read. ``MCPServer._handle_read_resource``
+        answers ``resources/read`` through the public ``read_resource()``
+        method and takes each item's ``mime_type`` from its return value. This
+        replaces that method on the app INSTANCE with a dispatcher that serves
+        ``odoo://{model}/record/{id}/{field}`` and ``odoo://attachment/{id}``
+        itself and hands every other URI to the class implementation. It needs
+        no private attribute and works on any ``MCPServer`` instance.
 
-        * FastMCP fixes a template's ``mimeType`` at registration time —
-          ``FastMCP.read_resource`` always returns ``resource.mime_type`` and
-          ``FunctionResource`` JSON-serializes any non-str/bytes return, so a
-          decorated function cannot vary the mimeType per read. The chosen
-          approach is (b): re-register the low-level ``ReadResourceRequest``
-          handler (``app._mcp_server.read_resource()`` — private attr, no
-          public hook in mcp 1.27) with a dispatcher that serves the two
-          binary URI schemes itself, returning ``ReadResourceContents`` with
-          the per-read mimeType, and delegates every other URI to
-          ``FastMCP.read_resource`` unchanged.
-        * Template precedence is safe: FastMCP matches ``{param}`` as
-          ``[^/]+`` (no slash), so the 3-segment ``odoo://{model}/record/{id}``
-          template can never capture ``record_id="5/image_128"`` — the 3- and
-          4-segment templates match disjoint URI sets.
-        * Repeated installs are safe: the low-level decorator REPLACES
-          ``request_handlers[ReadResourceRequest]`` (plain dict assignment)
-          and the dispatcher delegates through ``FastMCP.read_resource`` —
-          never the previously installed handler — so a duplicate install
-          can replace the dispatcher but never chain onto or recurse into
-          it. The owner sentinel below skips a re-install by the SAME
-          handler; a DIFFERENT handler (fresh registration on a reused app)
-          intentionally replaces the dispatcher so reads go through the
-          live connection.
+        * Template precedence is safe: ``{param}`` matches ``[^/]+`` (no
+          slash), so the 3-segment ``odoo://{model}/record/{id}`` template can
+          never capture ``record_id="5/image_128"`` — the 3- and 4-segment
+          templates match disjoint URI sets.
+        * Repeated installs are safe: the dispatcher delegates to the CLASS
+          method, never to a previously installed dispatcher, so a duplicate
+          install replaces it but never chains onto or recurses into it. The
+          owner sentinel skips a re-install by the SAME handler; a DIFFERENT
+          handler (fresh registration on a reused app) intentionally replaces
+          the dispatcher so reads go through the live connection.
         """
-        low_level = getattr(self.app, "_mcp_server", None)
-        if low_level is None:
-            # Only mocked FastMCP apps (unit tests) lack _mcp_server; if this
-            # ever fired in production, binary reads would degrade to the
-            # decorated template functions with a static octet-stream
-            # mimeType — warn so the degradation is not silent.
-            logger.warning("Low-level server unavailable; dynamic binary mimeTypes not installed")
+        if getattr(self.app, "_odoo_binary_override_owner", None) is self:
             return
-        if getattr(low_level, "_odoo_binary_override_owner", None) is self:
+        class_read_resource = getattr(type(self.app), "read_resource", None)
+        if class_read_resource is None:
+            # Only mocked apps (unit tests) lack it; if this ever fired in
+            # production, binary reads would degrade to the decorated template
+            # functions with a static octet-stream mimeType — warn so the
+            # degradation is not silent.
+            logger.warning(
+                "MCPServer.read_resource unavailable; dynamic binary mimeTypes not installed"
+            )
             return
+        app = self.app
 
-        @low_level.read_resource()
-        async def read_resource_dispatch(uri: AnyUrl) -> Iterable[ReadResourceContents]:
+        async def read_resource(uri, context=None) -> Iterable[ReadResourceContents]:
             uri_str = str(uri)
             # ids pass as the RAW matched strings so the handlers stay the
             # single validation site shared with the decorated
@@ -416,9 +412,11 @@ class OdooResourceHandler:
             if attachment_match:
                 content, mimetype = await self._handle_attachment_read(attachment_match.group(1))
                 return [ReadResourceContents(content=content, mime_type=mimetype)]
-            return await self.app.read_resource(uri)
+            return await class_read_resource(app, uri, context)
 
-        low_level._odoo_binary_override_owner = self
+        # An instance attribute shadows the method for this app only
+        app.read_resource = read_resource  # ty: ignore[invalid-assignment]
+        app._odoo_binary_override_owner = self
 
     @staticmethod
     def _decode_binary_value(value: Any) -> bytes:
@@ -1739,15 +1737,15 @@ class OdooResourceHandler:
 
 
 def register_resources(
-    app: FastMCP,
+    app: MCPServer,
     connection: OdooConnection,
     access_controller: AccessController,
     config: OdooConfig,
 ) -> OdooResourceHandler:
-    """Register all Odoo resources with the FastMCP app.
+    """Register all Odoo resources with the MCPServer app.
 
     Args:
-        app: FastMCP application instance
+        app: MCPServer application instance
         connection: Odoo connection instance
         access_controller: Access control instance
         config: Odoo configuration instance

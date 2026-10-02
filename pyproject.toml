@@ -31,14 +31,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    # 1.27 is the floor: _preseed_session_manager passes
-    # StreamableHTTPSessionManager(session_idle_timeout=...), which does not
-    # exist before it — under a resolved 1.26.x wheel the HTTP transport
-    # crashes at startup whenever ODOO_MCP_SESSION_IDLE_TIMEOUT is set.
-    "mcp>=1.27.0,<2",
+    # 2.2 is the floor: MCPServer, run_streamable_http_async(session_idle_timeout=...)
+    # and the public read_resource()/call_tool() overrides the server relies on.
+    "mcp>=2.2,<3",
     "python-dotenv>=1.0.0",
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
+    # mcp 2.x requires pydantic 2.12 or later
+    "pydantic>=2.12",
 ]
 
 [project.urls]

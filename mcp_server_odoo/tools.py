@@ -14,7 +14,7 @@ from ast import literal_eval as _parse_python_literal
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Union
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 
 from .access_control import (
@@ -344,7 +344,7 @@ class OdooToolHandler:
 
     def __init__(
         self,
-        app: FastMCP,
+        app: MCPServer,
         connection: OdooConnection,
         access_controller: AccessController,
         config: OdooConfig,
@@ -352,7 +352,7 @@ class OdooToolHandler:
         """Initialize tool handler.
 
         Args:
-            app: FastMCP application instance
+            app: MCPServer application instance
             connection: Odoo connection instance
             access_controller: Access control instance
             config: Odoo configuration instance
@@ -891,15 +891,15 @@ class OdooToolHandler:
                 logger.debug(f"Failed to send ctx warning: {message}")
 
     def _register_tools(self):
-        """Register all tool handlers with FastMCP."""
+        """Register all tool handlers with the MCPServer."""
 
         @self.app.tool(
             title="Search Records",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=True,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
             ),
         )
         async def search_records(
@@ -944,10 +944,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Get Record",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def get_record(
@@ -995,10 +995,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Get Fields",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def get_fields(
@@ -1031,10 +1031,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Get Current Context",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def get_current_context(ctx: Optional[Context] = None) -> CurrentContextResult:
@@ -1054,10 +1054,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="List Models",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def list_models(ctx: Optional[Context] = None) -> ModelsResult:
@@ -1073,10 +1073,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="List Resource Templates",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def list_resource_templates(ctx: Optional[Context] = None) -> ResourceTemplatesResult:
@@ -1095,10 +1095,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Create Record",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=False,
-                openWorldHint=True,
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=True,
             ),
         )
         async def create_record(
@@ -1121,10 +1121,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Update Record",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=True,
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
             ),
         )
         async def update_record(
@@ -1149,10 +1149,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Delete Record",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=True,
-                idempotentHint=False,
-                openWorldHint=False,
+                read_only_hint=False,
+                destructive_hint=True,
+                idempotent_hint=False,
+                open_world_hint=False,
             ),
         )
         async def delete_record(
@@ -1175,10 +1175,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Post Message",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=False,
-                openWorldHint=True,
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=True,
             ),
         )
         async def post_message(
@@ -1230,10 +1230,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Aggregate Records",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=True,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
             ),
         )
         async def aggregate_records(
@@ -1322,10 +1322,10 @@ class OdooToolHandler:
             @self.app.tool(
                 title="Call Model Method",
                 annotations=ToolAnnotations(
-                    readOnlyHint=False,
-                    destructiveHint=True,
-                    idempotentHint=False,
-                    openWorldHint=True,
+                    read_only_hint=False,
+                    destructive_hint=True,
+                    idempotent_hint=False,
+                    open_world_hint=True,
                 ),
             )
             async def call_model_method(
@@ -2906,15 +2906,15 @@ class OdooToolHandler:
 
 
 def register_tools(
-    app: FastMCP,
+    app: MCPServer,
     connection: OdooConnection,
     access_controller: AccessController,
     config: OdooConfig,
 ) -> OdooToolHandler:
-    """Register all Odoo tools with the FastMCP app.
+    """Register all Odoo tools with the MCPServer app.
 
     Args:
-        app: FastMCP application instance
+        app: MCPServer application instance
         connection: Odoo connection instance
         access_controller: Access control instance
         config: Odoo configuration instance

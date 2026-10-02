@@ -532,7 +532,7 @@ class TestDynamicInstructionsE2E:
             assert "Datetime handling:" in instructions
 
             result = await client.call_tool("get_current_context", {})
-            structured = result.structuredContent
+            structured = result.structured_content
             assert structured is not None
             assert structured["login"] == "admin"
             # The tool text is exactly the dynamic block inside the instructions
@@ -560,21 +560,17 @@ class TestBinaryResourcesE2E:
         )
 
     async def _read_resource(self, app, uri: str):
-        """Invoke the registered low-level resources/read handler."""
-        from mcp import types
+        """Read through the in-memory MCP client: the full resources/read path."""
+        from mcp import Client
 
-        handler = app._mcp_server.request_handlers[types.ReadResourceRequest]
-        request = types.ReadResourceRequest(
-            method="resources/read",
-            params=types.ReadResourceRequestParams(uri=uri),
-        )
-        result = await handler(request)
-        return result.root.contents[0]
+        async with Client(app, mode="legacy") as client:
+            result = await client.read_resource(uri)
+        return result.contents[0]
 
     @pytest.mark.asyncio
     async def test_binary_field_and_attachment_round_trip(self, config_full_access):
         from mcp import types
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         from mcp_server_odoo.resources import register_resources
 
@@ -607,7 +603,7 @@ class TestBinaryResourcesE2E:
                 },
             )
 
-            app = FastMCP("test-binary-e2e")
+            app = MCPServer("test-binary-e2e")
             register_resources(app, connection, access_controller, config_full_access)
             tool_handler = OdooToolHandler(
                 MagicMock(), connection, access_controller, config_full_access
@@ -618,7 +614,7 @@ class TestBinaryResourcesE2E:
                 app, f"odoo://res.partner/record/{partner_id}/image_1920"
             )
             assert isinstance(content, types.BlobResourceContents)
-            assert content.mimeType == "image/png"
+            assert content.mime_type == "image/png"
             stored = connection.read("res.partner", [partner_id], ["image_1920"])[0]["image_1920"]
             if is_binary_payload_dict(stored):  # Odoo 20: {content, size, filename}
                 stored = stored["content"]
@@ -627,7 +623,7 @@ class TestBinaryResourcesE2E:
             # Attachment: correct mimeType, blob byte-identical to the upload
             content = await self._read_resource(app, f"odoo://attachment/{attachment_id}")
             assert isinstance(content, types.BlobResourceContents)
-            assert content.mimeType == "application/pdf"
+            assert content.mime_type == "application/pdf"
             assert base64.b64decode(content.blob) == self.PDF_BYTES
 
             # get_record never inlines base64: binary value arrives as a URI

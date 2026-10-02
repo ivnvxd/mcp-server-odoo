@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcp_server_odoo.access_control import (
     AccessControlError,
@@ -29,8 +29,8 @@ class TestOdooToolHandler:
 
     @pytest.fixture
     def mock_app(self):
-        """Create a mock FastMCP app."""
-        app = MagicMock(spec=FastMCP)
+        """Create a mock MCPServer app."""
+        app = MagicMock(spec=MCPServer)
         # Store registered tools
         app._tools = {}
 
@@ -84,7 +84,7 @@ class TestOdooToolHandler:
         assert handler.config is valid_config
 
     def test_tools_registered(self, handler, mock_app):
-        """Test that all tools are registered with FastMCP."""
+        """Test that all tools are registered with MCPServer."""
         expected_tools = {
             "search_records",
             "get_record",
@@ -1325,7 +1325,7 @@ class TestGetFieldsTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -1531,7 +1531,7 @@ class TestRelatedSummaries:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -1766,7 +1766,7 @@ class TestAggregateRecordsTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2134,7 +2134,7 @@ class TestAggregateRecordsReadGroupFallback:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2581,7 +2581,7 @@ class TestYoloListModels:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2709,7 +2709,7 @@ class TestCreateRecordTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2819,7 +2819,7 @@ class TestUpdateRecordTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2948,7 +2948,7 @@ class TestDeleteRecordTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3053,7 +3053,7 @@ class TestPostMessageTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3326,7 +3326,7 @@ class TestListModelsTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3438,7 +3438,7 @@ class TestSearchRecordReturnValue:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3512,7 +3512,7 @@ class TestToolEdgeCases:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3603,7 +3603,7 @@ class TestParseDomainInput:
 
     @pytest.fixture
     def handler(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
         app.tool = lambda **kwargs: lambda func: app._tools.setdefault(func.__name__, func)
         connection = MagicMock(spec=OdooConnection)
@@ -3700,7 +3700,7 @@ class TestCallModelMethodTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -4379,7 +4379,7 @@ class TestSensitiveFieldStripping:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -4576,7 +4576,7 @@ class TestBinaryValueSwap:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -4869,7 +4869,7 @@ class TestOdoo20BinaryReads:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5005,7 +5005,7 @@ class TestBinarySwapAndRelatedBudget:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5129,7 +5129,7 @@ class TestDomainIntBounds:
 
     @pytest.fixture
     def handler(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5171,7 +5171,7 @@ class TestAllFieldsMetadataReportsTotal:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5221,7 +5221,7 @@ class TestResourceTemplateReadFilter:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5268,7 +5268,7 @@ class TestDeeplyNestedParameterStrings:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5455,7 +5455,7 @@ class TestAttachmentGatingInTools:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5640,7 +5640,7 @@ class TestAttachmentGatingOnWrites:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5763,7 +5763,7 @@ class TestSmartDefaultsEmptySelection:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):

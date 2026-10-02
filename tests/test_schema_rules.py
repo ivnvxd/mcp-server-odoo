@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterator, List, Set, Tuple
 from unittest.mock import MagicMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcp_server_odoo.access_control import AccessController
 from mcp_server_odoo.config import OdooConfig
@@ -98,7 +98,7 @@ async def tool_schemas() -> Dict[str, Dict[str, Any]]:
         yolo_mode="true",
         enable_method_calls=True,
     )
-    app = FastMCP("schema-rules")
+    app = MCPServer("schema-rules")
     OdooToolHandler(app, MagicMock(spec=OdooConnection), MagicMock(spec=AccessController), config)
     tools = await app.list_tools()
     return {

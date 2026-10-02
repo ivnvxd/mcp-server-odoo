@@ -5,8 +5,9 @@ import xmlrpc.client
 from unittest.mock import Mock
 
 import pytest
-from mcp import types
-from mcp.server.fastmcp import FastMCP
+from mcp import Client, types
+from mcp.server.mcpserver import MCPServer
+from mcp.shared.exceptions import MCPError
 
 from mcp_server_odoo.access_control import (
     AccessControlError,
@@ -117,8 +118,8 @@ def mock_access_controller():
 
 @pytest.fixture
 def mock_app():
-    """Create mock FastMCP app that captures decorated resource functions."""
-    app = Mock(spec=FastMCP)
+    """Create mock MCPServer app that captures decorated resource functions."""
+    app = Mock(spec=MCPServer)
     app._resources = {}
 
     def resource_decorator(*args, **kwargs):
@@ -1224,30 +1225,35 @@ class TestDecoratedResourceFallbacks:
 
 
 class TestBinaryReadOverride:
-    """Test the low-level resources/read override (dynamic mimeTypes)."""
+    """Test the resources/read override (dynamic mimeTypes) through the MCP client."""
 
     @pytest.fixture
     def real_app_handler(self, mock_connection, mock_access_controller, mock_config):
-        """Handler registered on a real FastMCP app (installs the override)."""
-        app = FastMCP("test-app")
+        """Handler registered on a real MCPServer app (installs the override)."""
+        app = MCPServer("test-app")
         handler = OdooResourceHandler(app, mock_connection, mock_access_controller, mock_config)
         return app, handler
 
     async def _read(self, app, uri: str):
-        """Invoke the registered low-level resources/read handler."""
-        handler = app._mcp_server.request_handlers[types.ReadResourceRequest]
-        request = types.ReadResourceRequest(
-            method="resources/read",
-            params=types.ReadResourceRequestParams(uri=uri),
-        )
-        result = await handler(request)
-        return result.root.contents
+        """Read through the in-memory MCP client: the full resources/read path.
+
+        A protocol error is re-raised after the client closes, so that it does
+        not leave the client's task group wrapped in an exception group.
+        """
+        async with Client(app, mode="legacy") as client:
+            try:
+                result = await client.read_resource(uri)
+            except MCPError as e:
+                error = e
+            else:
+                return result.contents
+        raise error
 
     @pytest.mark.asyncio
     async def test_new_templates_advertised(self, real_app_handler):
         app, _handler = real_app_handler
         templates = await app.list_resource_templates()
-        uris = [t.uriTemplate for t in templates]
+        uris = [t.uri_template for t in templates]
         assert "odoo://{model}/record/{record_id}/{field}" in uris
         assert "odoo://attachment/{attachment_id}" in uris
 
@@ -1265,7 +1271,7 @@ class TestBinaryReadOverride:
         assert len(contents) == 1
         content = contents[0]
         assert isinstance(content, types.BlobResourceContents)
-        assert content.mimeType == "image/png"
+        assert content.mime_type == "image/png"
         # Blob round-trips byte-identical
         assert base64.b64decode(content.blob) == PNG_BYTES
 
@@ -1286,7 +1292,7 @@ class TestBinaryReadOverride:
         contents = await self._read(app, "odoo://attachment/42")
 
         assert isinstance(contents[0], types.TextResourceContents)
-        assert contents[0].mimeType == "text/uri-list"
+        assert contents[0].mime_type == "text/uri-list"
         assert contents[0].text == "https://example.com/doc"
 
     @pytest.mark.asyncio
@@ -1296,7 +1302,7 @@ class TestBinaryReadOverride:
         CPython's int() conversion-limit text never escapes."""
         app, _handler = real_app_handler
 
-        with pytest.raises(ValidationError) as exc_info:
+        with pytest.raises(MCPError) as exc_info:
             await self._read(app, f"odoo://res.partner/record/{'1' * 5000}/image_128")
 
         message = str(exc_info.value)
@@ -1326,7 +1332,7 @@ class TestBinaryReadOverride:
         contents = await self._read(app, "odoo://ir.attachment/record/42/datas")
 
         assert isinstance(contents[0], types.TextResourceContents)
-        assert contents[0].mimeType == "text/uri-list"
+        assert contents[0].mime_type == "text/uri-list"
         assert contents[0].text == "https://example.com/doc"
 
     @pytest.mark.asyncio
@@ -1347,18 +1353,17 @@ class TestBinaryReadOverride:
     ):
         """Same handler skips re-install; a new handler replaces, not chains."""
         app, handler = real_app_handler
-        installed = app._mcp_server.request_handlers[types.ReadResourceRequest]
+        installed = app.read_resource
 
         # Re-install by the SAME handler is a no-op (owner sentinel)
         handler._install_binary_read_override()
-        assert app._mcp_server.request_handlers[types.ReadResourceRequest] is installed
+        assert app.read_resource is installed
 
-        # A DIFFERENT handler on the same app replaces the dispatcher
-        # (plain dict assignment in the SDK — never chains onto the old one)
+        # A DIFFERENT handler on the same app replaces the dispatcher (it
+        # delegates to the class method — never chains onto the old one)
         new_handler = OdooResourceHandler(app, mock_connection, mock_access_controller, mock_config)
-        replaced = app._mcp_server.request_handlers[types.ReadResourceRequest]
-        assert replaced is not installed
-        assert app._mcp_server._odoo_binary_override_owner is new_handler
+        assert app.read_resource is not installed
+        assert app._odoo_binary_override_owner is new_handler
 
         # Reads still resolve normally through the replacement dispatcher
         mock_connection.search.return_value = [1]
@@ -1402,8 +1407,8 @@ class TestResourceIntegration:
         # Create access controller
         access_controller = AccessController(test_config)
 
-        # Create FastMCP app
-        app = FastMCP("test-app")
+        # Create MCPServer app
+        app = MCPServer("test-app")
 
         # Register resources
         handler = register_resources(app, connection, access_controller, test_config)
@@ -1438,8 +1443,8 @@ class TestResourceIntegration:
         # Create access controller
         access_controller = AccessController(test_config)
 
-        # Create FastMCP app
-        app = FastMCP("test-app")
+        # Create MCPServer app
+        app = MCPServer("test-app")
 
         # Register resources
         handler = register_resources(app, connection, access_controller, test_config)
@@ -1464,8 +1469,8 @@ class TestResourceIntegration:
         # Create access controller
         access_controller = AccessController(test_config)
 
-        # Create FastMCP app
-        app = FastMCP("test-app")
+        # Create MCPServer app
+        app = MCPServer("test-app")
 
         # Register resources
         handler = register_resources(app, connection, access_controller, test_config)

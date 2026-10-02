@@ -1,6 +1,6 @@
 """MCP Server implementation for Odoo.
 
-This module provides the FastMCP server that exposes Odoo data
+This module provides the MCPServer that exposes Odoo data
 and functionality through the Model Context Protocol.
 """
 
@@ -8,7 +8,7 @@ import asyncio
 import contextlib
 from typing import Any, Dict, Optional, Tuple
 
-from mcp.server import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from . import __version__
@@ -60,7 +60,7 @@ SERVER_VERSION = __version__
 class OdooMCPServer:
     """Main MCP server class for Odoo integration.
 
-    This class manages the FastMCP server instance and maintains
+    This class manages the MCPServer instance and maintains
     the connection to Odoo. The server lifecycle is managed by
     establishing connection before starting and cleaning up on exit.
     """
@@ -102,16 +102,17 @@ class OdooMCPServer:
         # Configure transport security for DNS rebinding protection. Left as
         # None (no allowed_hosts configured), the SDK enables protection only
         # for a loopback bind and leaves it OFF for any other host — see
-        # _build_transport_security.
-        transport_security = self._build_transport_security()
+        # _build_transport_security. mcp 2.x takes it (and the host that
+        # decides the loopback default) at run time — see run_http().
+        self._transport_security = self._build_transport_security()
 
-        # Create FastMCP instance with server metadata
-        self.app = FastMCP(
+        # Create the MCPServer instance with server metadata. Without
+        # version=, serverInfo.version is the SDK's own version.
+        self.app = MCPServer(
             name="odoo-mcp-server",
             instructions="MCP server for accessing and managing Odoo ERP data through the Model Context Protocol",
+            version=SERVER_VERSION,
             lifespan=self._odoo_lifespan,
-            host=self.config.host,
-            transport_security=transport_security,
         )
 
         # Pristine static instructions, captured before any personalization.
@@ -143,8 +144,8 @@ class OdooMCPServer:
         logger.info(f"Initialized Odoo MCP Server v{SERVER_VERSION}")
 
     @contextlib.asynccontextmanager
-    async def _odoo_lifespan(self, app: FastMCP):
-        """Manage Odoo connection lifecycle for FastMCP.
+    async def _odoo_lifespan(self, app: MCPServer):
+        """Manage Odoo connection lifecycle for the MCPServer.
 
         Sets up connection, registers resources/tools before serving.
 
@@ -329,11 +330,11 @@ class OdooMCPServer:
             # reading self.app.instructions here would compound the context
             # block on repeated calls, since it reflects prior mutations.
             static = self._static_instructions
-            # FastMCP (mcp 1.27) exposes `instructions` as a read-only
+            # MCPServer (mcp 2.2) exposes `instructions` as a read-only
             # property over the low-level server attribute — assign the
-            # private attr, which create_initialization_options() reads
-            # when the transport starts.
-            self.app._mcp_server.instructions = f"{static}\n\n{context}" if static else context
+            # private attr. stdio freezes it in create_initialization_options()
+            # when the transport starts; HTTP reads it per session.
+            self.app._lowlevel_server.instructions = f"{static}\n\n{context}" if static else context
         except Exception as e:
             logger.warning(f"Dynamic instructions unavailable, keeping static instructions: {e}")
 
@@ -365,14 +366,15 @@ class OdooMCPServer:
     async def run_http(self):
         """Run the server using streamable HTTP transport.
 
-        Takes no host/port. FastMCP is constructed with ``config.host`` and
-        decides transport security from it right there (``__init__`` passes
-        ``transport_security``, which is None whenever ODOO_MCP_ALLOWED_HOSTS
-        is empty — the SDK then auto-enables its loopback allowlist, or not,
-        from that host). Reassigning ``app.settings.host`` here would move the
-        bind without moving that decision, so a caller could bind loopback
-        with protection left off. The bind and the decision stay tied to one
-        value instead.
+        Takes no host/port: the bind and the transport-security decision both
+        follow ``config.host``. With ``transport_security`` None (no
+        ODOO_MCP_ALLOWED_HOSTS), the SDK auto-enables its loopback allowlist,
+        or not, from the same ``host`` argument it binds, so the two cannot
+        drift apart.
+
+        ``session_idle_timeout`` is passed even when unset: mcp 2.x defaults
+        to evicting sessions idle for 30 minutes, while an unset
+        ODOO_MCP_SESSION_IDLE_TIMEOUT means sessions never expire.
         """
         host = self.config.host
         port = self.config.port
@@ -380,10 +382,18 @@ class OdooMCPServer:
             logger.info(f"Starting MCP server with HTTP transport on {host}:{port}...")
             self._http_transport_active = True
             self._warn_if_exposed(host)
-            self.app.settings.port = port
             await self._apply_dynamic_instructions()
-            self._preseed_session_manager()
-            await self.app.run_streamable_http_async()
+            if self.config.session_idle_timeout is not None:
+                logger.info(
+                    "Streamable-http session idle timeout enabled: %.0fs",
+                    self.config.session_idle_timeout,
+                )
+            await self.app.run_streamable_http_async(
+                host=host,
+                port=port,
+                transport_security=self._transport_security,
+                session_idle_timeout=self.config.session_idle_timeout,
+            )
         except KeyboardInterrupt:
             logger.info("Server interrupted by user")
         except (OdooConnectionError, ConfigurationError):
@@ -391,35 +401,6 @@ class OdooMCPServer:
         except Exception as e:
             context = ErrorContext(operation="server_run_http")
             error_handler.handle_error(e, context=context)
-
-    def _preseed_session_manager(self) -> None:
-        """Apply ODOO_MCP_SESSION_IDLE_TIMEOUT to the streamable-http transport.
-
-        The SDK's StreamableHTTPSessionManager supports evicting idle sessions
-        (freeing their transport state, which otherwise accumulates until
-        process restart), but FastMCP does not yet expose the parameter. Its session manager is created lazily in
-        streamable_http_app(), so constructing it here first — mirroring the
-        arguments FastMCP would pass, plus the timeout — makes FastMCP reuse
-        this instance. Remove once FastMCP plumbs session_idle_timeout through.
-        """
-        if self.config.session_idle_timeout is None:
-            return
-
-        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-
-        self.app._session_manager = StreamableHTTPSessionManager(
-            app=self.app._mcp_server,
-            event_store=self.app._event_store,
-            retry_interval=self.app._retry_interval,
-            json_response=self.app.settings.json_response,
-            stateless=self.app.settings.stateless_http,
-            security_settings=self.app.settings.transport_security,
-            session_idle_timeout=self.config.session_idle_timeout,
-        )
-        logger.info(
-            "Streamable-http session idle timeout enabled: %.0fs",
-            self.config.session_idle_timeout,
-        )
 
     def _build_transport_security(self) -> Optional[TransportSecuritySettings]:
         """Build DNS-rebinding-protection settings from ODOO_MCP_ALLOWED_HOSTS.
