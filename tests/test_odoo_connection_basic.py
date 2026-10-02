@@ -4,14 +4,23 @@ These tests use a real Odoo server at localhost:8069 to test
 connection management and error handling.
 """
 
+import http.client
 import os
 import socket
-from unittest.mock import MagicMock, patch
+import urllib.error
+import xmlrpc.client
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 from mcp_server_odoo.config import OdooConfig
-from mcp_server_odoo.odoo_connection import OdooConnection, OdooConnectionError, create_connection
+from mcp_server_odoo.odoo_connection import (
+    OdooConnection,
+    OdooConnectionError,
+    OdooUnreachableError,
+    _is_unreachable,
+    create_connection,
+)
 
 
 @pytest.fixture
@@ -227,11 +236,11 @@ class TestOdooConnectionConnect:
         """Test connection to invalid host."""
         conn = OdooConnection(invalid_config)
 
-        with pytest.raises(OdooConnectionError) as exc_info:
+        with pytest.raises(OdooUnreachableError) as exc_info:
             conn.connect()
 
         error_msg = str(exc_info.value)
-        assert "Connection failed" in error_msg or "Connection test failed" in error_msg
+        assert "Cannot reach Odoo" in error_msg
 
     def test_connect_timeout(self, test_config):
         """Test connection timeout handling."""
@@ -242,11 +251,11 @@ class TestOdooConnectionConnect:
         with patch("socket.socket") as mock_socket:
             mock_socket.side_effect = socket.timeout("Timeout")
 
-            with pytest.raises(OdooConnectionError) as exc_info:
+            with pytest.raises(OdooUnreachableError) as exc_info:
                 conn.connect()
 
             error_msg = str(exc_info.value)
-            assert "Connection failed" in error_msg or "Connection test failed" in error_msg
+            assert "Cannot reach Odoo" in error_msg
 
 
 class TestOdooConnectionDisconnect:
@@ -425,9 +434,9 @@ class TestOdooConnectionIntegration:
         """Test listing databases from real server."""
         with create_connection(test_config) as conn:
             try:
-                db_list = conn.db_proxy.list()
-            except Exception as e:
-                if "Access Denied" in str(e):
+                db_list = conn.list_databases()
+            except OdooConnectionError as e:
+                if "Cannot list databases" in str(e):
                     pytest.skip("Database listing is disabled on this server")
                 raise
             assert isinstance(db_list, list)
@@ -475,3 +484,74 @@ class TestSensitiveValueRedaction:
         described = _describe_args([{"image_1920": blob, "name": "x"}])
         assert described[0]["image_1920"] == "<str len=5000>"
         assert described[0]["name"] == "x"
+
+
+class TestUnreachableClassification:
+    """Odoo not answering (network, gateway) is told apart from a refusal.
+
+    The server keeps running while Odoo is unreachable and retries on the next
+    request, but stops at startup on configuration and authentication errors.
+    """
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ConnectionRefusedError(61, "Connection refused"),
+            socket.timeout("timed out"),
+            urllib.error.URLError(ConnectionRefusedError(61, "refused")),
+            urllib.error.HTTPError("http://odoo", 502, "Bad Gateway", {}, None),
+            xmlrpc.client.ProtocolError("odoo/xmlrpc", 503, "Service Unavailable", {}),
+            http.client.RemoteDisconnected("closed"),
+        ],
+    )
+    def test_network_and_gateway_errors_are_unreachable(self, error):
+        assert _is_unreachable(error) is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            urllib.error.HTTPError("http://odoo", 403, "Forbidden", {}, None),
+            xmlrpc.client.ProtocolError("odoo/xmlrpc", 404, "Not Found", {}),
+            xmlrpc.client.Fault(3, "Access Denied"),
+            ValueError("bad"),
+        ],
+    )
+    def test_refusals_are_not_unreachable(self, error):
+        assert _is_unreachable(error) is False
+
+    def test_connect_raises_unreachable_when_odoo_does_not_answer(self):
+        config = OdooConfig(url="http://odoo.test:8069", api_key="k", database="db")
+        conn = OdooConnection(config)
+        common = Mock()
+        common.version.side_effect = ConnectionRefusedError(61, "Connection refused")
+        with patch.object(
+            conn._performance_manager, "get_optimized_connection", return_value=common
+        ):
+            with pytest.raises(OdooUnreachableError, match="Cannot reach Odoo"):
+                conn.connect()
+
+    def test_listing_with_both_routes_unreachable_is_unreachable(self):
+        config = OdooConfig(url="http://odoo.test:8069", api_key="k", database=None)
+        conn = OdooConnection(config)
+        conn._connected = True
+        conn._db_proxy = Mock()
+        conn._db_proxy.list.side_effect = ConnectionRefusedError(61, "Connection refused")
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError(ConnectionRefusedError(61, "refused")),
+        ):
+            with pytest.raises(OdooUnreachableError):
+                conn.list_databases()
+
+    def test_disabled_listing_stays_a_configuration_error(self):
+        config = OdooConfig(url="http://odoo.test:8069", api_key="k", database=None)
+        conn = OdooConnection(config)
+        conn._connected = True
+        conn._db_proxy = Mock()
+        conn._db_proxy.list.side_effect = xmlrpc.client.Fault(1, "Invalid service name: db")
+        not_found = urllib.error.HTTPError("http://odoo.test", 404, "Not Found", {}, None)
+        with patch("urllib.request.urlopen", side_effect=not_found):
+            with pytest.raises(OdooConnectionError) as exc_info:
+                conn.list_databases()
+        assert not isinstance(exc_info.value, OdooUnreachableError)
+        assert "Set ODOO_DB" in str(exc_info.value)

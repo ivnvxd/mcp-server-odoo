@@ -1,6 +1,6 @@
 """Tests for write operation tools."""
 
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
 
@@ -15,7 +15,7 @@ class TestWriteTools:
 
     @pytest.fixture
     def mock_app(self):
-        """Create mock FastMCP app."""
+        """Create mock MCPServer app."""
         app = Mock()
         app.tool = Mock(side_effect=lambda **kwargs: lambda func: func)
         return app
@@ -111,12 +111,11 @@ class TestWriteTools:
         model = "res.partner"
         record_id = 123
         values = {"email": "updated@example.com"}
-        # First read call (existence check) returns just ID
-        existing_record = {"id": record_id}
-        # Second read call returns essential fields
+        # Existence check counts the record; the read returns essential fields
         updated_record = {"id": record_id, "display_name": "Test Partner"}
 
-        mock_connection.read.side_effect = [[existing_record], [updated_record]]
+        mock_connection.search_count.return_value = 1
+        mock_connection.read.return_value = [updated_record]
         mock_connection.write.return_value = True
 
         # Execute
@@ -131,12 +130,10 @@ class TestWriteTools:
         )
         assert "Successfully updated" in result["message"]
         mock_connection.write.assert_called_once_with(model, [record_id], values)
-        # Verify both read calls with correct parameters
-        expected_calls = [
-            call(model, [record_id], ["id"]),  # Existence check
-            call(model, [record_id], ["id", "display_name"]),  # Essential fields
-        ]
-        mock_connection.read.assert_has_calls(expected_calls)
+        mock_connection.search_count.assert_called_once_with(
+            model, [["id", "=", record_id]], context={"active_test": False}
+        )
+        mock_connection.read.assert_called_once_with(model, [record_id], ["id", "display_name"])
 
     @pytest.mark.asyncio
     async def test_update_record_model_without_name_field(self, tool_handler, mock_connection):
@@ -144,29 +141,36 @@ class TestWriteTools:
         model = "mail.activity"
         record_id = 42
         values = {"summary": "Updated summary"}
-        existing_record = {"id": record_id}
         updated_record = {"id": record_id, "display_name": "Activity #42"}
 
-        mock_connection.read.side_effect = [[existing_record], [updated_record]]
+        mock_connection.search_count.return_value = 1
+        mock_connection.read.return_value = [updated_record]
         mock_connection.write.return_value = True
 
         result = await tool_handler._handle_update_record_tool(model, record_id, values)
 
         assert result["success"] is True
         # Only universally available fields requested — no 'name'
-        expected_calls = [
-            call(model, [record_id], ["id"]),
-            call(model, [record_id], ["id", "display_name"]),
-        ]
-        mock_connection.read.assert_has_calls(expected_calls)
+        mock_connection.read.assert_called_once_with(model, [record_id], ["id", "display_name"])
 
     @pytest.mark.asyncio
     async def test_update_record_not_found(self, tool_handler, mock_connection):
         """Test update record that doesn't exist."""
-        mock_connection.read.return_value = []
+        mock_connection.search_count.return_value = 0
 
         with pytest.raises(ValidationError, match="Record not found"):
             await tool_handler._handle_update_record_tool("res.partner", 999, {"name": "Test"})
+        mock_connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_record_not_found_despite_echoed_id(self, tool_handler, mock_connection):
+        """Odoo 19 echoes {'id': x} for a read of only 'id', even for a missing x."""
+        mock_connection.search_count.return_value = 0
+        mock_connection.read.return_value = [{"id": 999}]
+
+        with pytest.raises(ValidationError, match="Record not found"):
+            await tool_handler._handle_update_record_tool("res.partner", 999, {"name": "Test"})
+        mock_connection.write.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_update_record_no_values(self, tool_handler):
@@ -390,10 +394,10 @@ class TestWriteToolsIntegration:
 
     @pytest.fixture
     def real_app(self):
-        """Create real FastMCP app."""
-        from mcp.server.fastmcp import FastMCP
+        """Create real MCPServer app."""
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP("test-app")
+        return MCPServer("test-app")
 
     @pytest.fixture
     def real_tool_handler(self, real_app, real_connection, real_access_controller, real_config):
@@ -762,9 +766,9 @@ class TestCallModelMethodIntegration:
 
     @pytest.fixture
     def real_app(self):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP("test-app")
+        return MCPServer("test-app")
 
     @pytest.fixture
     def real_tool_handler(self, real_app, real_connection, real_access_controller, real_config):
@@ -934,9 +938,9 @@ class TestPostMessageMCPIntegration:
 
     @pytest.fixture
     def mcp_app(self):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP("test-app-mcp")
+        return MCPServer("test-app-mcp")
 
     @pytest.fixture
     def mcp_tool_handler(self, mcp_app, mcp_connection, mcp_access_controller, mcp_config):

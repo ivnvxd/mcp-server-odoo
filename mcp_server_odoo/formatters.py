@@ -14,6 +14,7 @@ from .uri_schema import (
     BINARY_FIELD_TYPES,
     build_binary_uri,
     build_record_uri,
+    is_binary_payload_dict,
 )
 
 logger = logging.getLogger(__name__)
@@ -288,8 +289,11 @@ class RecordFormatter:
             # payment_term_details); bin_size does not apply to them, so
             # emitting a URI would drop the payload AND advertise a link whose
             # read fails with "Unexpected binary value type: dict". Mirrors
-            # the guard in tools._replace_binary_values.
-            if not isinstance(value, (str, bytes, bytearray, xmlrpc.client.Binary)):
+            # the guard in tools._replace_binary_values. Odoo 20's
+            # {content, size} read shape is the one dict that is a payload.
+            if not is_binary_payload_dict(value) and not isinstance(
+                value, (str, bytes, bytearray, xmlrpc.client.Binary)
+            ):
                 return self._truncate_value(str(value))
             if record_id is None:
                 return "[Binary data]"

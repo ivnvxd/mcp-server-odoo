@@ -1,9 +1,10 @@
 """Test suite for MCP tools functionality."""
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcp_server_odoo.access_control import (
     AccessControlError,
@@ -29,8 +30,8 @@ class TestOdooToolHandler:
 
     @pytest.fixture
     def mock_app(self):
-        """Create a mock FastMCP app."""
-        app = MagicMock(spec=FastMCP)
+        """Create a mock MCPServer app."""
+        app = MagicMock(spec=MCPServer)
         # Store registered tools
         app._tools = {}
 
@@ -84,7 +85,7 @@ class TestOdooToolHandler:
         assert handler.config is valid_config
 
     def test_tools_registered(self, handler, mock_app):
-        """Test that all tools are registered with FastMCP."""
+        """Test that all tools are registered with MCPServer."""
         expected_tools = {
             "search_records",
             "get_record",
@@ -1091,9 +1092,10 @@ class TestOdooToolHandler:
 
     @pytest.mark.asyncio
     async def test_search_records_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that search_records sends context logging."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         # Setup mocks
@@ -1116,17 +1118,17 @@ class TestOdooToolHandler:
             ctx=ctx,
         )
 
-        # Verify context.info was called with operation name and model
-        ctx.info.assert_called()
-        first_call_msg = ctx.info.call_args_list[0][0][0]
-        assert "res.partner" in first_call_msg
-        assert "Searching" in first_call_msg
+        # Step messages go to the server log, not through ctx (mcp 2.x
+        # deprecates client logging)
+        assert any("Searching" in m and "res.partner" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_record_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that get_record sends context logging."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         mock_access_controller.validate_model_access.return_value = None
@@ -1138,14 +1140,12 @@ class TestOdooToolHandler:
         get_record = mock_app._tools["get_record"]
         await get_record(model="res.partner", record_id=1, fields=["name"], ctx=ctx)
 
-        ctx.info.assert_called()
-        first_msg = ctx.info.call_args_list[0][0][0]
-        assert "res.partner" in first_msg
-        assert "Getting" in first_msg
+        assert any("Getting" in m and "res.partner" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_list_models_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that list_models sends context info messages.
 
@@ -1154,6 +1154,7 @@ class TestOdooToolHandler:
         notifications can be flushed after the response under stdio transport,
         which strict MCP clients treat as a protocol violation.)
         """
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         from mcp_server_odoo.access_control import ModelPermissions
@@ -1174,17 +1175,16 @@ class TestOdooToolHandler:
         list_models = mock_app._tools["list_models"]
         await list_models(ctx=ctx)
 
-        ctx.info.assert_called()
-        first_msg = ctx.info.call_args_list[0][0][0]
-        assert "Listing" in first_msg
-        info_messages = [call.args[0] for call in ctx.info.call_args_list]
-        assert any("Enriching" in msg for msg in info_messages)
+        assert any("Listing" in m for m in caplog.messages)
+        assert any("Enriching" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_record_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app, valid_config
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog, valid_config
     ):
         """Test that create_record sends context logging."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         mock_access_controller.validate_model_access.return_value = None
@@ -1196,16 +1196,15 @@ class TestOdooToolHandler:
         create_record = mock_app._tools["create_record"]
         await create_record(model="res.partner", values={"name": "New Record"}, ctx=ctx)
 
-        ctx.info.assert_called()
-        first_msg = ctx.info.call_args_list[0][0][0]
-        assert "res.partner" in first_msg
-        assert "Creating" in first_msg
+        assert any("Creating" in m and "res.partner" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_search_all_fields_sends_warning(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that searching with __all__ fields sends a warning via context."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         mock_access_controller.validate_model_access.return_value = None
@@ -1217,9 +1216,8 @@ class TestOdooToolHandler:
         search_records = mock_app._tools["search_records"]
         await search_records(model="res.partner", fields=["__all__"], limit=10, ctx=ctx)
 
-        ctx.warning.assert_called()
-        warning_msg = ctx.warning.call_args_list[0][0][0]
-        assert "ALL fields" in warning_msg
+        assert any("ALL fields" in m for m in caplog.messages)
+        ctx.warning.assert_not_called()
 
         # Verify that __all__ was translated to fields=None (fetch all fields from Odoo)
         mock_connection.read.assert_called_once()
@@ -1263,9 +1261,8 @@ class TestOdooToolHandler:
         result = await search_records(model="res.partner", fields=["name"], limit=10, ctx=ctx)
         assert result.total == 1
         assert len(result.records) == 1
-        # search_records reports every step through _ctx_info; the attempts
-        # were made and their RuntimeErrors swallowed by its except branch.
-        ctx.info.assert_called()
+        # The steps are logged on the server; the broken context is never used
+        ctx.info.assert_not_called()
         ctx.report_progress.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1326,7 +1323,7 @@ class TestGetFieldsTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -1532,7 +1529,7 @@ class TestRelatedSummaries:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -1767,7 +1764,7 @@ class TestAggregateRecordsTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2135,7 +2132,7 @@ class TestAggregateRecordsReadGroupFallback:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2582,7 +2579,7 @@ class TestYoloListModels:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2710,7 +2707,7 @@ class TestCreateRecordTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2820,7 +2817,7 @@ class TestUpdateRecordTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2858,12 +2855,8 @@ class TestUpdateRecordTool:
     @pytest.mark.asyncio
     async def test_update_record_success(self, handler, mock_connection, mock_app):
         """Test successful record update with existence check and result read."""
-        # First read: existence check returns [{"id": 10}]
-        # Second read: post-update fetch returns updated record
-        mock_connection.read.side_effect = [
-            [{"id": 10}],  # existence check
-            [{"id": 10, "display_name": "Updated Partner"}],  # post-update read
-        ]
+        mock_connection.search_count.return_value = 1  # existence check
+        mock_connection.read.return_value = [{"id": 10, "display_name": "Updated Partner"}]
         mock_connection.write.return_value = True
         mock_connection.build_record_url.return_value = "http://localhost:8069/odoo/res.partner/10"
 
@@ -2878,9 +2871,10 @@ class TestUpdateRecordTool:
         assert "10" in result.message
 
         # Verify existence check then post-update read
-        assert mock_connection.read.call_count == 2
-        mock_connection.read.assert_any_call("res.partner", [10], ["id"])
-        mock_connection.read.assert_any_call("res.partner", [10], ["id", "display_name"])
+        mock_connection.search_count.assert_called_once_with(
+            "res.partner", [["id", "=", 10]], context={"active_test": False}
+        )
+        mock_connection.read.assert_called_once_with("res.partner", [10], ["id", "display_name"])
         mock_connection.write.assert_called_once_with(
             "res.partner", [10], {"name": "Updated Partner"}
         )
@@ -2888,7 +2882,7 @@ class TestUpdateRecordTool:
     @pytest.mark.asyncio
     async def test_update_record_not_found(self, handler, mock_connection, mock_app):
         """Test update_record when record doesn't exist."""
-        mock_connection.read.return_value = []  # existence check fails
+        mock_connection.search_count.return_value = 0  # existence check fails
         update_record = mock_app._tools["update_record"]
         with pytest.raises(ValidationError, match="Record not found"):
             await update_record(model="res.partner", record_id=999, values={"name": "Test"})
@@ -3081,7 +3075,7 @@ class TestDeleteRecordTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3186,7 +3180,7 @@ class TestPostMessageTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3459,7 +3453,7 @@ class TestListModelsTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3571,7 +3565,7 @@ class TestSearchRecordReturnValue:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3645,7 +3639,7 @@ class TestToolEdgeCases:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3736,7 +3730,7 @@ class TestParseDomainInput:
 
     @pytest.fixture
     def handler(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
         app.tool = lambda **kwargs: lambda func: app._tools.setdefault(func.__name__, func)
         connection = MagicMock(spec=OdooConnection)
@@ -3833,7 +3827,7 @@ class TestCallModelMethodTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -4512,7 +4506,7 @@ class TestSensitiveFieldStripping:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -4709,7 +4703,7 @@ class TestBinaryValueSwap:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -4996,12 +4990,149 @@ class TestBinaryValueSwap:
         assert result.record["datas"] is False
 
 
+class TestOdoo20BinaryReads:
+    """Odoo 20 dropped ``bin_size``: a populated binary reads as
+    ``{content, size, filename}``, so the payload must stay out of the read."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=MCPServer)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.get_major_version.return_value = 20
+        connection.fields_get.return_value = {
+            "id": {"type": "integer", "string": "ID", "store": True},
+            "name": {"type": "char", "string": "Name", "store": True},
+            "image_1920": {"type": "image", "string": "Image", "store": True},
+            # Computed from image_1920; Odoo 20 cannot search a non-stored field
+            "avatar_128": {"type": "image", "string": "Avatar", "store": False},
+        }
+        return connection
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection):
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", default_limit=10, max_limit=100
+        )
+        return OdooToolHandler(mock_app, mock_connection, MagicMock(spec=AccessController), config)
+
+    @pytest.mark.asyncio
+    async def test_get_record_leaves_binary_out_of_the_read(self, handler, mock_connection):
+        mock_connection.read.return_value = [{"id": 7, "name": "A"}]
+        mock_connection.search.return_value = [7]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert mock_connection.read.call_args[0][2] == ["name"]
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+        mock_connection.search.assert_called_once_with(
+            "res.partner",
+            [["id", "in", [7]], ["image_1920", "!=", False]],
+            context={"active_test": False},
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_record_empty_binary_is_false(self, handler, mock_connection):
+        mock_connection.read.return_value = [{"id": 7, "name": "A"}]
+        mock_connection.search.return_value = []
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert result.record["image_1920"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_record_all_fields_reads_named_non_binary_fields(
+        self, handler, mock_connection
+    ):
+        mock_connection.read.return_value = [{"id": 7, "name": "A"}]
+        mock_connection.search.return_value = [7]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["__all__"])
+
+        assert sorted(mock_connection.read.call_args[0][2]) == ["id", "name"]
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+        assert result.record["avatar_128"] == "odoo://res.partner/record/7/avatar_128"
+        # Only the stored binary is searched
+        assert mock_connection.search.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_non_stored_binary_gets_uri_without_search(self, handler, mock_connection):
+        mock_connection.read.return_value = [{"id": 7}]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["avatar_128"])
+
+        assert mock_connection.read.call_args[0][2] == ["id"]
+        assert result.record["avatar_128"] == "odoo://res.partner/record/7/avatar_128"
+        mock_connection.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_search_records_flags_each_record(self, handler, mock_connection):
+        mock_connection.search_count.return_value = 2
+        # First call: the record search. Second call: the populated-binary flag.
+        mock_connection.search.side_effect = [[1, 2], [2]]
+        mock_connection.read.return_value = [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]
+
+        result = await handler._handle_search_tool(
+            "res.partner", None, ["name", "image_1920"], 10, 0, None
+        )
+
+        records = result["records"]
+        assert records[0]["image_1920"] is False
+        assert records[1]["image_1920"] == "odoo://res.partner/record/2/image_1920"
+        assert mock_connection.read.call_args[0][2] == ["name"]
+
+    @pytest.mark.asyncio
+    async def test_odoo_19_keeps_the_bin_size_read(self, handler, mock_connection):
+        mock_connection.get_major_version.return_value = 19
+        mock_connection.read.return_value = [{"id": 7, "name": "A", "image_1920": "12.5 KB"}]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert mock_connection.read.call_args[0][2:] == (["name", "image_1920"], {"bin_size": True})
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+        mock_connection.search.assert_not_called()
+
+    def test_url_attachment_raw_gets_the_attachment_uri(self, handler):
+        """Odoo 20 has no datas; a URL attachment's empty raw still gets its URI."""
+        record = {"id": 5, "type": "url", "raw": False}
+
+        handler._replace_binary_values("ir.attachment", record, {"raw"})
+
+        assert record["raw"] == "odoo://attachment/5"
+
+    @pytest.mark.asyncio
+    async def test_payload_dict_from_unknown_version_becomes_uri(self, handler, mock_connection):
+        """Odoo Online reports saas~19.x but can already return the 20 shape."""
+        mock_connection.get_major_version.return_value = None
+        mock_connection.read.return_value = [
+            {"id": 7, "name": "A", "image_1920": {"content": "aGk=", "size": 2}}
+        ]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+
+
 class TestBinarySwapAndRelatedBudget:
     """Guards on the two read-path enrichments added in 0.8.0."""
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5125,7 +5256,7 @@ class TestDomainIntBounds:
 
     @pytest.fixture
     def handler(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5167,7 +5298,7 @@ class TestAllFieldsMetadataReportsTotal:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5217,7 +5348,7 @@ class TestResourceTemplateReadFilter:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5264,7 +5395,7 @@ class TestDeeplyNestedParameterStrings:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5451,7 +5582,7 @@ class TestAttachmentGatingInTools:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5636,7 +5767,7 @@ class TestAttachmentGatingOnWrites:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5759,7 +5890,7 @@ class TestSmartDefaultsEmptySelection:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):

@@ -65,7 +65,7 @@ class TestYoloModeTools:
 
     @pytest.fixture
     def mock_app(self):
-        """Create mock FastMCP app."""
+        """Create mock MCPServer app."""
         mock = MagicMock()
         return mock
 

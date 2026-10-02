@@ -826,6 +826,16 @@ class TestBinaryTypedNonPayloadValues:
         )
         assert "amount_total" in result
 
+    def test_odoo_20_payload_dict_gets_a_uri_not_base64(self, formatter):
+        """Odoo 20 has no bin_size: a populated binary reads as {content, size}."""
+        content = "QUJD" * 600
+        record = {"id": 5, "name": "S0005", "image_1920": {"content": content, "size": 1800}}
+
+        result = formatter.format_record(record, {"image_1920": {"type": "binary"}})
+
+        assert "odoo://sale.order/record/5/image_1920" in result
+        assert content[:100] not in result
+
     def test_list_valued_binary_renders_value_not_uri(self, formatter):
         record = {"id": 5, "name": "S0005", "widget": [1, 2, 3]}
 

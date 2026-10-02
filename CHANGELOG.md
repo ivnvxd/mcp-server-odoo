@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **`update_records` tool**: bulk-update multiple records of the same model with the same values in one call, instead of looping `update_record`. Capped at 100 record IDs per call; fails the whole batch (no partial write) if any id doesn't exist.
+- **Odoo 20 in CI**: the YOLO integration tests run on Odoo 19 and 20. The README documents the `rpc` scope that Odoo 20 requires for API keys, and the MCP User group.
+
+### Changed
+- **mcp 2.x**: the server runs on `mcp>=2.2,<3` and no longer depends on `pydantic-settings`. `serverInfo.version` reports the package version instead of the SDK version. Over HTTP, the SDK refuses request bodies over 4 MiB with 413, and holds at most 10,000 open sessions.
+- **Odoo unreachable at startup**: the server keeps running, `/health` reports unhealthy, and the next request connects. A configuration or authentication error still stops startup.
+- **Tool step messages**: they go to the server log only. mcp 2.x deprecates log notifications to the client.
+
+### Fixed
+- **Database auto-selection on Odoo 20**: databases are listed through `/web/database/list`, with `/xmlrpc/db` as the fallback. Odoo 20 removed the `db` RPC service. If both fail, the error asks for `ODOO_DB`.
+- **Binary fields on Odoo 20**: `get_record` and `search_records` returned populated binaries as inline base64, because Odoo 20 dropped `bin_size`. Binaries now stay out of the read, and a search per stored binary field finds the populated records. Non-stored binaries such as `avatar_128` always get their URI.
+- **Binary resources on Odoo 20**: the `ODOO_MCP_MAX_BINARY_SIZE` check runs before the fetch again. It reads the `file_size` of the backing attachment, or uses `field.size` for a plain column. The record and search resources no longer pull binary payloads.
+- **Attachments on Odoo 20**: Odoo 20 removed `ir.attachment.datas`, so every `odoo://attachment/{id}` read failed. The attachment resource reads `raw` on Odoo 20. `raw` and `db_datas` get the attachment URI in tool results, as `datas` does.
+- **MCP module refusals**: a 403 at startup shows the reason from the module, for example a user outside the MCP User group. This works for API keys and for passwords. Faults 400, 403 and 429 from the module's XML-RPC proxy reach the model with their text, not as connection errors.
+- **`update_record` on a missing id**: the existence check read only `id`. Odoo 19 and later echo that back for a missing record, so the call failed later with a generic write error. It now counts the record and reports "Record not found". Archived records still count as existing.
 
 ## [0.8.0] - 2026-08-26
 

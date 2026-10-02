@@ -5,8 +5,9 @@ import xmlrpc.client
 from unittest.mock import Mock
 
 import pytest
-from mcp import types
-from mcp.server.fastmcp import FastMCP
+from mcp import Client, types
+from mcp.server.mcpserver import MCPServer
+from mcp.shared.exceptions import MCPError
 
 from mcp_server_odoo.access_control import (
     AccessControlError,
@@ -40,7 +41,8 @@ def _binary_search_read_dispatch(record_rows, attachment_rows):
 
     The handler issues two search_read calls: the record fetch (target model)
     and the ir.attachment mimetype lookup. Dispatch on the model; pass an
-    Exception instance as ``attachment_rows`` to make the lookup raise.
+    Exception instance as ``attachment_rows`` to make the lookup raise, or as
+    ``record_rows`` to prove the record payload is never fetched.
     """
 
     def side_effect(model, domain, fields=None, **kwargs):
@@ -48,6 +50,8 @@ def _binary_search_read_dispatch(record_rows, attachment_rows):
             if isinstance(attachment_rows, Exception):
                 raise attachment_rows
             return attachment_rows
+        if isinstance(record_rows, Exception):
+            raise record_rows
         return record_rows
 
     return side_effect
@@ -114,8 +118,8 @@ def mock_access_controller():
 
 @pytest.fixture
 def mock_app():
-    """Create mock FastMCP app that captures decorated resource functions."""
-    app = Mock(spec=FastMCP)
+    """Create mock MCPServer app that captures decorated resource functions."""
+    app = Mock(spec=MCPServer)
     app._resources = {}
 
     def resource_decorator(*args, **kwargs):
@@ -1221,30 +1225,35 @@ class TestDecoratedResourceFallbacks:
 
 
 class TestBinaryReadOverride:
-    """Test the low-level resources/read override (dynamic mimeTypes)."""
+    """Test the resources/read override (dynamic mimeTypes) through the MCP client."""
 
     @pytest.fixture
     def real_app_handler(self, mock_connection, mock_access_controller, mock_config):
-        """Handler registered on a real FastMCP app (installs the override)."""
-        app = FastMCP("test-app")
+        """Handler registered on a real MCPServer app (installs the override)."""
+        app = MCPServer("test-app")
         handler = OdooResourceHandler(app, mock_connection, mock_access_controller, mock_config)
         return app, handler
 
     async def _read(self, app, uri: str):
-        """Invoke the registered low-level resources/read handler."""
-        handler = app._mcp_server.request_handlers[types.ReadResourceRequest]
-        request = types.ReadResourceRequest(
-            method="resources/read",
-            params=types.ReadResourceRequestParams(uri=uri),
-        )
-        result = await handler(request)
-        return result.root.contents
+        """Read through the in-memory MCP client: the full resources/read path.
+
+        A protocol error is re-raised after the client closes, so that it does
+        not leave the client's task group wrapped in an exception group.
+        """
+        async with Client(app, mode="legacy") as client:
+            try:
+                result = await client.read_resource(uri)
+            except MCPError as e:
+                error = e
+            else:
+                return result.contents
+        raise error
 
     @pytest.mark.asyncio
     async def test_new_templates_advertised(self, real_app_handler):
         app, _handler = real_app_handler
         templates = await app.list_resource_templates()
-        uris = [t.uriTemplate for t in templates]
+        uris = [t.uri_template for t in templates]
         assert "odoo://{model}/record/{record_id}/{field}" in uris
         assert "odoo://attachment/{attachment_id}" in uris
 
@@ -1262,7 +1271,7 @@ class TestBinaryReadOverride:
         assert len(contents) == 1
         content = contents[0]
         assert isinstance(content, types.BlobResourceContents)
-        assert content.mimeType == "image/png"
+        assert content.mime_type == "image/png"
         # Blob round-trips byte-identical
         assert base64.b64decode(content.blob) == PNG_BYTES
 
@@ -1283,7 +1292,7 @@ class TestBinaryReadOverride:
         contents = await self._read(app, "odoo://attachment/42")
 
         assert isinstance(contents[0], types.TextResourceContents)
-        assert contents[0].mimeType == "text/uri-list"
+        assert contents[0].mime_type == "text/uri-list"
         assert contents[0].text == "https://example.com/doc"
 
     @pytest.mark.asyncio
@@ -1293,7 +1302,7 @@ class TestBinaryReadOverride:
         CPython's int() conversion-limit text never escapes."""
         app, _handler = real_app_handler
 
-        with pytest.raises(ValidationError) as exc_info:
+        with pytest.raises(MCPError) as exc_info:
             await self._read(app, f"odoo://res.partner/record/{'1' * 5000}/image_128")
 
         message = str(exc_info.value)
@@ -1323,7 +1332,7 @@ class TestBinaryReadOverride:
         contents = await self._read(app, "odoo://ir.attachment/record/42/datas")
 
         assert isinstance(contents[0], types.TextResourceContents)
-        assert contents[0].mimeType == "text/uri-list"
+        assert contents[0].mime_type == "text/uri-list"
         assert contents[0].text == "https://example.com/doc"
 
     @pytest.mark.asyncio
@@ -1344,18 +1353,17 @@ class TestBinaryReadOverride:
     ):
         """Same handler skips re-install; a new handler replaces, not chains."""
         app, handler = real_app_handler
-        installed = app._mcp_server.request_handlers[types.ReadResourceRequest]
+        installed = app.read_resource
 
         # Re-install by the SAME handler is a no-op (owner sentinel)
         handler._install_binary_read_override()
-        assert app._mcp_server.request_handlers[types.ReadResourceRequest] is installed
+        assert app.read_resource is installed
 
-        # A DIFFERENT handler on the same app replaces the dispatcher
-        # (plain dict assignment in the SDK — never chains onto the old one)
+        # A DIFFERENT handler on the same app replaces the dispatcher (it
+        # delegates to the class method — never chains onto the old one)
         new_handler = OdooResourceHandler(app, mock_connection, mock_access_controller, mock_config)
-        replaced = app._mcp_server.request_handlers[types.ReadResourceRequest]
-        assert replaced is not installed
-        assert app._mcp_server._odoo_binary_override_owner is new_handler
+        assert app.read_resource is not installed
+        assert app._odoo_binary_override_owner is new_handler
 
         # Reads still resolve normally through the replacement dispatcher
         mock_connection.search.return_value = [1]
@@ -1399,8 +1407,8 @@ class TestResourceIntegration:
         # Create access controller
         access_controller = AccessController(test_config)
 
-        # Create FastMCP app
-        app = FastMCP("test-app")
+        # Create MCPServer app
+        app = MCPServer("test-app")
 
         # Register resources
         handler = register_resources(app, connection, access_controller, test_config)
@@ -1435,8 +1443,8 @@ class TestResourceIntegration:
         # Create access controller
         access_controller = AccessController(test_config)
 
-        # Create FastMCP app
-        app = FastMCP("test-app")
+        # Create MCPServer app
+        app = MCPServer("test-app")
 
         # Register resources
         handler = register_resources(app, connection, access_controller, test_config)
@@ -1461,8 +1469,8 @@ class TestResourceIntegration:
         # Create access controller
         access_controller = AccessController(test_config)
 
-        # Create FastMCP app
-        app = FastMCP("test-app")
+        # Create MCPServer app
+        app = MCPServer("test-app")
 
         # Register resources
         handler = register_resources(app, connection, access_controller, test_config)
@@ -1624,6 +1632,229 @@ class TestBinarySizeCapBoundsTheFetch:
 
         # Probe did not parse, so the payload read was attempted
         assert mock_connection.search_read.call_count == 2
+
+
+class TestOdoo20BinaryResources:
+    """Odoo 20 dropped ``bin_size``: a binary reads as ``{content, size, filename}``.
+
+    The size cap must still hold before the payload is fetched, so a stored
+    field is counted with ``field.size > cap`` instead of a placeholder probe.
+    Odoo 20 cannot search a non-stored field; those keep the post-fetch check.
+    """
+
+    @pytest.fixture
+    def connection_20(self, mock_connection):
+        mock_connection.get_major_version = Mock(return_value=20)
+        mock_connection.search_count = Mock()
+        mock_connection.search_read = Mock()
+        mock_connection.fields_get.return_value = {
+            "id": {"type": "integer", "store": True},
+            "name": {"type": "char", "store": True},
+            "image_1920": {"type": "binary", "store": True},
+            "avatar_128": {"type": "image", "store": False},
+        }
+        return mock_connection
+
+    @staticmethod
+    def _payload(raw):
+        return {"content": base64.b64encode(raw).decode("ascii"), "size": len(raw)}
+
+    @pytest.mark.asyncio
+    async def test_attachment_stored_binary_over_cap_refused_before_fetch(
+        self, resource_handler, connection_20, mock_config
+    ):
+        """image_1920 lives in an ir.attachment: its file_size is the size."""
+        mock_config.max_binary_size = 1024
+        connection_20.search_count.return_value = 1  # populated
+        connection_20.search_read.side_effect = _binary_search_read_dispatch(
+            record_rows=AssertionError("payload fetched"),
+            attachment_rows=[{"id": 9, "file_size": 5000}],
+        )
+
+        with pytest.raises(ValidationError, match="limit for a single read"):
+            await resource_handler._handle_binary_field_read("res.partner", "1", "image_1920")
+
+        populated_call = connection_20.search_count.call_args_list[0]
+        assert populated_call[0] == ("res.partner", [["id", "=", 1], ["image_1920", "!=", False]])
+        assert populated_call[1] == {"context": {"active_test": False}}
+        fetched_models = [c[0][0] for c in connection_20.search_read.call_args_list]
+        assert fetched_models == ["ir.attachment"]
+
+    @pytest.mark.asyncio
+    async def test_column_binary_over_cap_refused_by_size_domain(
+        self, resource_handler, connection_20, mock_config
+    ):
+        """A plain binary column has no backing attachment; field.size answers."""
+        mock_config.max_binary_size = 1024
+        connection_20.search_count.side_effect = [1, 1]  # populated, over the cap
+        connection_20.search_read.side_effect = _binary_search_read_dispatch(
+            record_rows=AssertionError("payload fetched"), attachment_rows=[]
+        )
+
+        with pytest.raises(ValidationError, match="limit for a single read"):
+            await resource_handler._handle_binary_field_read("res.partner", "1", "image_1920")
+
+        size_call = connection_20.search_count.call_args_list[1]
+        assert size_call[0] == ("res.partner", [["id", "=", 1], ["image_1920.size", ">", 1024]])
+        assert size_call[1] == {"context": {"active_test": False}}
+
+    @pytest.mark.asyncio
+    async def test_unanswered_size_falls_back_to_post_fetch_check(
+        self, resource_handler, connection_20, mock_config
+    ):
+        """No attachment and a refused .size domain: the fetch-time check decides."""
+        mock_config.max_binary_size = 16
+        connection_20.search_count.side_effect = [
+            1,
+            OdooConnectionError("ValueError: Cannot convert ... because it is not stored"),
+        ]
+        connection_20.search_read.side_effect = _binary_search_read_dispatch(
+            record_rows=[{"id": 1, "image_1920": self._payload(b"x" * 64)}], attachment_rows=[]
+        )
+
+        with pytest.raises(ValidationError, match="limit for a single read"):
+            await resource_handler._handle_binary_field_read("res.partner", "1", "image_1920")
+
+    @pytest.mark.asyncio
+    async def test_denied_attachment_lookup_skips_the_size_domain(
+        self, resource_handler, connection_20, mock_access_controller
+    ):
+        """Standard mode without ir.attachment: the field is likely attachment-stored,
+        where Odoo 20 refuses field.size. The post-fetch check decides instead."""
+
+        def deny_attachments(model, operation):
+            if model == "ir.attachment":
+                raise AccessControlError("Model 'ir.attachment' is not enabled for MCP access.")
+
+        mock_access_controller.validate_model_access.side_effect = deny_attachments
+        connection_20.search_count.return_value = 1  # populated
+        connection_20.search_read.side_effect = _binary_search_read_dispatch(
+            record_rows=[{"id": 1, "image_1920": self._payload(PNG_BYTES)}], attachment_rows=[]
+        )
+
+        content, _ = await resource_handler._handle_binary_field_read(
+            "res.partner", "1", "image_1920"
+        )
+
+        assert content == PNG_BYTES
+        # Only the populated check: no field.size probe
+        assert connection_20.search_count.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_stored_binary_under_cap_decodes_the_dict(self, resource_handler, connection_20):
+        connection_20.search_count.return_value = 1
+        connection_20.search_read.side_effect = _binary_search_read_dispatch(
+            record_rows=[{"id": 1, "image_1920": self._payload(PNG_BYTES)}],
+            attachment_rows=[{"id": 9, "file_size": len(PNG_BYTES), "mimetype": "image/png"}],
+        )
+
+        content, mimetype = await resource_handler._handle_binary_field_read(
+            "res.partner", "1", "image_1920"
+        )
+
+        assert content == PNG_BYTES
+        assert mimetype == "image/png"
+
+    @pytest.mark.asyncio
+    async def test_empty_stored_binary_holds_no_data(self, resource_handler, connection_20):
+        connection_20.search_count.side_effect = [0, 1]  # not populated, record exists
+
+        with pytest.raises(NotFoundError, match="holds no data"):
+            await resource_handler._handle_binary_field_read("res.partner", "1", "image_1920")
+
+        connection_20.search_read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_record_is_not_found(self, resource_handler, connection_20):
+        connection_20.search_count.side_effect = [0, 0]
+
+        with pytest.raises(NotFoundError, match="Record not found"):
+            await resource_handler._handle_binary_field_read("res.partner", "1", "image_1920")
+
+    @pytest.mark.asyncio
+    async def test_non_stored_binary_uses_the_post_fetch_check(
+        self, resource_handler, connection_20, mock_config
+    ):
+        mock_config.max_binary_size = 16
+        connection_20.search_read.side_effect = _binary_search_read_dispatch(
+            record_rows=[{"id": 1, "avatar_128": self._payload(b"x" * 64)}],
+            attachment_rows=[],
+        )
+
+        with pytest.raises(ValidationError, match="limit for a single read"):
+            await resource_handler._handle_binary_field_read("res.partner", "1", "avatar_128")
+
+        connection_20.search_count.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_odoo_19_keeps_the_bin_size_probe(self, resource_handler, connection_20):
+        connection_20.get_major_version.return_value = 19
+        connection_20.search_read.side_effect = _binary_search_read_dispatch(
+            record_rows=[{"id": 1, "image_1920": base64.b64encode(PNG_BYTES).decode("ascii")}],
+            attachment_rows=[],
+        )
+
+        await resource_handler._handle_binary_field_read("res.partner", "1", "image_1920")
+
+        probe_call = connection_20.search_read.call_args_list[0]
+        assert probe_call[1] == {"context": {"active_test": False, "bin_size": True}}
+        connection_20.search_count.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_attachment_content_is_read_through_raw(self, resource_handler, connection_20):
+        """Odoo 20 removed ir.attachment.datas; raw holds the content."""
+        metadata = {
+            "id": 42,
+            "name": "a.pdf",
+            "mimetype": "application/pdf",
+            "type": "binary",
+            "url": False,
+            "file_size": 4,
+            "res_model": False,
+        }
+        connection_20.search_read.side_effect = [
+            [metadata],
+            [{"id": 42, "raw": self._payload(b"%PDF")}],
+        ]
+
+        content, mimetype = await resource_handler._handle_attachment_read("42")
+
+        assert (content, mimetype) == (b"%PDF", "application/pdf")
+        assert connection_20.search_read.call_args_list[1][0][2] == ["raw"]
+
+    def test_payload_dict_size_and_decode(self, resource_handler):
+        payload = self._payload(b"abcde")
+
+        assert resource_handler._payload_size_bytes(payload) == 5
+        assert resource_handler._decode_binary_value(payload) == b"abcde"
+
+    @pytest.mark.asyncio
+    async def test_record_resource_leaves_binaries_out_of_the_read(
+        self, resource_handler, connection_20
+    ):
+        connection_20.search.side_effect = [[1], [1]]  # the record, then the populated flag
+        connection_20.read.return_value = [{"id": 1, "name": "Acme"}]
+
+        text = await resource_handler._handle_record_retrieval("res.partner", "1")
+
+        assert "image_1920" not in connection_20.read.call_args[0][2]
+        assert "odoo://res.partner/record/1/image_1920" in text
+
+    @pytest.mark.asyncio
+    async def test_search_resource_leaves_binaries_out_of_the_read(
+        self, resource_handler, connection_20
+    ):
+        connection_20.search.side_effect = [[1, 2], [2]]
+        connection_20.search_count.return_value = 2
+        connection_20.read.return_value = [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]
+
+        text = await resource_handler._handle_search(
+            "res.partner", None, "name,image_1920", 10, 0, None
+        )
+
+        assert connection_20.read.call_args[0][2] == ["name"]
+        assert "odoo://res.partner/record/2/image_1920" in text
+        assert "odoo://res.partner/record/1/image_1920" not in text
 
 
 class TestComputedBinaryFieldsExcludedFromBulkReads:
