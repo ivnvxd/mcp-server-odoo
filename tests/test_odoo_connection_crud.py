@@ -580,6 +580,27 @@ class TestFaultCodeClassification:
         assert "Operation failed" not in message, f"{label} must not read as a transport error"
         assert "Connection error" not in message
 
+    @pytest.mark.parametrize(
+        "code,text",
+        [
+            (
+                400,
+                "The call names a database this endpoint does not serve. Select the "
+                "database through the host name or the X-Odoo-Database header.",
+            ),
+            (403, "MCP access denied: user is not a member of the MCP User group."),
+            (429, "Rate limit exceeded. Please try again later."),
+        ],
+    )
+    def test_mcp_module_codes_keep_the_module_text(self, code, text):
+        """The MCP module's proxy sends 400/403/429 with an explanation for the user."""
+        from mcp_server_odoo.odoo_connection import _raise_for_fault
+
+        with pytest.raises(OdooValidationFault) as exc:
+            _raise_for_fault(xmlrpc.client.Fault(code, text))
+
+        assert str(exc.value) == text
+
     def test_access_denied_code_stays_connection_flavored(self):
         """faultCode 3 is a rejected login — auth setup, not a record rule."""
         from mcp_server_odoo.odoo_connection import _raise_for_fault

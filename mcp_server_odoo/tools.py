@@ -14,7 +14,7 @@ from ast import literal_eval as _parse_python_literal
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Union
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 
 from .access_control import (
@@ -25,6 +25,7 @@ from .access_control import (
     attachment_scope_domain,
     check_domain_balance,
 )
+from .binary_reads import read_without_binary_payloads
 from .config import OdooConfig, max_offset_for
 from .error_handling import (
     MCPPermissionError,
@@ -59,7 +60,13 @@ from .schemas import (
     SearchResult,
     UpdateResult,
 )
-from .uri_schema import BINARY_FIELD_TYPES, URIValidationError, build_binary_uri
+from .uri_schema import (
+    ATTACHMENT_CONTENT_FIELDS,
+    BINARY_FIELD_TYPES,
+    URIValidationError,
+    build_binary_uri,
+    is_binary_payload_dict,
+)
 from .user_context import (
     context_unavailable_text,
     format_user_context,
@@ -337,7 +344,7 @@ class OdooToolHandler:
 
     def __init__(
         self,
-        app: FastMCP,
+        app: MCPServer,
         connection: OdooConnection,
         access_controller: AccessController,
         config: OdooConfig,
@@ -345,7 +352,7 @@ class OdooToolHandler:
         """Initialize tool handler.
 
         Args:
-            app: FastMCP application instance
+            app: MCPServer application instance
             connection: Odoo connection instance
             access_controller: Access control instance
             config: Odoo configuration instance
@@ -666,29 +673,27 @@ class OdooToolHandler:
         Reads pass ``bin_size=True`` so populated binaries arrive as truthy
         size placeholders (e.g. ``"12.5 KB"``) — the full bytes are fetched
         only on ``resources/read`` of the swapped URI. Empty binaries stay
-        ``False``. ``ir.attachment.datas`` gets the attachment-specific
-        ``odoo://attachment/{id}`` URI so its stored mimetype and
-        ``type='url'`` handling apply on read.
+        ``False``. An ``ir.attachment`` content field (``datas``; ``raw`` and
+        ``db_datas`` on Odoo 20, which removed ``datas``) gets the
+        attachment-specific ``odoo://attachment/{id}`` URI so its stored
+        mimetype and ``type='url'`` handling apply on read.
 
         Only keys already present in ``record`` are touched — a caller that
         requested ``fields=['name', 'type']`` must never gain an unrequested
         ``datas`` key. A ``type='url'`` attachment stores its payload as a
-        URL, so ``datas`` is ``False``; that falsy ``datas`` is still swapped,
-        but only when the record carries BOTH ``type`` and ``datas`` keys and
+        URL, so its content field is ``False``; that falsy value is still
+        swapped, but only when the record carries the ``type`` key and
         ``type == 'url'`` — the attachment resource serves the URL as
         ``text/uri-list``. Empty binary attachments (``type='binary'``,
         ``datas=False``) correctly stay ``False``; when ``type`` was not read,
-        the url-vs-empty split is unknowable, so a falsy ``datas`` is left
+        the url-vs-empty split is unknowable, so a falsy content field is left
         as-is.
         """
         rid = record_id if record_id is not None else record.get("id")
         if not isinstance(rid, int) or rid <= 0:
             return
         url_attachment = (
-            model == "ir.attachment"
-            and "type" in record
-            and "datas" in record
-            and record.get("type") == "url"
+            model == "ir.attachment" and "type" in record and record.get("type") == "url"
         )
         for name in binary_names:
             if name not in record:
@@ -702,7 +707,11 @@ class OdooToolHandler:
             # for a URI would both drop data the caller explicitly asked for
             # and advertise a URI whose read fails ("Unexpected binary value
             # type: dict"), so any non-string payload passes through untouched.
-            if not (isinstance(value, str) and value) and not (name == "datas" and url_attachment):
+            # The one dict that IS a payload is Odoo 20's {content, size}
+            # shape, which a server without bin_size returns for every
+            # populated binary.
+            is_payload = (isinstance(value, str) and value) or is_binary_payload_dict(value)
+            if not is_payload and not (name in ATTACHMENT_CONTENT_FIELDS and url_attachment):
                 continue
             try:
                 record[name] = build_binary_uri(model, rid, name)
@@ -866,31 +875,28 @@ class OdooToolHandler:
         return parsed
 
     async def _ctx_info(self, ctx, message: str):
-        """Send info to MCP client context if available."""
-        if ctx:
-            try:
-                await ctx.info(message)
-            except Exception:
-                logger.debug(f"Failed to send ctx info: {message}")
+        """Log a step message on the server.
+
+        Under mcp 1.x this also reached the client as a log notification.
+        mcp 2.x deprecates client logging (SEP-2577), so the step messages
+        stay in the server log. ``ctx`` is kept for the call sites.
+        """
+        logger.debug(message)
 
     async def _ctx_warning(self, ctx, message: str):
-        """Send warning to MCP client context if available."""
-        if ctx:
-            try:
-                await ctx.warning(message)
-            except Exception:
-                logger.debug(f"Failed to send ctx warning: {message}")
+        """Log a cautionary step message on the server (see ``_ctx_info``)."""
+        logger.info(message)
 
     def _register_tools(self):
-        """Register all tool handlers with FastMCP."""
+        """Register all tool handlers with the MCPServer."""
 
         @self.app.tool(
             title="Search Records",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=True,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
             ),
         )
         async def search_records(
@@ -935,10 +941,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Get Record",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def get_record(
@@ -986,10 +992,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Get Fields",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def get_fields(
@@ -1022,10 +1028,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Get Current Context",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def get_current_context(ctx: Optional[Context] = None) -> CurrentContextResult:
@@ -1045,10 +1051,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="List Models",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def list_models(ctx: Optional[Context] = None) -> ModelsResult:
@@ -1064,10 +1070,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="List Resource Templates",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def list_resource_templates(ctx: Optional[Context] = None) -> ResourceTemplatesResult:
@@ -1086,10 +1092,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Create Record",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=False,
-                openWorldHint=True,
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=True,
             ),
         )
         async def create_record(
@@ -1112,10 +1118,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Update Record",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=True,
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
             ),
         )
         async def update_record(
@@ -1140,10 +1146,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Delete Record",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=True,
-                idempotentHint=False,
-                openWorldHint=False,
+                read_only_hint=False,
+                destructive_hint=True,
+                idempotent_hint=False,
+                open_world_hint=False,
             ),
         )
         async def delete_record(
@@ -1166,10 +1172,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Post Message",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=False,
-                openWorldHint=True,
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=True,
             ),
         )
         async def post_message(
@@ -1221,10 +1227,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Aggregate Records",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=True,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
             ),
         )
         async def aggregate_records(
@@ -1313,10 +1319,10 @@ class OdooToolHandler:
             @self.app.tool(
                 title="Call Model Method",
                 annotations=ToolAnnotations(
-                    readOnlyHint=False,
-                    destructiveHint=True,
-                    idempotentHint=False,
-                    openWorldHint=True,
+                    read_only_hint=False,
+                    destructive_hint=True,
+                    idempotent_hint=False,
+                    open_world_hint=True,
                 ),
             )
             async def call_model_method(
@@ -1485,18 +1491,17 @@ class OdooToolHandler:
                     )
                     logger.debug(f"Fetching all fields for {model} search")
 
-                # Read records. bin_size: binary fields come back as size
-                # placeholders instead of full base64 blobs — populated ones
-                # are swapped for odoo:// resource URIs below.
+                # Read records without binary payloads (see read_without_binary_payloads);
+                # populated binaries are swapped for odoo:// URIs below.
                 records = []
                 withheld_fields: Set[str] = set()
                 if record_ids:
                     records = await asyncio.to_thread(
-                        self.connection.read,
+                        read_without_binary_payloads,
+                        self.connection,
                         model,
                         record_ids,
                         fields_to_fetch,
-                        {"bin_size": True},
                     )
                     if fields_to_fetch is None:
                         # Bulk all-fields read (["__all__"] or smart-default
@@ -1607,11 +1612,14 @@ class OdooToolHandler:
                     # Specific fields requested
                     logger.debug(f"Fetching specific fields for {model}: {fields}")
 
-                # Read the record. bin_size: binary fields come back as size
-                # placeholders instead of full base64 blobs — populated ones
-                # are swapped for odoo:// resource URIs below.
+                # Read the record without binary payloads (see read_without_binary_payloads);
+                # populated binaries are swapped for odoo:// URIs below.
                 records = await asyncio.to_thread(
-                    self.connection.read, model, [record_id], fields_to_fetch, {"bin_size": True}
+                    read_without_binary_payloads,
+                    self.connection,
+                    model,
+                    [record_id],
+                    fields_to_fetch,
                 )
 
                 if not records:
@@ -2235,9 +2243,16 @@ class OdooToolHandler:
                             values["res_model"], "attachment would be moved to"
                         )
 
-                # Check if record exists (only fetch ID to verify existence)
-                existing = await asyncio.to_thread(self.connection.read, model, [record_id], ["id"])
-                if not existing:
+                # Check that the record exists. A read of only "id" cannot:
+                # Odoo 19 echoes {"id": x} back for a missing x. active_test=False
+                # so that an archived record can still be updated (unarchived).
+                existing_count = await asyncio.to_thread(
+                    self.connection.search_count,
+                    model,
+                    [["id", "=", record_id]],
+                    context={"active_test": False},
+                )
+                if not existing_count:
                     raise NotFoundError(f"Record not found: {model} with ID {record_id}")
 
                 # Update the record
@@ -2888,15 +2903,15 @@ class OdooToolHandler:
 
 
 def register_tools(
-    app: FastMCP,
+    app: MCPServer,
     connection: OdooConnection,
     access_controller: AccessController,
     config: OdooConfig,
 ) -> OdooToolHandler:
-    """Register all Odoo tools with the FastMCP app.
+    """Register all Odoo tools with the MCPServer app.
 
     Args:
-        app: FastMCP application instance
+        app: MCPServer application instance
         connection: Odoo connection instance
         access_controller: Access control instance
         config: Odoo configuration instance

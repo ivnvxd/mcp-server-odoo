@@ -14,7 +14,7 @@ import uuid
 
 import pytest
 import requests
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcp_server_odoo.access_control import AccessController
 from mcp_server_odoo.config import OdooConfig
@@ -60,7 +60,7 @@ def connected_env(config):
     conn.authenticate()
 
     access_controller = AccessController(config)
-    app = FastMCP("test-e2e")
+    app = MCPServer("test-e2e")
 
     resource_handler = OdooResourceHandler(app, conn, access_controller, config)
     tool_handler = OdooToolHandler(app, conn, access_controller, config)

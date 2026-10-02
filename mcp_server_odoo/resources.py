@@ -1,7 +1,7 @@
 """MCP resource handlers for Odoo data access.
 
 This module implements MCP resources for accessing Odoo data through
-standardized URIs using FastMCP decorators.
+standardized URIs using MCPServer decorators.
 
 Binary/attachment reads buffer the full content into a single MCP response,
 so ``resources/read`` on ``odoo://{model}/record/{id}/{field}`` or
@@ -22,10 +22,9 @@ import xmlrpc.client
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 from urllib.parse import unquote
 
-from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.lowlevel.helper_types import ReadResourceContents
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import Annotations
-from pydantic import AnyUrl
 
 from .access_control import (
     AccessControlError,
@@ -35,6 +34,7 @@ from .access_control import (
     attachment_scope_domain,
     check_domain_balance,
 )
+from .binary_reads import read_without_binary_payloads, uses_odoo_20_binaries
 from .config import OdooConfig, max_offset_for
 from .error_handling import (
     ErrorContext,
@@ -53,9 +53,11 @@ from .odoo_connection import (
     OdooValidationFault,
 )
 from .uri_schema import (
+    ATTACHMENT_CONTENT_FIELDS,
     ATTACHMENT_URI_PATTERN,
     BINARY_FIELD_TYPES,
     BINARY_FIELD_URI_PATTERN,
+    is_binary_payload_dict,
 )
 
 logger = get_logger(__name__)
@@ -193,7 +195,7 @@ class OdooResourceHandler:
 
     def __init__(
         self,
-        app: FastMCP,
+        app: MCPServer,
         connection: OdooConnection,
         access_controller: AccessController,
         config: OdooConfig,
@@ -201,7 +203,7 @@ class OdooResourceHandler:
         """Initialize resource handler.
 
         Args:
-            app: FastMCP application instance
+            app: MCPServer application instance
             connection: Odoo connection instance
             access_controller: Access control instance
             config: Odoo configuration instance
@@ -215,15 +217,16 @@ class OdooResourceHandler:
         self._register_resources()
 
     async def _ctx_info(self, ctx, message: str):
-        """Send info to MCP client context if available."""
-        if ctx:
-            try:
-                await ctx.info(message)
-            except Exception:
-                logger.debug(f"Failed to send ctx info: {message}")
+        """Log a step message on the server.
+
+        Under mcp 1.x this also reached the client as a log notification.
+        mcp 2.x deprecates client logging (SEP-2577), so the step messages
+        stay in the server log. ``ctx`` is kept for the call sites.
+        """
+        logger.debug(message)
 
     def _register_resources(self):
-        """Register all resource handlers with FastMCP."""
+        """Register all resource handlers with the MCPServer."""
         # Resources with parameters (like {model}) are registered as templates,
         # not concrete resources, so they won't show in list_resources().
 
@@ -348,7 +351,7 @@ class OdooResourceHandler:
     def _register_concrete_resources(self):
         """Register concrete resources for enabled models.
 
-        Note: In the current FastMCP implementation, resources with parameters
+        Note: In the current MCPServer implementation, resources with parameters
         are registered as templates and won't show in list_resources().
         This is expected behavior - use list_resource_templates() to see them.
         """
@@ -357,47 +360,44 @@ class OdooResourceHandler:
         pass
 
     def _install_binary_read_override(self):
-        """Install a low-level ``resources/read`` handler for the binary schemes.
+        """Serve the two binary URI schemes with a mimeType per read.
 
-        SDK investigation (mcp 1.27, 2026-07-14):
+        SDK background (mcp 2.2, 2026-10-02): ``MCPServer`` fixes a
+        template's ``mimeType`` at registration time, so a decorated template
+        function cannot vary it per read. ``MCPServer._handle_read_resource``
+        answers ``resources/read`` through the public ``read_resource()``
+        method and takes each item's ``mime_type`` from its return value. This
+        replaces that method on the app INSTANCE with a dispatcher that serves
+        ``odoo://{model}/record/{id}/{field}`` and ``odoo://attachment/{id}``
+        itself and hands every other URI to the class implementation. It needs
+        no private attribute and works on any ``MCPServer`` instance.
 
-        * FastMCP fixes a template's ``mimeType`` at registration time —
-          ``FastMCP.read_resource`` always returns ``resource.mime_type`` and
-          ``FunctionResource`` JSON-serializes any non-str/bytes return, so a
-          decorated function cannot vary the mimeType per read. The chosen
-          approach is (b): re-register the low-level ``ReadResourceRequest``
-          handler (``app._mcp_server.read_resource()`` — private attr, no
-          public hook in mcp 1.27) with a dispatcher that serves the two
-          binary URI schemes itself, returning ``ReadResourceContents`` with
-          the per-read mimeType, and delegates every other URI to
-          ``FastMCP.read_resource`` unchanged.
-        * Template precedence is safe: FastMCP matches ``{param}`` as
-          ``[^/]+`` (no slash), so the 3-segment ``odoo://{model}/record/{id}``
-          template can never capture ``record_id="5/image_128"`` — the 3- and
-          4-segment templates match disjoint URI sets.
-        * Repeated installs are safe: the low-level decorator REPLACES
-          ``request_handlers[ReadResourceRequest]`` (plain dict assignment)
-          and the dispatcher delegates through ``FastMCP.read_resource`` —
-          never the previously installed handler — so a duplicate install
-          can replace the dispatcher but never chain onto or recurse into
-          it. The owner sentinel below skips a re-install by the SAME
-          handler; a DIFFERENT handler (fresh registration on a reused app)
-          intentionally replaces the dispatcher so reads go through the
-          live connection.
+        * Template precedence is safe: ``{param}`` matches ``[^/]+`` (no
+          slash), so the 3-segment ``odoo://{model}/record/{id}`` template can
+          never capture ``record_id="5/image_128"`` — the 3- and 4-segment
+          templates match disjoint URI sets.
+        * Repeated installs are safe: the dispatcher delegates to the CLASS
+          method, never to a previously installed dispatcher, so a duplicate
+          install replaces it but never chains onto or recurses into it. The
+          owner sentinel skips a re-install by the SAME handler; a DIFFERENT
+          handler (fresh registration on a reused app) intentionally replaces
+          the dispatcher so reads go through the live connection.
         """
-        low_level = getattr(self.app, "_mcp_server", None)
-        if low_level is None:
-            # Only mocked FastMCP apps (unit tests) lack _mcp_server; if this
-            # ever fired in production, binary reads would degrade to the
-            # decorated template functions with a static octet-stream
-            # mimeType — warn so the degradation is not silent.
-            logger.warning("Low-level server unavailable; dynamic binary mimeTypes not installed")
+        if getattr(self.app, "_odoo_binary_override_owner", None) is self:
             return
-        if getattr(low_level, "_odoo_binary_override_owner", None) is self:
+        class_read_resource = getattr(type(self.app), "read_resource", None)
+        if class_read_resource is None:
+            # Only mocked apps (unit tests) lack it; if this ever fired in
+            # production, binary reads would degrade to the decorated template
+            # functions with a static octet-stream mimeType — warn so the
+            # degradation is not silent.
+            logger.warning(
+                "MCPServer.read_resource unavailable; dynamic binary mimeTypes not installed"
+            )
             return
+        app = self.app
 
-        @low_level.read_resource()
-        async def read_resource_dispatch(uri: AnyUrl) -> Iterable[ReadResourceContents]:
+        async def read_resource(uri, context=None) -> Iterable[ReadResourceContents]:
             uri_str = str(uri)
             # ids pass as the RAW matched strings so the handlers stay the
             # single validation site shared with the decorated
@@ -413,17 +413,22 @@ class OdooResourceHandler:
             if attachment_match:
                 content, mimetype = await self._handle_attachment_read(attachment_match.group(1))
                 return [ReadResourceContents(content=content, mime_type=mimetype)]
-            return await self.app.read_resource(uri)
+            return await class_read_resource(app, uri, context)
 
-        low_level._odoo_binary_override_owner = self
+        # An instance attribute shadows the method for this app only
+        app.read_resource = read_resource  # ty: ignore[invalid-assignment]
+        app._odoo_binary_override_owner = self
 
     @staticmethod
     def _decode_binary_value(value: Any) -> bytes:
         """Decode an XML-RPC binary field value to raw bytes.
 
         Odoo returns binary fields as base64 strings; some transports wrap
-        them in ``xmlrpc.client.Binary`` instead.
+        them in ``xmlrpc.client.Binary`` instead. Odoo 20 wraps the base64 in
+        ``{content, size, filename}``.
         """
+        if is_binary_payload_dict(value):
+            value = value["content"]
         if isinstance(value, xmlrpc.client.Binary):
             return value.data
         if isinstance(value, bytes):
@@ -514,7 +519,11 @@ class OdooResourceHandler:
         Mirrors ``_decode_binary_value``'s type handling so the accounting
         matches what the decode will actually produce: ``Binary`` and raw
         ``bytes`` are their own length, a ``str`` is base64 (3 bytes per 4).
+        Odoo 20's ``{content, size}`` dict states its decoded size.
         """
+        if is_binary_payload_dict(value):
+            size = value["size"]
+            return size if isinstance(size, int) else None
         if isinstance(value, xmlrpc.client.Binary):
             return len(value.data)
         if isinstance(value, bytes):
@@ -532,6 +541,85 @@ class OdooResourceHandler:
                 return f"{value:.0f} {unit}" if unit == "bytes" else f"{value:.1f} {unit}"
             value /= 1024
         return f"{size} bytes"  # pragma: no cover - loop always returns
+
+    def _preflight_stored_binary(
+        self, model: str, record_id: int, field: str, context: ErrorContext
+    ) -> None:
+        """Odoo 20 size pre-flight for a stored binary field (blocking).
+
+        Odoo 20 dropped ``bin_size``, so there is no placeholder to parse.
+        Most binaries live in an ``ir.attachment``, whose ``file_size`` gives
+        the size. A plain binary column supports ``field.size`` in a domain
+        instead; Odoo 20 refuses that domain on an attachment-stored field
+        ("not stored"). When neither answers (standard mode without
+        ``ir.attachment``), the post-fetch check stays the only checkpoint.
+        """
+        count_context = {"active_test": False}
+        populated = self.connection.search_count(
+            model, [["id", "=", record_id], [field, "!=", False]], context=count_context
+        )
+        if not populated:
+            if not self.connection.search_count(
+                model, [["id", "=", record_id]], context=count_context
+            ):
+                raise NotFoundError(
+                    f"Record not found: {model} with ID {record_id} does not exist",
+                    context=context,
+                )
+            raise NotFoundError(
+                f"Field '{field}' on {model}/{record_id} holds no data", context=context
+            )
+
+        label = f"Field '{field}' on {model}/{record_id}"
+        try:
+            size = self._backing_attachment_size(model, record_id, field)
+        except Exception as e:
+            # Lookup denied (standard mode without ir.attachment enabled). The
+            # field is most likely attachment-stored, where Odoo 20 refuses
+            # field.size, so leave the size to the post-fetch check.
+            logger.debug(f"Backing attachment lookup failed for {model}/{record_id}/{field}: {e}")
+            return
+        if size is not None:
+            self._enforce_binary_limit(size, label)
+            return
+        # No backing attachment: a plain binary column, which supports field.size
+        limit = self.config.max_binary_size
+        try:
+            over_limit = self.connection.search_count(
+                model,
+                [["id", "=", record_id], [f"{field}.size", ">", limit]],
+                context=count_context,
+            )
+        except OdooConnectionError as e:
+            logger.debug(f"No size pre-flight for {model}.{field}: {e}")
+            return
+        if over_limit:
+            raise ValidationError(
+                f"{label} is over the {self._format_bytes(limit)} limit for a single "
+                f"read. Raise ODOO_MCP_MAX_BINARY_SIZE or fetch it outside MCP."
+            )
+
+    def _backing_attachment_size(self, model: str, record_id: int, field: str) -> Optional[int]:
+        """``file_size`` of the attachment that stores ``model.field`` (blocking).
+
+        The explicit ``res_field`` condition disables the ORM's default
+        res_field filtering. None when there is no such attachment (a plain
+        column). Raises when the lookup is denied, so the caller can tell the
+        two apart.
+        """
+        self.access_controller.validate_model_access("ir.attachment", "read")
+        rows = self.connection.search_read(
+            "ir.attachment",
+            [
+                ["res_model", "=", model],
+                ["res_id", "=", record_id],
+                ["res_field", "=", field],
+            ],
+            ["file_size"],
+            limit=1,
+        )
+        size = rows[0].get("file_size") if rows else None
+        return size if isinstance(size, int) else None
 
     def _enforce_binary_limit(self, size: Optional[int], label: str) -> None:
         """Refuse a payload over ``ODOO_MCP_MAX_BINARY_SIZE``.
@@ -627,7 +715,7 @@ class OdooResourceHandler:
         # base64-decode file content and fail. Delegating all three serves
         # the right bytes with the stored mimetype, honors type='url', and
         # applies the attached-to-model gate.
-        if model == "ir.attachment" and field in ("datas", "raw", "db_datas"):
+        if model == "ir.attachment" and field in ATTACHMENT_CONTENT_FIELDS:
             return await self._handle_attachment_read(record_id, ctx)
 
         context = ErrorContext(model=model, operation="read_binary_field", record_id=record_id)
@@ -672,33 +760,47 @@ class OdooResourceHandler:
                         f"Field '{field}' on '{model}' is not a binary field", context=context
                     )
 
-                # Pre-flight: bin_size returns a short size placeholder in
-                # place of the payload, so an oversized field is refused
-                # BEFORE its bytes are ever pulled into this process. Without
-                # this the limit could only bound the decode, not the fetch
-                # that precedes it — which is where an OOM actually happens.
-                probe = await asyncio.to_thread(
-                    self.connection.search_read,
-                    model,
-                    [["id", "=", record_id_int]],
-                    [field],
-                    context={"active_test": False, "bin_size": True},
-                )
-                if not probe:
-                    raise NotFoundError(
-                        f"Record not found: {model} with ID {record_id} does not exist",
-                        context=context,
+                # Pre-flight: refuse an oversized field BEFORE its bytes are
+                # ever pulled into this process. Without this the limit could
+                # only bound the decode, not the fetch that precedes it —
+                # which is where an OOM actually happens.
+                if uses_odoo_20_binaries(self.connection):
+                    # Odoo 20 has no bin_size; count against field.size instead
+                    if field_info.get("store", True):
+                        await asyncio.to_thread(
+                            self._preflight_stored_binary,
+                            model,
+                            record_id_int,
+                            field,
+                            context,
+                        )
+                    # A non-stored binary cannot be searched on Odoo 20; the
+                    # post-fetch check below is its only checkpoint.
+                else:
+                    # bin_size returns a short size placeholder in place of
+                    # the payload
+                    probe = await asyncio.to_thread(
+                        self.connection.search_read,
+                        model,
+                        [["id", "=", record_id_int]],
+                        [field],
+                        context={"active_test": False, "bin_size": True},
                     )
-                placeholder = probe[0].get(field)
-                if not placeholder:
-                    raise NotFoundError(
-                        f"Field '{field}' on {model}/{record_id} holds no data",
-                        context=context,
+                    if not probe:
+                        raise NotFoundError(
+                            f"Record not found: {model} with ID {record_id} does not exist",
+                            context=context,
+                        )
+                    placeholder = probe[0].get(field)
+                    if not placeholder:
+                        raise NotFoundError(
+                            f"Field '{field}' on {model}/{record_id} holds no data",
+                            context=context,
+                        )
+                    self._enforce_binary_limit(
+                        self._parse_size_placeholder(placeholder),
+                        f"Field '{field}' on {model}/{record_id}",
                     )
-                self._enforce_binary_limit(
-                    self._parse_size_placeholder(placeholder),
-                    f"Field '{field}' on {model}/{record_id}",
-                )
 
                 # Single search_read round trip — a missing id yields [] (a
                 # plain read() would fault with MissingError instead). The
@@ -843,14 +945,16 @@ class OdooResourceHandler:
                     f"Attachment {attachment_id}",
                 )
 
+                # Odoo 20 removed datas; raw holds the same content there
+                content_field = "raw" if uses_odoo_20_binaries(self.connection) else "datas"
                 payload = await asyncio.to_thread(
                     self.connection.search_read,
                     "ir.attachment",
                     [["id", "=", attachment_id_int]],
-                    ["datas"],
+                    [content_field],
                     context={"active_test": False},
                 )
-                datas = payload[0].get("datas") if payload else None
+                datas = payload[0].get(content_field) if payload else None
                 if not datas:
                     # Same behavior as an empty binary field: a clean error
                     # instead of serving a zero-byte blob
@@ -957,7 +1061,7 @@ class OdooResourceHandler:
                 # resources never pull full binary payloads.
                 safe_fields, withheld = await asyncio.to_thread(self._get_safe_fields, model)
                 records = await asyncio.to_thread(
-                    self.connection.read, model, record_ids, safe_fields, {"bin_size": True}
+                    read_without_binary_payloads, self.connection, model, record_ids, safe_fields
                 )
 
                 if not records:
@@ -1091,7 +1195,11 @@ class OdooResourceHandler:
                     # can use.
                     fields_to_read = await asyncio.to_thread(self._summary_fields, model)
                 records = await asyncio.to_thread(
-                    self.connection.read, model, record_ids, fields_to_read, {"bin_size": True}
+                    read_without_binary_payloads,
+                    self.connection,
+                    model,
+                    record_ids,
+                    fields_to_read,
                 )
                 if fields_list is None and fields_to_read is None:
                     # Metadata unavailable, so ALL fields came back: apply the
@@ -1630,15 +1738,15 @@ class OdooResourceHandler:
 
 
 def register_resources(
-    app: FastMCP,
+    app: MCPServer,
     connection: OdooConnection,
     access_controller: AccessController,
     config: OdooConfig,
 ) -> OdooResourceHandler:
-    """Register all Odoo resources with the FastMCP app.
+    """Register all Odoo resources with the MCPServer app.
 
     Args:
-        app: FastMCP application instance
+        app: MCPServer application instance
         connection: Odoo connection instance
         access_controller: Access control instance
         config: Odoo configuration instance

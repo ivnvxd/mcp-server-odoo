@@ -13,6 +13,8 @@ from datetime import datetime
 from enum import Enum, auto
 from typing import Any, Dict, Optional, Union
 
+from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError, ToolError
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,8 +52,14 @@ class ErrorContext:
     additional_info: Dict[str, Any] = field(default_factory=dict)
 
 
-class MCPError(Exception):
-    """Base exception for MCP-related errors with enhanced tracking."""
+class MCPError(ToolError, ResourceError):
+    """Base exception for MCP-related errors with enhanced tracking.
+
+    Derives from the SDK's ToolError and ResourceError: since mcp 2.1 the SDK
+    shows the text of those two only, and replaces any other exception with
+    "Error executing tool <name>" or "Error creating resource from template
+    <uri>". Our messages are already sanitized for clients.
+    """
 
     def __init__(
         self,
@@ -121,7 +129,7 @@ class MCPPermissionError(MCPError):
         )
 
 
-class NotFoundError(MCPError):
+class NotFoundError(MCPError, ResourceNotFoundError):
     """Resource not found errors."""
 
     def __init__(self, message: str, **kwargs):

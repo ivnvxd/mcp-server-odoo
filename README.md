@@ -333,7 +333,7 @@ The server requires the following environment variables:
 | `ODOO_MCP_PORT` | `8000` | Port to bind for HTTP transport |
 | `ODOO_MCP_ALLOWED_HOSTS` | — | Comma-separated `Host` headers to accept for HTTP transport (DNS-rebinding protection). Set when running `streamable-http` behind a reverse proxy that forwards an external host, e.g. `odoo.example.com,localhost`. IPv6 literals may be bracketed or bare (`[::1]:8000`, `::1`). **Unset, protection is only auto-enabled for a loopback bind** — binding any other host (e.g. `0.0.0.0`) runs with no `Host`/`Origin` validation at all. |
 | `ODOO_MCP_SESSION_IDLE_TIMEOUT` | — | Seconds of inactivity before a `streamable-http` session is closed and its server-side state freed, e.g. `600`. Unset means sessions never expire. |
-| `ODOO_MCP_MAX_BINARY_SIZE` | `52428800` | Maximum bytes returned by a single binary/attachment `resources/read`. Checked before the payload is fetched (a `bin_size` probe for record fields, the stored `file_size` for attachments), so an oversized read is refused with a clean error instead of being pulled into memory and re-encoded to base64 for the wire. |
+| `ODOO_MCP_MAX_BINARY_SIZE` | `52428800` | Maximum bytes returned by a single binary/attachment `resources/read`. Checked before the payload is fetched (for record fields, a `bin_size` probe on Odoo 19 and older, and the size of the backing attachment or a `field.size` count on Odoo 20; for attachments, the stored `file_size`), so an oversized read is refused with a clean error instead of being pulled into memory and re-encoded to base64 for the wire. |
 
 ### Transport Options
 
@@ -368,7 +368,9 @@ uvx mcp-server-odoo
 
 The HTTP endpoint will be available at: `http://localhost:8000/mcp/`
 
-> **Note**: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication. Requires MCP library v1.27.0 or higher.
+> **Note**: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication.
+
+> **Note**: The HTTP transport refuses request bodies over 4 MiB with HTTP 413. It holds at most 10,000 open sessions and answers new ones with HTTP 503 beyond that. If `ODOO_MCP_SESSION_IDLE_TIMEOUT` is unset, sessions never expire, so set it for a long-running public server.
 
 <details>
 <summary>Running streamable-http transport for remote access</summary>
@@ -406,7 +408,12 @@ The HTTP endpoint will be available at: `http://localhost:8000/mcp/`
    - Go to Settings > Users & Companies > Users
    - Select your user
    - Under the "API Keys" tab, create a new key
+   - On Odoo 20, give the key the RPC scope (`rpc`). Odoo 20 accepts a key on its RPC routes only with that scope.
    - Copy the key for your MCP configuration
+
+4. **Grant MCP access to the user**:
+   - Add the user to the MCP User group in the access rights of the user
+   - Recent module versions refuse API keys and password logins of users outside this group. The server then reports the reason from the module at startup.
 
 ### YOLO Mode (Development/Testing Only) ⚠️
 
@@ -776,6 +783,8 @@ If authentication fails:
 2. Check that the user has appropriate permissions
 3. Try regenerating the API key
 4. For username/password auth, ensure 2FA is not enabled
+5. On Odoo 20, make sure that the API key has the `rpc` scope
+6. In standard mode, make sure that the user is in the MCP User group
 </details>
 
 <details>
