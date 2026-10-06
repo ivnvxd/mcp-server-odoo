@@ -252,6 +252,12 @@ class OdooMCPServer:
             if not self.connection.is_connected:
                 self.connection.connect()
             self.connection.authenticate()
+            try:
+                self.connection.check_allowed_companies()
+            except OdooConnectionError:
+                # Not left authenticated: every request then raises the same error
+                self.connection.disconnect()
+                raise
         self.access_controller.database = self.connection.database
         self.access_controller.auth_method = self.connection.auth_method
         logger.info(f"Successfully connected to Odoo at {self.config.url}")
@@ -277,7 +283,9 @@ class OdooMCPServer:
             if not self.connection.is_authenticated:
                 return
             # build_user_context does sync XML-RPC I/O — keep it off the loop
-            context = await asyncio.to_thread(build_user_context, self.connection)
+            context = await asyncio.to_thread(
+                build_user_context, self.connection, self.config.allowed_companies
+            )
             # Rebuild from the pristine static base (captured at __init__) —
             # reading self.app.instructions here would compound the context
             # block on repeated calls, since it reflects prior mutations.

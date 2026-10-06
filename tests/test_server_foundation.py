@@ -24,6 +24,7 @@ class _FakeConnection:
     def __init__(self, config=None, performance_manager=None):
         self.outcome = None  # None connects; an exception instance is raised
         self.auth_outcome = None
+        self.companies_outcome = None
         self.disconnect_outcome = None
         self.is_connected = False
         self.is_authenticated = False
@@ -47,6 +48,10 @@ class _FakeConnection:
         if self.auth_outcome is not None:
             raise self.auth_outcome
         self.is_authenticated = True
+
+    def check_allowed_companies(self):
+        if self.companies_outcome is not None:
+            raise self.companies_outcome
 
     def disconnect(self):
         self.disconnect_calls += 1
@@ -1279,6 +1284,19 @@ class TestOdooLifecycle:
         with pytest.raises(OdooConnectionError):
             async with server._odoo_lifespan(server.app):
                 pass
+
+    async def test_foreign_company_fails_every_request(self, server):
+        """A bad ODOO_ALLOWED_COMPANIES is a configuration error: never left connected."""
+        server._fake.companies_outcome = OdooConnectionError(
+            "ODOO_ALLOWED_COMPANIES names companies the user cannot access: [9]."
+        )
+
+        for _ in range(2):
+            with pytest.raises(OdooConnectionError, match="cannot access"):
+                await server.ensure_connected()
+
+        assert server._fake.authenticate_calls == 2
+        assert server._fake.is_authenticated is False
 
     def test_auth_error_stops_the_http_server(self, server):
         server._fake.auth_outcome = OdooConnectionError("Authentication failed")

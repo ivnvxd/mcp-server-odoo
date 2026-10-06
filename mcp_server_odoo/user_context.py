@@ -7,7 +7,7 @@ Spec-compliant MCP clients inject it into the model context on connect
 returns the same block with structured data.
 """
 
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from .logging_config import get_logger
 from .odoo_connection import OdooConnection
@@ -162,8 +162,14 @@ def _one_line(value: Any) -> str:
     return str(value).translate(_LINE_BREAK_TRANSLATION)
 
 
-def get_user_context_data(connection: OdooConnection) -> Dict[str, Any]:
+def get_user_context_data(
+    connection: OdooConnection, allowed_companies: Optional[List[int]] = None
+) -> Dict[str, Any]:
     """Read the connected user's session context.
+
+    ``allowed_companies`` is ODOO_ALLOWED_COMPANIES. When it is set, Odoo
+    acts in the first of these companies and shows records of all of them,
+    so they replace the user's own active and allowed companies.
 
     Raises when the ``res.users`` read fails; a failing company-name read
     degrades to an empty ``allowed_companies`` instead (the rest of the
@@ -190,15 +196,22 @@ def get_user_context_data(connection: OdooConnection) -> Dict[str, Any]:
         "allowed_companies": [],
     }
     company_ids = user.get("company_ids") or []
-    if len(company_ids) > 1:
+    if allowed_companies:
+        company_ids = list(allowed_companies)
+        if data["company_id"] != company_ids[0]:
+            data["company_id"], data["company_name"] = company_ids[0], ""
+    if len(company_ids) > 1 or not data["company_name"]:
         # Separate failure domain: the res.company read can be denied on its
         # own (e.g. standard mode with res.users MCP-enabled but res.company
         # not) — keep the already-read user context and drop only this list.
         try:
             companies = connection.read("res.company", company_ids, ["display_name"])
-            data["allowed_companies"] = [
-                {"id": c["id"], "name": c["display_name"]} for c in companies
-            ]
+            names = {c["id"]: c["display_name"] for c in companies}
+            data["company_name"] = data["company_name"] or names.get(data["company_id"], "")
+            if len(company_ids) > 1:
+                data["allowed_companies"] = [
+                    {"id": cid, "name": names[cid]} for cid in company_ids if cid in names
+                ]
         except Exception as e:
             logger.warning(f"Could not resolve allowed companies for MCP user context: {e}")
     return data
@@ -233,7 +246,9 @@ def format_user_context(data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def build_user_context(connection: OdooConnection) -> str:
+def build_user_context(
+    connection: OdooConnection, allowed_companies: Optional[List[int]] = None
+) -> str:
     """Build the personalized user-context block for ``initialize.instructions``.
 
     Best-effort: on any failure it logs and falls back to the always-safe
@@ -245,7 +260,7 @@ def build_user_context(connection: OdooConnection) -> str:
     and an ERROR on every startup for a supported setup is just noise.
     """
     try:
-        return format_user_context(get_user_context_data(connection))
+        return format_user_context(get_user_context_data(connection, allowed_companies))
     except Exception as e:
         logger.warning(f"Could not build MCP user context, serving UTC guidance only: {e}")
         return context_unavailable_text(str(e))

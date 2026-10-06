@@ -1019,6 +1019,35 @@ class OdooConnection:
                 "Provide either API key or username/password credentials."
             )
 
+    def check_allowed_companies(self) -> None:
+        """Make sure every ODOO_ALLOWED_COMPANIES id is a company of the user (blocking).
+
+        Reads res.users.company_ids without the scoping: with a foreign id in
+        the context, Odoo refuses the read itself. In standard mode the MCP
+        module can refuse res.users. The check is then skipped with a warning,
+        and Odoo still refuses a foreign company on each call.
+
+        Raises:
+            OdooConnectionError: a configured id is not a company of the user
+        """
+        configured = self.config.allowed_companies
+        if not configured:
+            return
+        try:
+            user = self.execute_kw(
+                "res.users", "read", [[self.uid], ["company_ids"]], {}, scoped=False
+            )[0]
+        except OdooValidationFault as e:
+            logger.warning(f"Could not read the user's companies for ODOO_ALLOWED_COMPANIES: {e}")
+            return
+        user_companies = user.get("company_ids") or []
+        foreign = [cid for cid in configured if cid not in user_companies]
+        if foreign:
+            raise OdooConnectionError(
+                f"ODOO_ALLOWED_COMPANIES names companies the user cannot access: {foreign}. "
+                f"The user's companies are {sorted(user_companies)}."
+            )
+
     @property
     def is_authenticated(self) -> bool:
         """Check if currently authenticated."""
@@ -1062,7 +1091,15 @@ class OdooConnection:
         """
         return self.execute_kw(model, method, list(args), {})
 
-    def execute_kw(self, model: str, method: str, args: List[Any], kwargs: Dict[str, Any]) -> Any:
+    def execute_kw(
+        self,
+        model: str,
+        method: str,
+        args: List[Any],
+        kwargs: Dict[str, Any],
+        *,
+        scoped: bool = True,
+    ) -> Any:
         """Execute an operation on an Odoo model with keyword arguments.
 
         This is the main method for interacting with Odoo models via XML-RPC.
@@ -1072,6 +1109,8 @@ class OdooConnection:
             method: The method to call (e.g., 'search_read')
             args: List of positional arguments for the method
             kwargs: Dictionary of keyword arguments for the method
+            scoped: Apply ODOO_ALLOWED_COMPANIES to the context. Only the
+                startup check of those companies turns it off.
 
         Returns:
             The result from Odoo
@@ -1096,14 +1135,24 @@ class OdooConnection:
                 kwargs["context"] = {}
             kwargs["context"].setdefault("lang", self.config.locale)
 
-        # Company scoping (patch): force allowed_company_ids on every call so
-        # record rules and company defaults are limited to the configured
-        # companies. Deliberately overrides any caller-provided value.
-        if self.config.allowed_companies:
+        # Company scoping: set allowed_company_ids on every call so record
+        # rules and company defaults are limited to the configured companies.
+        # A caller may narrow the limit, never widen it.
+        if scoped and self.config.allowed_companies:
             if "context" not in kwargs:
                 kwargs["context"] = {}
             # Copy so callers mutating the context cannot alter the config.
-            kwargs["context"]["allowed_company_ids"] = list(self.config.allowed_companies)
+            limit = list(self.config.allowed_companies)
+            requested = kwargs["context"].get("allowed_company_ids")
+            if requested:
+                outside = [cid for cid in requested if cid not in limit]
+                if outside:
+                    raise OdooValidationFault(
+                        f"Companies {outside} are outside ODOO_ALLOWED_COMPANIES {limit}."
+                    )
+                kwargs["context"]["allowed_company_ids"] = list(requested)
+            else:
+                kwargs["context"]["allowed_company_ids"] = limit
 
         try:
             # Log the operation (values redacted — write payloads can carry

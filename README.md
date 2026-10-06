@@ -343,6 +343,11 @@ user:
 }
 ```
 
+At startup, the server makes sure that each ID is one of the user's companies, and it does not
+start otherwise. The first ID is the active company: Odoo uses it for create defaults, and
+`get_current_context` and the session instructions show it. A call can narrow the scope to some of
+the listed companies, but never widen it.
+
 Note this is context-level scoping, not a security boundary: the credentials can
 still access every company the Odoo user is allowed to. For hard isolation,
 restrict the user's allowed companies in Odoo itself.
