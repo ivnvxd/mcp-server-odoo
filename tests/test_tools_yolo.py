@@ -680,3 +680,55 @@ class TestUploadAttachmentYoloIntegration:
             if partner_id:
                 connection.unlink("res.partner", [partner_id])
             connection.disconnect()
+
+
+@pytest.mark.yolo
+class TestListRecordAttachmentsYoloIntegration:
+    @pytest.mark.asyncio
+    async def test_lists_an_attached_file_but_not_the_image_field(self):
+        import base64
+
+        from mcp_server_odoo.access_control import AccessController
+        from mcp_server_odoo.odoo_connection import OdooConnection
+
+        config = OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            username=os.getenv("ODOO_USER", "admin"),
+            password=os.getenv("ODOO_PASSWORD", "admin"),
+            database=os.getenv("ODOO_DB"),
+            yolo_mode="true",
+        )
+        connection = OdooConnection(config)
+        connection.connect()
+        connection.authenticate()
+        png = base64.b64encode(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            )
+        ).decode("ascii")
+        partner_id = None
+        try:
+            # The image becomes a res_field attachment, which the tool must skip
+            partner_id = connection.create(
+                "res.partner", {"name": "List Attachments", "image_1920": png}
+            )
+            handler = OdooToolHandler(MagicMock(), connection, AccessController(config), config)
+            uploaded = await handler._handle_upload_attachment_tool(
+                "res.partner", partner_id, "notes.txt", base64.b64encode(b"hello").decode()
+            )
+
+            result = await handler._handle_list_record_attachments_tool("res.partner", partner_id)
+
+            assert [a["id"] for a in result["attachments"]] == [uploaded["attachment_id"]]
+            assert result["attachments"][0]["name"] == "notes.txt"
+            assert result["total"] == 1
+        finally:
+            if partner_id:
+                attachment_ids = connection.search(
+                    "ir.attachment",
+                    [["res_model", "=", "res.partner"], ["res_id", "=", partner_id]],
+                )
+                if attachment_ids:
+                    connection.unlink("ir.attachment", attachment_ids)
+                connection.unlink("res.partner", [partner_id])
+            connection.disconnect()

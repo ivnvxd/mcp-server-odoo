@@ -673,6 +673,16 @@ Delete a record from Odoo.
 }
 ```
 
+### `list_record_attachments`
+List the files attached to a record, newest first, with name, mimetype, size, date and an `odoo://attachment/{id}` URI each. Files behind binary fields such as `image_1920` are not listed, because `get_record` returns those as URIs.
+
+```json
+{
+  "model": "res.partner",
+  "record_id": 42
+}
+```
+
 ### `upload_attachment`
 Attach a file to a record. `data` is the file as plain base64, at most about 2.9 MB after decoding. Odoo detects the mimetype when `mimetype` is not given. The result carries the new attachment's ID and its `odoo://attachment/{id}` URI. To show the file in the chatter, pass the ID to `post_message` as `attachment_ids`.
 

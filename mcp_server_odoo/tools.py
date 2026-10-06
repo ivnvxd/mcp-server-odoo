@@ -45,6 +45,7 @@ from .odoo_connection import (
 )
 from .schemas import (
     AggregateResult,
+    AttachmentListResult,
     BulkCreateResult,
     BulkUpdateResult,
     CallModelMethodResult,
@@ -1318,6 +1319,36 @@ class OdooToolHandler:
                 ctx,
             )
             return PostMessageResult(**result)
+
+        @self.app.tool(
+            title="List Record Attachments",
+            annotations=ToolAnnotations(
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
+            ),
+        )
+        async def list_record_attachments(
+            model: str,
+            record_id: int,
+            ctx: Optional[Context] = None,
+        ) -> AttachmentListResult:
+            """List the files attached to a record, newest first.
+
+            Each entry carries an odoo://attachment/{id} URI that serves the
+            file. Files behind binary fields (e.g. image_1920) are not listed;
+            get_record returns those as URIs.
+
+            Args:
+                model: The model of the record (e.g., 'res.partner')
+                record_id: The record whose attachments to list
+
+            Returns:
+                id, name, mimetype, size, type, create_date and uri of each file.
+            """
+            result = await self._handle_list_record_attachments_tool(model, record_id, ctx)
+            return AttachmentListResult(**result)
 
         @self.app.tool(
             title="Upload Attachment",
@@ -2740,6 +2771,101 @@ class OdooToolHandler:
             logger.error(f"Error in update_records tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to update records: {sanitized_msg}") from e
+
+    async def _handle_list_record_attachments_tool(
+        self,
+        model: str,
+        record_id: int,
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle list record attachments tool request."""
+        try:
+            with perf_logger.track_operation("tool_list_record_attachments", model=model):
+                _validate_record_id(record_id)
+                if model == "ir.attachment":
+                    raise ValidationError("Pass the record the files are attached to")
+
+                # The record's model and ir.attachment both: an attachment row
+                # carries url and index_content (the extracted document text)
+                await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, "ir.attachment", "read"
+                )
+                await self._ctx_info(ctx, f"Listing attachments of {model}/{record_id}...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                exists = await asyncio.to_thread(
+                    self.connection.search_count,
+                    model,
+                    [["id", "=", record_id]],
+                    context={"active_test": False},
+                )
+                if not exists:
+                    raise NotFoundError(f"Record not found: {model} with ID {record_id}")
+
+                # res_field=False: attachments behind binary fields (images)
+                # are the field values, not files attached to the record
+                domain = [
+                    ["res_model", "=", model],
+                    ["res_id", "=", record_id],
+                    ["res_field", "=", False],
+                ]
+                total = await asyncio.to_thread(
+                    self.connection.search_count, "ir.attachment", domain
+                )
+                rows = await asyncio.to_thread(
+                    self.connection.search_read,
+                    "ir.attachment",
+                    domain,
+                    ["name", "mimetype", "file_size", "type", "create_date"],
+                    limit=self.config.max_limit,
+                    order="create_date desc, id desc",
+                )
+                attachments = []
+                for row in rows:
+                    row = await asyncio.to_thread(self._process_record_dates, row, "ir.attachment")
+                    attachments.append(
+                        {
+                            "id": row["id"],
+                            "name": row.get("name") or "",
+                            "mimetype": row.get("mimetype") or None,
+                            "size": row.get("file_size") or None,
+                            "type": row.get("type") or "binary",
+                            "create_date": row.get("create_date") or None,
+                            "uri": build_attachment_uri(row["id"]),
+                        }
+                    )
+
+                return {
+                    "model": model,
+                    "record_id": record_id,
+                    "attachments": attachments,
+                    "total": total,
+                    "note": (
+                        f"Showing the newest {len(attachments)} of {total} attachments."
+                        if total > len(attachments)
+                        else None
+                    ),
+                }
+
+        except ValidationError:
+            raise
+        except NotFoundError as e:
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except OdooValidationFault as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in list_record_attachments tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to list attachments: {sanitized_msg}") from e
 
     async def _handle_upload_attachment_tool(
         self,

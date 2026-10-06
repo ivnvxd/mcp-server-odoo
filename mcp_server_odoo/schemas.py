@@ -274,6 +274,31 @@ class UploadAttachmentResult(BaseModel):
     message: str = Field(description="Human-readable success message")
 
 
+# --- List Record Attachments ---
+
+
+class AttachmentInfo(BaseModel):
+    """One file attached to a record."""
+
+    id: int = Field(description="ID of the ir.attachment")
+    name: str = Field(description="File name")
+    mimetype: Optional[str] = Field(default=None, description="Mimetype, e.g. application/pdf")
+    size: Optional[int] = Field(default=None, description="Size in bytes")
+    type: str = Field(description="'binary' for a stored file, 'url' for a link")
+    create_date: Optional[str] = Field(default=None, description="When it was attached (UTC)")
+    uri: str = Field(description="odoo://attachment/{id} resource URI that serves the file")
+
+
+class AttachmentListResult(BaseModel):
+    """Files attached to one record, newest first."""
+
+    model: str = Field(description="Model of the record")
+    record_id: int = Field(description="ID of the record")
+    attachments: List[AttachmentInfo] = Field(description="Attached files, newest first")
+    total: int = Field(description="Number of files attached to the record")
+    note: Optional[str] = Field(default=None, description="Set when the list is cut off")
+
+
 # --- Update Record ---
 
 

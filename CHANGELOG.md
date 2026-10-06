@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`list_record_attachments` tool**: lists the files attached to a record, newest first, each with its `odoo://attachment/{id}` URI.
 - **`upload_attachment` tool**: attaches a base64 file of up to about 2.9 MB to a record, and returns its `odoo://attachment/{id}` URI.
 - **`update_records` with per-record values**: `updates=[{"id": ..., "values": {...}}]` writes different values to each record in one transaction, on Odoo 19 and later.
 - **`create_records` tool**: creates up to 100 records of one model in one `create` call. It is one transaction, so either every record is created or none.

@@ -143,3 +143,94 @@ class TestUploadAttachment:
         with pytest.raises(ValidationError, match=message):
             await handler._handle_upload_attachment_tool(model, 7, name, PDF_B64)
         connection.create.assert_not_called()
+
+
+class TestListRecordAttachments:
+    ROWS = [
+        {
+            "id": 31,
+            "name": "contract.pdf",
+            "mimetype": "application/pdf",
+            "file_size": 2048,
+            "type": "binary",
+            "create_date": "2026-10-01 09:00:00",
+        },
+        {
+            "id": 30,
+            "name": "Website",
+            "mimetype": False,
+            "file_size": 0,
+            "type": "url",
+            "create_date": "2026-09-30 09:00:00",
+        },
+    ]
+
+    @pytest.fixture(autouse=True)
+    def two_attachments(self, connection):
+        connection.search_count.side_effect = lambda model, domain, **kw: (
+            1 if model == "res.partner" else 2
+        )
+        connection.search_read.return_value = [dict(row) for row in self.ROWS]
+
+    async def test_lists_the_files_attached_to_the_record(self, handler, connection, access):
+        result = await handler._handle_list_record_attachments_tool("res.partner", 7)
+
+        call = connection.search_read.call_args
+        assert call[0][0] == "ir.attachment"
+        assert call[0][1] == [
+            ["res_model", "=", "res.partner"],
+            ["res_id", "=", 7],
+            ["res_field", "=", False],
+        ]
+        assert call[1]["order"] == "create_date desc, id desc"
+        access.validate_model_access.assert_any_call("res.partner", "read")
+        access.validate_model_access.assert_any_call("ir.attachment", "read")
+        assert result["total"] == 2
+        assert result["note"] is None
+        first, second = result["attachments"]
+        assert first["uri"] == "odoo://attachment/31"
+        assert (first["name"], first["mimetype"], first["size"]) == (
+            "contract.pdf",
+            "application/pdf",
+            2048,
+        )
+        assert (second["type"], second["mimetype"], second["size"]) == ("url", None, None)
+
+    async def test_notes_a_cut_off_list(self, handler, connection):
+        connection.search_count.side_effect = lambda model, domain, **kw: (
+            1 if model == "res.partner" else 250
+        )
+
+        result = await handler._handle_list_record_attachments_tool("res.partner", 7)
+
+        assert result["note"] == "Showing the newest 2 of 250 attachments."
+
+    async def test_empty_list(self, handler, connection):
+        connection.search_count.side_effect = lambda model, domain, **kw: (
+            1 if model == "res.partner" else 0
+        )
+        connection.search_read.return_value = []
+
+        result = await handler._handle_list_record_attachments_tool("res.partner", 7)
+
+        assert result["attachments"] == []
+        assert result["total"] == 0
+
+    @pytest.mark.parametrize("model", ["res.partner", "ir.attachment"])
+    async def test_access_refusal_on_either_model(self, handler, connection, access, model):
+        def check(checked_model, operation):
+            if checked_model == model:
+                raise AccessControlError(f"{checked_model} not enabled")
+
+        access.validate_model_access.side_effect = check
+
+        with pytest.raises(ValidationError, match="not enabled"):
+            await handler._handle_list_record_attachments_tool("res.partner", 7)
+        connection.search_read.assert_not_called()
+
+    async def test_missing_record(self, handler, connection):
+        connection.search_count.side_effect = lambda model, domain, **kw: 0
+
+        with pytest.raises(ValidationError, match="Record not found"):
+            await handler._handle_list_record_attachments_tool("res.partner", 7)
+        connection.search_read.assert_not_called()

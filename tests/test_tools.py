@@ -99,6 +99,7 @@ class TestOdooToolHandler:
             "delete_record",
             "post_message",
             "upload_attachment",
+            "list_record_attachments",
             "aggregate_records",
             "list_resource_templates",
         }
