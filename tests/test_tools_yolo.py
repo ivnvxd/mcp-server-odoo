@@ -480,6 +480,33 @@ class TestGetFieldsYoloIntegration:
         types = {f.name: f.type for f in result.fields}
         assert types == {"email": "char", "name": "char"}
 
+    async def test_default_view_keeps_structure_and_cuts_selections(self):
+        from mcp_server_odoo.access_control import AccessController
+        from mcp_server_odoo.odoo_connection import OdooConnection
+
+        config = OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            username=os.getenv("ODOO_USER", "admin"),
+            password=os.getenv("ODOO_PASSWORD", "admin"),
+            database=os.getenv("ODOO_DB"),
+            yolo_mode="read",
+        )
+        with OdooConnection(config) as connection:
+            connection.authenticate()
+            handler = OdooToolHandler(MagicMock(), connection, AccessController(config), config)
+
+            default = await handler._handle_get_fields_tool("res.partner", None, None)
+            everything = await handler._handle_get_fields_tool("res.partner", ["__all__"], None)
+
+        by_name = {f.name: f for f in default.fields}
+        assert {"name", "email", "child_ids", "category_id", "image_1920", "comment"} <= set(
+            by_name
+        )
+        assert "message_ids" not in by_name
+        assert by_name["tz"].selection_more > 0
+        assert default.total + default.omitted == everything.total
+        assert next(f for f in everything.fields if f.name == "tz").selection_more is None
+
 
 @pytest.mark.yolo
 class TestRelatedSummariesYoloIntegration:

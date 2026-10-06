@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CI on pull requests to any branch**: the trigger matched only branch names without a `/`, so pull requests against `release/*` ran no CI.
 
 ### Changed
+- **`get_fields` default view**: without `field_names`, it returns the 60 most relevant value fields plus every relation, file and HTML field, with selection lists cut at 20 values. Pass `["__all__"]` for every field.
 - **mcp 2.x**: the server runs on `mcp>=2.2,<3` and no longer depends on `pydantic-settings`. `serverInfo.version` reports the package version instead of the SDK version. Over HTTP, the SDK refuses request bodies over 4 MiB with 413, and holds at most 10,000 open sessions.
 - **Odoo unreachable at startup**: the server keeps running, `/health` reports unhealthy, and the next request connects. A configuration or authentication error still stops startup.
 - **Tool step messages**: they go to the server log only. mcp 2.x deprecates log notifications to the client.

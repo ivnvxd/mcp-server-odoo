@@ -22,7 +22,17 @@ from mcp_server_odoo.odoo_connection import (
     OdooConnectionError,
     OdooValidationFault,
 )
-from mcp_server_odoo.tools import _BLOCKED_METHOD_CALLS, OdooToolHandler
+from mcp_server_odoo.tools import (
+    _BLOCKED_METHOD_CALLS,
+    CURATED_FIELD_ATTRIBUTES,
+    MAX_SCHEMA_FIELDS,
+    SELECTION_OPTIONS_CAP,
+    OdooToolHandler,
+)
+
+# What get_fields asks fields_get for in its default view: the curated
+# attributes plus the inputs of the relevance score
+CURATED_REQUEST = list(CURATED_FIELD_ATTRIBUTES) + ["store", "related"]
 
 
 class TestOdooToolHandler:
@@ -1369,8 +1379,6 @@ class TestGetFieldsTool:
         self, handler, mock_connection, mock_access_controller
     ):
         """Omitted attributes → curated set requested; results sorted by name."""
-        from mcp_server_odoo.tools import CURATED_FIELD_ATTRIBUTES
-
         mock_connection.fields_get.return_value = {
             "name": {"type": "char", "string": "Name", "required": True, "readonly": False},
             "state": {
@@ -1383,9 +1391,7 @@ class TestGetFieldsTool:
 
         result = await handler._handle_get_fields_tool("res.partner", None, None)
 
-        mock_connection.fields_get.assert_called_once_with(
-            "res.partner", list(CURATED_FIELD_ATTRIBUTES), None
-        )
+        mock_connection.fields_get.assert_called_once_with("res.partner", CURATED_REQUEST, None)
         assert result.model == "res.partner"
         assert result.total == 3
         assert [f.name for f in result.fields] == ["name", "partner_id", "state"]
@@ -1396,18 +1402,22 @@ class TestGetFieldsTool:
 
     @pytest.mark.asyncio
     async def test_explicit_attributes(self, handler, mock_connection, mock_access_controller):
-        """attributes=['help','store'] passed through; extras carried on FieldInfo."""
+        """attributes=['help','store'] passed through; extras carried on FieldInfo.
+        The scoring inputs are fetched too, and only the requested ones come back."""
         mock_connection.fields_get.return_value = {
-            "name": {"help": "The partner name", "store": True},
+            "name": {"type": "char", "required": True, "help": "The partner name", "store": True},
         }
 
         result = await handler._handle_get_fields_tool("res.partner", None, ["help", "store"])
 
-        mock_connection.fields_get.assert_called_once_with("res.partner", ["help", "store"], None)
-        field = result.fields[0].model_dump()
-        assert field["name"] == "name"
-        assert field["help"] == "The partner name"
-        assert field["store"] is True
+        mock_connection.fields_get.assert_called_once_with(
+            "res.partner", ["help", "store", "type", "required", "related"], None
+        )
+        assert result.fields[0].model_dump(exclude_none=True) == {
+            "name": "name",
+            "help": "The partner name",
+            "store": True,
+        }
 
     @pytest.mark.asyncio
     async def test_field_names_narrow_server_call(
@@ -1415,8 +1425,6 @@ class TestGetFieldsTool:
     ):
         """field_names goes server-side as fields_get's allfields filter;
         unknown names are silently omitted by the server (mocked here)."""
-        from mcp_server_odoo.tools import CURATED_FIELD_ATTRIBUTES
-
         # Server response already narrowed: Odoo skips unknown allfields names
         mock_connection.fields_get.return_value = {
             "name": {"type": "char"},
@@ -1438,24 +1446,18 @@ class TestGetFieldsTool:
         self, handler, mock_connection, mock_access_controller
     ):
         """attributes=[] ≡ omitted → curated defaults (repo-wide [] convention)."""
-        from mcp_server_odoo.tools import CURATED_FIELD_ATTRIBUTES
-
         mock_connection.fields_get.return_value = {"name": {"type": "char", "string": "Name"}}
 
         result = await handler._handle_get_fields_tool("res.partner", None, [])
 
-        mock_connection.fields_get.assert_called_once_with(
-            "res.partner", list(CURATED_FIELD_ATTRIBUTES), None
-        )
+        mock_connection.fields_get.assert_called_once_with("res.partner", CURATED_REQUEST, None)
         assert result.total == 1
 
     @pytest.mark.asyncio
     async def test_empty_field_names_treated_like_omitted(
         self, handler, mock_connection, mock_access_controller
     ):
-        """field_names=[] ≡ omitted → no server-side filter, every field returned."""
-        from mcp_server_odoo.tools import CURATED_FIELD_ATTRIBUTES
-
+        """field_names=[] ≡ omitted → the curated view, no server-side filter."""
         mock_connection.fields_get.return_value = {
             "name": {"type": "char"},
             "email": {"type": "char"},
@@ -1464,11 +1466,91 @@ class TestGetFieldsTool:
 
         result = await handler._handle_get_fields_tool("res.partner", [], None)
 
+        mock_connection.fields_get.assert_called_once_with("res.partner", CURATED_REQUEST, None)
+        assert [f.name for f in result.fields] == ["email", "name", "phone"]
+        assert result.total == 3
+
+    @staticmethod
+    def _wide_model(extra=None):
+        """fields_get output with 80 plain char fields, plus `extra`."""
+        fields = {f"x_field_{i:02d}": {"type": "char", "string": f"F{i}"} for i in range(80)}
+        fields.update(extra or {})
+        return fields
+
+    async def test_default_view_keeps_the_most_relevant_fields(self, handler, mock_connection):
+        mock_connection.fields_get.return_value = self._wide_model(
+            {
+                "id": {"type": "integer", "store": True},
+                "name": {"type": "char", "required": True, "store": True},
+                "partner_id": {"type": "many2one", "required": True, "relation": "res.partner"},
+                "order_line": {"type": "one2many", "required": True, "relation": "x.line"},
+                "image_1920": {"type": "image", "required": True},
+                "note": {"type": "html", "required": True},
+                "message_ids": {"type": "one2many", "required": True},
+                "create_date": {"type": "datetime", "required": True},
+                "webhook_secret": {"type": "char", "required": True},
+                "total": {"type": "monetary", "store": False, "related": "x.total"},
+            }
+        )
+
+        result = await handler._handle_get_fields_tool("sale.order", None, None)
+
+        names = {f.name for f in result.fields}
+        assert {"id", "name", "partner_id", "order_line", "image_1920", "note"} <= names
+        assert not names & {"message_ids", "create_date", "webhook_secret"}
+        # 60 value fields plus the three structure fields
+        assert result.total == len(names) == MAX_SCHEMA_FIELDS + 3
+        assert result.omitted == 90 - result.total
+        assert '["__all__"]' in result.note
+        # the scoring inputs were fetched, not asked for: they do not leak out
+        dumped = [f.model_dump(exclude_none=True) for f in result.fields]
+        assert not any("store" in f or "related" in f for f in dumped)
+
+    async def test_default_view_cuts_long_selection_lists(self, handler, mock_connection):
+        options = [[f"tz{i}", f"Zone {i}"] for i in range(SELECTION_OPTIONS_CAP + 7)]
+        mock_connection.fields_get.return_value = {
+            "tz": {"type": "selection", "selection": options},
+            "state": {"type": "selection", "selection": [["a", "A"], ["b", "B"]]},
+        }
+
+        result = await handler._handle_get_fields_tool("res.partner", None, None)
+
+        by_name = {f.name: f for f in result.fields}
+        assert by_name["tz"].selection == options[:SELECTION_OPTIONS_CAP]
+        assert by_name["tz"].selection_more == 7
+        assert by_name["state"].selection_more is None
+        assert result.omitted is None
+        assert "selection_more" in result.note
+
+    @pytest.mark.parametrize("field_names", [["__all__"], ["name", "__all__"]])
+    async def test_all_returns_every_field_uncut(self, handler, mock_connection, field_names):
+        options = [[f"tz{i}", f"Zone {i}"] for i in range(SELECTION_OPTIONS_CAP + 7)]
+        mock_connection.fields_get.return_value = self._wide_model(
+            {"tz": {"type": "selection", "selection": options}, "message_ids": {}}
+        )
+
+        result = await handler._handle_get_fields_tool("res.partner", field_names, None)
+
         mock_connection.fields_get.assert_called_once_with(
             "res.partner", list(CURATED_FIELD_ATTRIBUTES), None
         )
-        assert [f.name for f in result.fields] == ["email", "name", "phone"]
-        assert result.total == 3
+        assert result.total == 82
+        assert result.omitted is None and result.note is None
+        tz = next(f for f in result.fields if f.name == "tz")
+        assert tz.selection == options and tz.selection_more is None
+
+    async def test_named_fields_are_returned_uncut(self, handler, mock_connection):
+        options = [[f"tz{i}", f"Zone {i}"] for i in range(SELECTION_OPTIONS_CAP + 7)]
+        mock_connection.fields_get.return_value = {
+            "tz": {"type": "selection", "selection": options},
+            "create_date": {"type": "datetime"},
+        }
+
+        result = await handler._handle_get_fields_tool("res.partner", ["tz", "create_date"], None)
+
+        assert [f.name for f in result.fields] == ["create_date", "tz"]
+        assert result.fields[1].selection == options
+        assert result.note is None
 
     @pytest.mark.asyncio
     async def test_registered_wrapper_delegates_to_handler(

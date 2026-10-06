@@ -239,6 +239,17 @@ CURATED_FIELD_ATTRIBUTES = (
     "selection",
 )
 
+# get_fields without field_names returns the top value fields plus the
+# structure fields, and cuts long selection lists (res.partner's tz has ~500
+# values)
+MAX_SCHEMA_FIELDS = 60
+SELECTION_OPTIONS_CAP = 20
+_STRUCTURE_FIELD_TYPES = ("one2many", "many2many", *BINARY_FIELD_TYPES, "html")
+
+# Attributes the schema-relevance score reads; fetched for the curated view
+# even when the caller did not ask for them, and removed again before returning
+_SCHEMA_SCORING_ATTRIBUTES = ("type", "required", "store", "related")
+
 
 def _withheld_fields_note(withheld: List[str]) -> str:
     """Note explaining that credential-like fields were withheld from a bulk read.
@@ -614,6 +625,35 @@ class OdooToolHandler:
             return 0
 
         return max(score, 0)
+
+    def _schema_default_fields(self, fields_info: Dict[str, Dict[str, Any]]) -> List[str]:
+        """Fields for the get_fields default view.
+
+        The top MAX_SCHEMA_FIELDS value fields by read importance, every
+        structure field (x2many, binary, html), and the essential fields. The
+        read score drops structure fields because their values are heavy, but
+        in a schema they are the model's shape (order_line, invoice_line_ids).
+        Ranked against value fields they fall out on large models, so they
+        skip the cap. The technical and credential-name exclusions still apply,
+        scored under a value type. A deliberate divergence from the reference
+        in-process implementation, which ranks them inside the cap.
+        """
+        scored = []
+        structure = []
+        for name, info in fields_info.items():
+            if info.get("type") in _STRUCTURE_FIELD_TYPES:
+                if self._score_field_importance(name, dict(info, type="char")) > 0:
+                    structure.append(name)
+                continue
+            score = self._score_field_importance(name, info)
+            if score > 0:
+                scored.append((name, score))
+        scored.sort(key=lambda item: (-item[1], item[0]))
+        selected = [name for name, _ in scored[:MAX_SCHEMA_FIELDS]] + structure
+        for name in ("id", "name", "display_name", "active"):
+            if name in fields_info and name not in selected:
+                selected.append(name)
+        return selected
 
     def _get_smart_default_fields(self, model: str) -> Optional[List[str]]:
         """Get smart default fields for a model using field importance scoring.
@@ -1052,9 +1092,11 @@ class OdooToolHandler:
 
             Args:
                 model: Technical model name (e.g. 'res.partner').
-                field_names: Restrict the result to these field names.
-                    Omit to describe every field on the model. An empty
-                    list [] is treated like omitting it (all fields).
+                field_names: Restrict the result to these field names, or
+                    ["__all__"] for every field on the model. Omit for the
+                    60 most relevant value fields plus every relation, file
+                    and HTML field, with selection lists cut at 20 values;
+                    an empty list [] is treated like omitting it.
                 attributes: Which field attributes to return. Omit for the
                     curated default set (type, string, required, readonly,
                     relation, selection); an empty list [] is treated like
@@ -1971,21 +2013,60 @@ class OdooToolHandler:
                 selected_attributes = (
                     list(attributes) if attributes else list(CURATED_FIELD_ATTRIBUTES)
                 )
+                show_all = bool(field_names) and "__all__" in field_names
+                explicit_names = list(field_names) if field_names and not show_all else None
+                curated = not explicit_names and not show_all
+                request_attributes = selected_attributes
+                if curated:
+                    request_attributes = selected_attributes + [
+                        a for a in _SCHEMA_SCORING_ATTRIBUTES if a not in selected_attributes
+                    ]
                 # field_names go server-side as fields_get's allfields
-                # filter; unknown names are silently omitted by Odoo
-                # ([] ≡ omitted here too: no filter, every field returned).
+                # filter; unknown names are silently omitted by Odoo.
                 fields_metadata = await asyncio.to_thread(
-                    self.connection.fields_get,
-                    model,
-                    selected_attributes,
-                    list(field_names) if field_names else None,
+                    self.connection.fields_get, model, request_attributes, explicit_names
                 )
+
+                omitted = 0
+                capped = False
+                if curated:
+                    keep = set(self._schema_default_fields(fields_metadata))
+                    omitted = len(fields_metadata) - len(keep)
+                    fields_metadata = {
+                        name: {k: v for k, v in meta.items() if k in selected_attributes}
+                        for name, meta in fields_metadata.items()
+                        if name in keep
+                    }
+                    for meta in fields_metadata.values():
+                        selection = meta.get("selection")
+                        if selection and len(selection) > SELECTION_OPTIONS_CAP:
+                            meta["selection_more"] = len(selection) - SELECTION_OPTIONS_CAP
+                            meta["selection"] = selection[:SELECTION_OPTIONS_CAP]
+                            capped = True
 
                 fields = [
                     FieldInfo(**{"name": name, **meta})
                     for name, meta in sorted(fields_metadata.items())
                 ]
-                return FieldsResult(model=model, fields=fields, total=len(fields))
+                notes = []
+                if omitted:
+                    notes.append(
+                        f"Showing {len(fields)} of {len(fields) + omitted} "
+                        'fields. Pass field_names=[...] for specific fields or ["__all__"] '
+                        "for the complete schema."
+                    )
+                if capped:
+                    notes.append(
+                        f"Selection lists over {SELECTION_OPTIONS_CAP} values are cut "
+                        "(see selection_more); name the field in field_names to get every value."
+                    )
+                return FieldsResult(
+                    model=model,
+                    fields=fields,
+                    total=len(fields),
+                    omitted=omitted or None,
+                    note=" ".join(notes) or None,
+                )
 
         except ValidationError:
             raise

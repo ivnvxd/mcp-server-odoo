@@ -94,6 +94,9 @@ class FieldInfo(BaseModel):
     selection: Optional[List[List[Any]]] = Field(
         default=None, description="Selection options as [value, label] pairs"
     )
+    selection_more: Optional[int] = Field(
+        default=None, description="Number of selection options left out of a cut list"
+    )
 
 
 class FieldsResult(BaseModel):
@@ -102,6 +105,10 @@ class FieldsResult(BaseModel):
     model: str = Field(description="Odoo model name that was described")
     fields: List[FieldInfo] = Field(description="Field definitions, sorted by name")
     total: int = Field(description="Number of fields returned")
+    omitted: Optional[int] = Field(
+        default=None, description="Number of fields left out of the default view"
+    )
+    note: Optional[str] = Field(default=None, description="How to get the fields left out")
 
 
 # --- Get Current Context ---
