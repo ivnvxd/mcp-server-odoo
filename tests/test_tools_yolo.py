@@ -577,3 +577,52 @@ class TestCreateRecordsYoloIntegration:
             if created_ids:
                 connection.unlink("res.partner", created_ids)
             connection.disconnect()
+
+
+@pytest.mark.yolo
+class TestUpdateRecordsPerRecordYoloIntegration:
+    """Live-Odoo test for update_records(updates=...) through web_save_multi."""
+
+    @pytest.mark.asyncio
+    async def test_different_values_per_record_in_one_call(self):
+        from mcp_server_odoo.access_control import AccessController
+        from mcp_server_odoo.odoo_connection import OdooConnection
+
+        config = OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            username=os.getenv("ODOO_USER", "admin"),
+            password=os.getenv("ODOO_PASSWORD", "admin"),
+            database=os.getenv("ODOO_DB"),
+            yolo_mode="true",
+        )
+        connection = OdooConnection(config)
+        connection.connect()
+        connection.authenticate()
+        major = connection.get_major_version()
+        if major is not None and major < 19:
+            connection.disconnect()
+            pytest.skip("web_save_multi needs Odoo 19 or later")
+        created_ids = []
+        try:
+            created_ids = [
+                connection.create("res.partner", {"name": f"Per Record {i}"}) for i in (1, 2)
+            ]
+            handler = OdooToolHandler(MagicMock(), connection, AccessController(config), config)
+
+            result = await handler._handle_update_records_each_tool(
+                "res.partner",
+                [
+                    {"id": created_ids[0], "values": {"phone": "+100"}},
+                    {"id": created_ids[1], "values": {"phone": "+200"}},
+                ],
+            )
+
+            assert result["updated_count"] == 2
+            phones = {
+                r["id"]: r["phone"] for r in connection.read("res.partner", created_ids, ["phone"])
+            }
+            assert phones == {created_ids[0]: "+100", created_ids[1]: "+200"}
+        finally:
+            if created_ids:
+                connection.unlink("res.partner", created_ids)
+            connection.disconnect()

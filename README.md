@@ -635,7 +635,9 @@ Update an existing record.
 ```
 
 ### `update_records`
-Apply the same values to several records of one model in one call. The call accepts at most 100 distinct record IDs. If any ID does not exist, nothing is written. Archived records can be updated, for example to unarchive them with `"active": true`.
+Update several records of one model in one call, with at most 100 distinct records. If any ID does not exist, nothing is written. Archived records can be updated, for example to unarchive them with `"active": true`. Use one of two forms.
+
+The same values on every record, on any Odoo version:
 
 ```json
 {
@@ -646,6 +648,20 @@ Apply the same values to several records of one model in one call. The call acce
   }
 }
 ```
+
+Different values per record, in one transaction, on Odoo 19 and later:
+
+```json
+{
+  "model": "res.partner",
+  "updates": [
+    {"id": 42, "values": {"phone": "+1 555 0100"}},
+    {"id": 43, "values": {"phone": "+1 555 0101"}}
+  ]
+}
+```
+
+The second form uses Odoo's `web_save_multi`. In standard mode, the Odoo MCP module must allow that method.
 
 ### `delete_record`
 Delete a record from Odoo.

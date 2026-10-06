@@ -130,3 +130,135 @@ class TestCreateRecords:
         connection.create_many.assert_called_once_with(
             "res.partner", [{"name": "Alpha"}, {"name": "Beta"}]
         )
+
+
+@pytest.fixture
+def tool_app(connection, access, config):
+    """A real app, so update_records is called with its form dispatch."""
+    app = MCPServer("batch-test")
+    OdooToolHandler(app, connection, access, config)
+    return app
+
+
+class TestUpdateRecordsPerRecordValues:
+    """update_records(updates=[{id, values}]): one web_save_multi call, Odoo 19+."""
+
+    UPDATES = [{"id": 5, "values": {"phone": "1"}}, {"id": 6, "values": {"phone": "2"}}]
+
+    @pytest.fixture(autouse=True)
+    def odoo_19(self, connection):
+        connection.get_major_version.return_value = 19
+        connection.search.return_value = [5, 6]
+        connection.web_save_multi.return_value = [
+            {"id": 5, "display_name": "Alpha"},
+            {"id": 6, "display_name": "Beta"},
+        ]
+
+    async def test_writes_each_record_in_one_call(self, handler, connection, access):
+        result = await handler._handle_update_records_each_tool("res.partner", self.UPDATES)
+
+        connection.web_save_multi.assert_called_once_with(
+            "res.partner", [5, 6], [{"phone": "1"}, {"phone": "2"}]
+        )
+        connection.search.assert_called_once_with(
+            "res.partner", [["id", "in", [5, 6]]], context={"active_test": False}
+        )
+        access.validate_model_access.assert_called_once_with("res.partner", "write")
+        assert result["updated_count"] == 2
+        assert result["records"][1] == {"id": 6, "display_name": "Beta"}
+
+    @pytest.mark.parametrize("major", [16, 17, 18])
+    async def test_refused_before_odoo_19(self, handler, connection, major):
+        connection.get_major_version.return_value = major
+
+        with pytest.raises(ValidationError, match="need Odoo 19 or later"):
+            await handler._handle_update_records_each_tool("res.partner", self.UPDATES)
+        connection.web_save_multi.assert_not_called()
+
+    async def test_refuses_a_record_given_twice(self, handler, connection):
+        updates = self.UPDATES + [{"id": 5, "values": {"phone": "3"}}]
+
+        with pytest.raises(ValidationError, match="Record 5 appears more than once"):
+            await handler._handle_update_records_each_tool("res.partner", updates)
+        connection.web_save_multi.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"id": 5},
+            {"id": 5, "values": {}},
+            {"id": True, "values": {"phone": "1"}},
+            {"values": {"phone": "1"}},
+            [5, {"phone": "1"}],
+        ],
+    )
+    async def test_refuses_a_malformed_entry(self, handler, connection, entry):
+        with pytest.raises(ValidationError, match="Update 0: provide"):
+            await handler._handle_update_records_each_tool("res.partner", [entry])
+        connection.web_save_multi.assert_not_called()
+
+    async def test_refuses_more_than_the_cap(self, handler, connection):
+        updates = [{"id": i, "values": {"phone": "1"}} for i in range(1, MAX_BATCH_RECORDS + 2)]
+
+        with pytest.raises(ValidationError, match="Too many records"):
+            await handler._handle_update_records_each_tool("res.partner", updates)
+
+    async def test_names_missing_records(self, handler, connection):
+        connection.search.return_value = [5]
+
+        with pytest.raises(ValidationError, match=r"not found.*\[6\]"):
+            await handler._handle_update_records_each_tool("res.partner", self.UPDATES)
+        connection.web_save_multi.assert_not_called()
+
+    async def test_refusal_by_the_mcp_module_keeps_its_text(self, handler, connection):
+        """Standard mode: a module version without web_save_multi in its method map refuses it."""
+        connection.web_save_multi.side_effect = OdooValidationFault(
+            "Access denied by MCP for model 'res.partner' method 'web_save_multi'."
+        )
+
+        with pytest.raises(ValidationError, match="method 'web_save_multi'"):
+            await handler._handle_update_records_each_tool("res.partner", self.UPDATES)
+
+    async def test_refuses_an_attachment_on_an_inaccessible_model(self, handler, connection):
+        connection.search_read.return_value = [{"id": 5, "res_model": "hr.payslip"}]
+
+        def check(model, operation):
+            if model == "hr.payslip":
+                raise AccessControlError("not enabled")
+
+        handler.access_controller.validate_model_access.side_effect = check
+
+        with pytest.raises(ValidationError, match="hr.payslip"):
+            await handler._handle_update_records_each_tool(
+                "ir.attachment", [{"id": 5, "values": {"name": "x.pdf"}}]
+            )
+        connection.web_save_multi.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "arguments,message",
+        [
+            (
+                {"record_ids": [5], "values": {"phone": "1"}, "updates": UPDATES},
+                "not both",
+            ),
+            ({"record_ids": [5]}, "Provide record_ids with values, or updates"),
+            ({}, "Provide record_ids with values, or updates"),
+        ],
+    )
+    async def test_exactly_one_form(self, tool_app, connection, arguments, message):
+        async with Client(tool_app, mode="legacy") as client:
+            result = await client.call_tool("update_records", {"model": "res.partner", **arguments})
+
+        assert result.is_error
+        assert message in result.content[0].text
+        connection.write.assert_not_called()
+        connection.web_save_multi.assert_not_called()
+
+    async def test_updates_form_through_the_protocol(self, tool_app, connection):
+        async with Client(tool_app, mode="legacy") as client:
+            result = await client.call_tool(
+                "update_records", {"model": "res.partner", "updates": self.UPDATES}
+            )
+
+        assert not result.is_error, result.content
+        assert result.structured_content["updated_count"] == 2

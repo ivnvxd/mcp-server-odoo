@@ -1334,6 +1334,28 @@ class OdooConnection:
             logger.error(f"Failed to create {model} records: {e}")
             raise
 
+    def web_save_multi(
+        self, model: str, ids: List[int], vals_list: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Write different values to each record in one call (Odoo 19 and later).
+
+        ``vals_list[i]`` goes to ``ids[i]``. One RPC is one transaction, so
+        either every record is written or none.
+
+        Returns:
+            ``id`` and ``display_name`` of each record, in the order of ``ids``
+        """
+        try:
+            with self._performance_manager.monitor.track_operation(f"web_save_multi_{model}"):
+                rows = self.execute_kw(
+                    model, "web_save_multi", [ids, vals_list, {"display_name": {}}], {}
+                )
+                logger.info(f"Updated {len(ids)} {model} record(s) with per-record values")
+                return rows
+        except Exception as e:
+            logger.error(f"Failed to update {model} records: {e}")
+            raise
+
     def write(self, model: str, ids: List[int], values: Dict[str, Any]) -> bool:
         """Update existing records.
 

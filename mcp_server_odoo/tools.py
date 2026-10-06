@@ -1192,28 +1192,42 @@ class OdooToolHandler:
         )
         async def update_records(
             model: str,
-            record_ids: List[int],
-            values: Dict[str, Any],
+            record_ids: Optional[List[int]] = None,
+            values: Optional[Dict[str, Any]] = None,
+            updates: Optional[List[Dict[str, Any]]] = None,
             ctx: Optional[Context] = None,
         ) -> BulkUpdateResult:
-            """Update multiple existing records with the same values in one call.
+            """Update several existing records of the same model in one call.
 
-            Use this instead of calling update_record in a loop when applying
-            the same field values to several records of the same model — one
-            RPC round-trip instead of N. Capped at 100 distinct records per
-            call; for larger batches, split into multiple update_records calls.
-            Archived records can be updated (e.g. values={"active": true}).
+            Use this instead of calling update_record in a loop — one RPC
+            round-trip instead of N. Use exactly one of the two forms:
+
+            - record_ids + values: apply the same values to every record.
+            - updates: [{"id": 7, "values": {...}}, ...] — different values per
+              record, written in one transaction (Odoo 19 and later).
+
+            Capped at 100 distinct records per call; for larger batches, split
+            into multiple update_records calls. Archived records can be updated
+            (e.g. values={"active": true}).
 
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
-                record_ids: The record IDs to update (max 100)
-                values: Field values to apply to every record
+                record_ids: The record IDs to update (max 100), with values
+                values: Field values to apply to every record in record_ids
+                updates: Per-record values, each {"id": <int>, "values": {...}}
 
             Returns:
                 Updated record details (id, display_name) for every record,
                 with confirmation.
             """
-            result = await self._handle_update_records_tool(model, record_ids, values, ctx)
+            if updates is not None:
+                if record_ids is not None or values is not None:
+                    raise ValidationError("Use either record_ids with values, or updates, not both")
+                result = await self._handle_update_records_each_tool(model, updates, ctx)
+            else:
+                if record_ids is None or values is None:
+                    raise ValidationError("Provide record_ids with values, or updates")
+                result = await self._handle_update_records_tool(model, record_ids, values, ctx)
             return BulkUpdateResult(**result)
 
         @self.app.tool(
@@ -2544,6 +2558,121 @@ class OdooToolHandler:
                     "updated_count": len(records),
                     "records": records,
                     "message": (f"Successfully updated {len(records)} {model} record(s)"),
+                }
+
+        except ValidationError:
+            raise
+        except NotFoundError as e:
+            raise ValidationError(str(e)) from e
+        except MCPPermissionError as e:
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except OdooValidationFault as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in update_records tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to update records: {sanitized_msg}") from e
+
+    async def _handle_update_records_each_tool(
+        self,
+        model: str,
+        updates: List[Dict[str, Any]],
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle the per-record form of update_records (``web_save_multi``)."""
+        try:
+            with perf_logger.track_operation("tool_update_records_each", model=model):
+                if not updates:
+                    raise ValidationError("No updates provided")
+                if len(updates) > MAX_BATCH_RECORDS:
+                    raise ValidationError(
+                        f"Too many records: {len(updates)} provided, maximum "
+                        f"{MAX_BATCH_RECORDS} per call"
+                    )
+                ids: List[int] = []
+                vals_list: List[Dict[str, Any]] = []
+                for index, entry in enumerate(updates):
+                    record_id = entry.get("id") if isinstance(entry, dict) else None
+                    entry_values = entry.get("values") if isinstance(entry, dict) else None
+                    if (
+                        not isinstance(record_id, int)
+                        or isinstance(record_id, bool)
+                        or not isinstance(entry_values, dict)
+                        or not entry_values
+                    ):
+                        raise ValidationError(
+                            f'Update {index}: provide {{"id": <record id>, "values": {{...}}}}'
+                        )
+                    _validate_record_id(record_id)
+                    _check_xmlrpc_int_bounds(entry_values, f"updates[{index}].values")
+                    if record_id in ids:
+                        # Two value sets for one record: which one wins would be
+                        # an accident of order, so refuse instead of merging
+                        raise ValidationError(f"Record {record_id} appears more than once")
+                    ids.append(record_id)
+                    vals_list.append(entry_values)
+
+                # web_save_multi exists from Odoo 19; before it there is no
+                # atomic per-record write over RPC, and N separate writes can
+                # fail halfway. An unknown version is tried as is.
+                major = self.connection.get_major_version()
+                if isinstance(major, int) and major < 19:
+                    raise ValidationError(
+                        f"Different values per record need Odoo 19 or later (this is "
+                        f"Odoo {major}). Use update_record per record, or record_ids "
+                        f"with values for shared values."
+                    )
+
+                # One check for the whole batch, as the shared-values form does
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, model, "write"
+                )
+                await self._ctx_info(ctx, f"Updating {len(ids)} {model} record(s)...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                if model == "ir.attachment":
+                    # Both directions, as in update_record
+                    await self._gate_attachment_records(ids)
+                    for entry_values in vals_list:
+                        if "res_model" in entry_values:
+                            await self._gate_attachment_target(
+                                entry_values["res_model"], "attachment would be moved to"
+                            )
+
+                # Name every missing id before writing anything; active_test=False
+                # so that archived records count (see the shared-values form)
+                existing_ids = set(
+                    await asyncio.to_thread(
+                        self.connection.search,
+                        model,
+                        [["id", "in", ids]],
+                        context={"active_test": False},
+                    )
+                )
+                missing_ids = [rid for rid in ids if rid not in existing_ids]
+                if missing_ids:
+                    raise NotFoundError(f"Record(s) not found: {model} with ID(s) {missing_ids}")
+
+                rows = await asyncio.to_thread(
+                    self.connection.web_save_multi, model, ids, vals_list
+                )
+                records = [
+                    await asyncio.to_thread(self._process_record_dates, row, model) for row in rows
+                ]
+
+                return {
+                    "success": True,
+                    "updated_count": len(records),
+                    "records": records,
+                    "message": f"Successfully updated {len(records)} {model} record(s)",
                 }
 
         except ValidationError:
