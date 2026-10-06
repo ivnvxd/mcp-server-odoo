@@ -1870,6 +1870,11 @@ class TestAggregateRecordsTool:
         # Default to v19 so this class focuses on the formatted_read_group path.
         # The legacy read_group fallback is exercised by TestAggregateRecordsReadGroupFallback.
         connection.get_major_version = MagicMock(return_value=19)
+        # Field types for the aggregate type check
+        connection.fields_get.return_value = {
+            "amount_total": {"type": "monetary"},
+            "partner_id": {"type": "many2one"},
+        }
         return connection
 
     @pytest.fixture
@@ -1889,6 +1894,63 @@ class TestAggregateRecordsTool:
     @pytest.fixture
     def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
         return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+
+    @pytest.mark.parametrize(
+        "spec,field,field_type",
+        [
+            ("name:sum", "name", "char"),
+            ("date_order:avg", "date_order", "datetime"),
+            ("active:sum", "active", "boolean"),
+            ("amount_total:bool_and", "amount_total", "monetary"),
+            ("amount_total:bool_or", "amount_total", "monetary"),
+        ],
+    )
+    async def test_typed_function_on_the_wrong_field_type_is_refused(
+        self, handler, mock_connection, spec, field, field_type
+    ):
+        """Odoo checks only the function name; name:sum would fail in SQL."""
+        mock_connection.fields_get.return_value = {field: {"type": field_type}}
+
+        with pytest.raises(ValidationError, match=f"needs a field of type .* '{field}' is a"):
+            await handler._handle_aggregate_records_tool(
+                "sale.order", None, [spec], None, None, None, 0
+            )
+        mock_connection.execute_kw.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "spec", ["active:bool_or", "amount_total:avg", "name:max", "name:count_distinct"]
+    )
+    async def test_fitting_or_untyped_function_is_sent(self, handler, mock_connection, spec):
+        mock_connection.fields_get.return_value = {
+            "name": {"type": "char"},
+            "active": {"type": "boolean"},
+            "amount_total": {"type": "monetary"},
+        }
+        mock_connection.execute_kw.return_value = []
+
+        await handler._handle_aggregate_records_tool(
+            "sale.order", None, [spec], None, None, None, 0
+        )
+
+        mock_connection.execute_kw.assert_called_once()
+
+    async def test_unknown_field_or_function_is_left_to_odoo(self, handler, mock_connection):
+        mock_connection.execute_kw.return_value = []
+
+        await handler._handle_aggregate_records_tool(
+            "sale.order", None, ["no_such_field:sum", "name:median"], None, None, None, 0
+        )
+
+        mock_connection.execute_kw.assert_called_once()
+
+    async def test_no_typed_function_needs_no_field_metadata(self, handler, mock_connection):
+        mock_connection.execute_kw.return_value = []
+
+        await handler._handle_aggregate_records_tool(
+            "sale.order", ["partner_id"], None, None, None, None, 0
+        )
+
+        mock_connection.fields_get.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_success_with_sum_aggregate(
@@ -2237,6 +2299,11 @@ class TestAggregateRecordsReadGroupFallback:
         connection.is_authenticated = True
         # v18 → triggers the read_group fallback path
         connection.get_major_version = MagicMock(return_value=18)
+        # Field types for the aggregate type check
+        connection.fields_get.return_value = {
+            "amount_total": {"type": "monetary"},
+            "partner_id": {"type": "many2one"},
+        }
         return connection
 
     @pytest.fixture
@@ -6058,3 +6125,66 @@ class TestSmartDefaultsEmptySelection:
         assert handler.connection.read.call_args[0][2] is None
         assert "openai_api_key" not in result["records"][0]
         assert "openai_api_key" in result["note"]
+
+
+class TestJsonObjectReprScrub:
+    """A json field holds the repr of a value Odoo could not encode; it reads as null."""
+
+    REPR = "<function validate at 0x7f3a2b1c9d40>"
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.get_major_version.return_value = 19
+        connection.fields_get.return_value = {
+            "id": {"type": "integer"},
+            "name": {"type": "char"},
+            "options": {"type": "json"},
+        }
+        connection.search.return_value = [3]
+        connection.search_count.return_value = 1
+        connection.read.return_value = [
+            {
+                "id": 3,
+                "name": "<not a repr at 0x1>",
+                "options": {
+                    "validator": self.REPR,
+                    "steps": [{"check": self.REPR, "label": "A <b> tag at 0x10"}, 4],
+                    "note": "kept",
+                },
+            }
+        ]
+        return connection
+
+    @pytest.fixture
+    def handler(self, connection):
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+        return OdooToolHandler(
+            MagicMock(spec=MCPServer), connection, MagicMock(spec=AccessController), config
+        )
+
+    EXPECTED = {
+        "validator": None,
+        "steps": [{"check": None, "label": "A <b> tag at 0x10"}, 4],
+        "note": "kept",
+    }
+
+    async def test_get_record(self, handler):
+        result = await handler._handle_get_record_tool("x.model", 3, ["name", "options"])
+
+        assert result.record["options"] == self.EXPECTED
+        # only json fields are scrubbed
+        assert result.record["name"] == "<not a repr at 0x1>"
+
+    async def test_search_records(self, handler):
+        result = await handler._handle_search_tool("x.model", None, None, 10, 0, None)
+
+        assert result["records"][0]["options"] == self.EXPECTED
+
+    async def test_values_pass_through_without_field_metadata(self, handler, connection):
+        connection.fields_get.side_effect = Exception("metadata unavailable")
+
+        result = await handler._handle_get_record_tool("x.model", 3, ["name", "options"])
+
+        assert result.record["options"]["validator"] == self.REPR

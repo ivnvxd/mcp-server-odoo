@@ -272,6 +272,32 @@ MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 3 // 4 - 64 * 1024
 bodies over 4 MiB (413) before any tool runs; base64 grows the payload by 4/3,
 and 64 KiB is left for the JSON-RPC envelope."""
 
+# Aggregate functions that need a specific field type. Odoo checks only the
+# function name, so name:sum reaches SQL and fails there as an internal error.
+# The other functions (max, min, count, array_agg, ...) take any column.
+_TYPED_AGGREGATES = {
+    "sum": ("integer", "float", "monetary"),
+    "avg": ("integer", "float", "monetary"),
+    "bool_and": ("boolean",),
+    "bool_or": ("boolean",),
+}
+
+# The string a json field holds for a value Odoo could not encode, such as a
+# function: its Python repr, e.g. "<function validate at 0x7f...>"
+_OBJECT_REPR_RE = re.compile(r"^<[^<>]+ at 0x[0-9a-fA-F]+>$")
+
+
+def _scrub_object_reprs(value: Any) -> Any:
+    """Replace object reprs inside a json field value with None."""
+    if isinstance(value, dict):
+        return {key: _scrub_object_reprs(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub_object_reprs(item) for item in value]
+    if isinstance(value, str) and _OBJECT_REPR_RE.match(value):
+        return None
+    return value
+
+
 # How long the fields a bulk read had to leave out stay known: the lifetime of
 # the fields_get cache (PerformanceManager.cache_fields)
 UNREADABLE_FIELDS_TTL = 3600
@@ -785,6 +811,51 @@ class OdooToolHandler:
         return self._find_unreadable_fields(
             model, record_id, names[:middle]
         ) + self._find_unreadable_fields(model, record_id, names[middle:])
+
+    def _scrub_json_fields(self, model: str, records: List[Dict[str, Any]]) -> None:
+        """Replace object reprs in the json fields of ``records`` with None
+        (in place, blocking).
+
+        Odoo stores a value it cannot encode, such as a function, as its repr,
+        which carries a memory address and means nothing to a client. Without
+        field metadata the values pass through unchanged.
+        """
+        try:
+            fields_info = self.connection.fields_get(model)
+            names = [
+                name for name, meta in fields_info.items() if (meta or {}).get("type") == "json"
+            ]
+        except Exception as e:
+            logger.debug(f"Could not get field metadata for {model}; json values unchanged: {e}")
+            return
+        for record in records:
+            for name in names:
+                if record.get(name):
+                    record[name] = _scrub_object_reprs(record[name])
+
+    def _check_aggregate_types(self, model: str, aggregates: List[str]) -> None:
+        """Refuse an aggregate whose function does not fit the field type (blocking).
+
+        Unknown fields and functions are left to Odoo, which refuses them with
+        a clear message.
+        """
+        typed = [
+            spec
+            for spec in aggregates
+            if isinstance(spec, str) and spec.partition(":")[2] in _TYPED_AGGREGATES
+        ]
+        if not typed:
+            return
+        fields_info = self.connection.fields_get(model)
+        for spec in typed:
+            name, _, function = spec.partition(":")
+            field_type = (fields_info.get(name) or {}).get("type")
+            allowed = _TYPED_AGGREGATES[function]
+            if field_type is not None and field_type not in allowed:
+                raise ValidationError(
+                    f"Aggregate '{spec}' needs a field of type {', '.join(allowed)}. "
+                    f"'{name}' is a {field_type} field."
+                )
 
     def _binary_field_names(self, model: str) -> Set[str]:
         """Names of binary/image fields on ``model``.
@@ -1880,6 +1951,7 @@ class OdooToolHandler:
                     if binary_names:
                         for record in records:
                             self._replace_binary_values(model, record, binary_names)
+                    await asyncio.to_thread(self._scrub_json_fields, model, records)
                     # Process datetime fields in each record
                     records = await asyncio.to_thread(
                         lambda: [self._process_record_dates(record, model) for record in records]
@@ -2007,6 +2079,7 @@ class OdooToolHandler:
                 binary_names = await asyncio.to_thread(self._binary_field_names, model)
                 if binary_names:
                     self._replace_binary_values(model, record, binary_names, record_id=record_id)
+                await asyncio.to_thread(self._scrub_json_fields, model, [record])
 
                 # Inline preview: resolve display names for small x2many
                 # collections (ids in the record stay untouched)
@@ -3781,6 +3854,7 @@ class OdooToolHandler:
                 # otherwise formatted_read_group returns only the groupby
                 # keys with no quantitative data, which defeats the tool.
                 effective_aggregates = aggregates if aggregates else ["__count"]
+                await asyncio.to_thread(self._check_aggregate_types, model, effective_aggregates)
 
                 # Peek one group past the page: the grouping methods offer no
                 # cheap "count of groups", so request limit+1 — an extra row
