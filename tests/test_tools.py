@@ -93,6 +93,7 @@ class TestOdooToolHandler:
             "get_current_context",
             "list_models",
             "create_record",
+            "create_records",
             "update_record",
             "update_records",
             "delete_record",
@@ -3051,7 +3052,7 @@ class TestUpdateRecordsTool:
 
     @pytest.mark.asyncio
     async def test_update_records_over_cap_rejected(self, handler, mock_connection, mock_app):
-        """More than MAX_BULK_UPDATE_RECORDS ids is rejected before any RPC."""
+        """More than MAX_BATCH_RECORDS ids is rejected before any RPC."""
         update_records = mock_app._tools["update_records"]
         with pytest.raises(ValidationError, match="Too many records"):
             await update_records(

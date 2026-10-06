@@ -44,6 +44,7 @@ from .odoo_connection import (
 )
 from .schemas import (
     AggregateResult,
+    BulkCreateResult,
     BulkUpdateResult,
     CallModelMethodResult,
     CompanyInfo,
@@ -240,9 +241,10 @@ def _withheld_fields_note(withheld: List[str]) -> str:
     return f"{withheld_note(withheld)} (use the 'fields' parameter)."
 
 
-MAX_BULK_UPDATE_RECORDS = 100
-"""Cap on record_ids per update_records call, to bound the blast radius of a
-single bulk write under YOLO mode (no per-model MCP-side write approval)."""
+MAX_BATCH_RECORDS = 100
+"""Cap on records per create_records/update_records call, to bound the blast
+radius of a single bulk write under YOLO mode (no per-model MCP-side write
+approval)."""
 
 
 def _validate_record_id(record_id: int, label: str = "record ID") -> None:
@@ -1120,6 +1122,36 @@ class OdooToolHandler:
             """
             result = await self._handle_create_record_tool(model, values, ctx)
             return CreateResult(**result)
+
+        @self.app.tool(
+            title="Create Records (Bulk)",
+            annotations=ToolAnnotations(
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=True,
+            ),
+        )
+        async def create_records(
+            model: str,
+            records: List[Dict[str, Any]],
+            ctx: Optional[Context] = None,
+        ) -> BulkCreateResult:
+            """Create several records of the same model in one call.
+
+            Use this instead of calling create_record in a loop: one RPC
+            round-trip and one transaction, so either every record is created
+            or none is. At most 100 records per call; split larger batches.
+
+            Args:
+                model: The Odoo model name (e.g., 'res.partner')
+                records: Field values of each new record (max 100)
+
+            Returns:
+                id, display_name and url of each created record, in input order.
+            """
+            result = await self._handle_create_records_tool(model, records, ctx)
+            return BulkCreateResult(**result)
 
         @self.app.tool(
             title="Update Record",
@@ -2244,6 +2276,89 @@ class OdooToolHandler:
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to create record: {sanitized_msg}") from e
 
+    async def _handle_create_records_tool(
+        self,
+        model: str,
+        records: List[Dict[str, Any]],
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle bulk create_records tool request."""
+        try:
+            with perf_logger.track_operation("tool_create_records", model=model):
+                if not records:
+                    raise ValidationError("No records provided")
+                if len(records) > MAX_BATCH_RECORDS:
+                    raise ValidationError(
+                        f"Too many records: {len(records)} provided, maximum "
+                        f"{MAX_BATCH_RECORDS} per call"
+                    )
+                for index, values in enumerate(records):
+                    if not isinstance(values, dict) or not values:
+                        raise ValidationError(
+                            f"Record {index}: provide a non-empty object of field values"
+                        )
+                    # Fail cleanly before any RPC — see create_record
+                    _check_xmlrpc_int_bounds(values, f"records[{index}]")
+
+                # One check for the whole batch, as update_records does
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, model, "create"
+                )
+                await self._ctx_info(ctx, f"Creating {len(records)} {model} record(s)...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                if model == "ir.attachment":
+                    # Same gate as create_record, per planted attachment
+                    for values in records:
+                        await self._gate_attachment_target(
+                            values.get("res_model"), "attachment would be attached to"
+                        )
+
+                record_ids = await asyncio.to_thread(self.connection.create_many, model, records)
+
+                # display_name only — universal and cheap; get_record for more.
+                rows = await asyncio.to_thread(
+                    self.connection.read, model, record_ids, ["id", "display_name"]
+                )
+                by_id = {row["id"]: row for row in rows}
+                created = []
+                for record_id in record_ids:
+                    row = await asyncio.to_thread(
+                        self._process_record_dates,
+                        by_id.get(record_id, {"id": record_id}),
+                        model,
+                    )
+                    created.append(
+                        {**row, "url": self.connection.build_record_url(model, record_id)}
+                    )
+
+                return {
+                    "success": True,
+                    "created_count": len(created),
+                    "records": created,
+                    "message": f"Successfully created {len(created)} {model} record(s)",
+                }
+
+        except ValidationError:
+            raise
+        except MCPPermissionError as e:
+            # Attachment-gate denial surfaced verbatim — see _handle_get_record_tool.
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except OdooValidationFault as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in create_records tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to create records: {sanitized_msg}") from e
+
     async def _handle_update_record_tool(
         self,
         model: str,
@@ -2358,10 +2473,10 @@ class OdooToolHandler:
                 # A repeated id is one record: dedupe (order kept) before the
                 # cap, so the cap and the reported count are about records
                 record_ids = list(dict.fromkeys(record_ids))
-                if len(record_ids) > MAX_BULK_UPDATE_RECORDS:
+                if len(record_ids) > MAX_BATCH_RECORDS:
                     raise ValidationError(
                         f"Too many records: {len(record_ids)} provided, maximum "
-                        f"{MAX_BULK_UPDATE_RECORDS} per call"
+                        f"{MAX_BATCH_RECORDS} per call"
                     )
                 for rid in record_ids:
                     _validate_record_id(rid)

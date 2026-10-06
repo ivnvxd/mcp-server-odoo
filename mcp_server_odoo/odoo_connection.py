@@ -1317,6 +1317,23 @@ class OdooConnection:
             logger.error(f"Failed to create {model} record: {e}")
             raise
 
+    def create_many(self, model: str, vals_list: List[Dict[str, Any]]) -> List[int]:
+        """Create several records in one ``create(vals_list)`` call.
+
+        One RPC is one transaction: either every record is created or none.
+
+        Returns:
+            IDs of the created records, in the order of ``vals_list``
+        """
+        try:
+            with self._performance_manager.monitor.track_operation(f"create_{model}"):
+                record_ids = self.execute_kw(model, "create", [vals_list], {})
+                logger.info(f"Created {len(record_ids)} {model} record(s)")
+                return record_ids
+        except Exception as e:
+            logger.error(f"Failed to create {model} records: {e}")
+            raise
+
     def write(self, model: str, ids: List[int], values: Dict[str, Any]) -> bool:
         """Update existing records.
 

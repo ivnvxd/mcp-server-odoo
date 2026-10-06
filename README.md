@@ -607,6 +607,19 @@ Create a new record in Odoo.
 }
 ```
 
+### `create_records`
+Create several records of one model in one call. The call accepts at most 100 records. It is one transaction: either every record is created or none.
+
+```json
+{
+  "model": "res.partner",
+  "records": [
+    {"name": "Customer A", "email": "a@example.com"},
+    {"name": "Customer B", "email": "b@example.com"}
+  ]
+}
+```
+
 ### `update_record`
 Update an existing record.
 

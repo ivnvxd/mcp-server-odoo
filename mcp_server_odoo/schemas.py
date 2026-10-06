@@ -246,6 +246,20 @@ class CreateResult(BaseModel):
     message: str = Field(description="Human-readable success message")
 
 
+# --- Create Records (Bulk) ---
+
+
+class BulkCreateResult(BaseModel):
+    """Result of creating several records in one call."""
+
+    success: bool = Field(description="Whether all records were created")
+    created_count: int = Field(description="Number of records created")
+    records: List[Dict[str, Any]] = Field(
+        description="id, display_name and url of each created record, in input order"
+    )
+    message: str = Field(description="Human-readable success message")
+
+
 # --- Update Record ---
 
 

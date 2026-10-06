@@ -537,3 +537,43 @@ class TestRelatedSummariesYoloIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.yolo
+class TestCreateRecordsYoloIntegration:
+    """Live-Odoo integration test for create_records (one create(vals_list) call)."""
+
+    @pytest.mark.asyncio
+    async def test_creates_two_partners_in_one_call(self):
+        from mcp_server_odoo.access_control import AccessController
+        from mcp_server_odoo.odoo_connection import OdooConnection
+
+        config = OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            username=os.getenv("ODOO_USER", "admin"),
+            password=os.getenv("ODOO_PASSWORD", "admin"),
+            database=os.getenv("ODOO_DB"),
+            yolo_mode="true",
+        )
+        connection = OdooConnection(config)
+        connection.connect()
+        connection.authenticate()
+        created_ids = []
+        try:
+            handler = OdooToolHandler(MagicMock(), connection, AccessController(config), config)
+
+            result = await handler._handle_create_records_tool(
+                "res.partner", [{"name": "Batch Create A"}, {"name": "Batch Create B"}]
+            )
+            created_ids = [record["id"] for record in result["records"]]
+
+            assert result["created_count"] == 2
+            assert [r["display_name"] for r in result["records"]] == [
+                "Batch Create A",
+                "Batch Create B",
+            ]
+            assert all(r["url"] for r in result["records"])
+        finally:
+            if created_ids:
+                connection.unlink("res.partner", created_ids)
+            connection.disconnect()

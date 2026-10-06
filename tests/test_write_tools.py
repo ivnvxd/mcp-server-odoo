@@ -296,7 +296,7 @@ class TestWriteTools:
 
     @pytest.mark.asyncio
     async def test_update_records_rejects_over_cap(self, tool_handler, mock_access_controller):
-        """More than MAX_BULK_UPDATE_RECORDS ids is rejected before access control runs."""
+        """More than MAX_BATCH_RECORDS ids is rejected before access control runs."""
         with pytest.raises(ValidationError, match="Too many records"):
             await tool_handler._handle_update_records_tool(
                 "res.partner", list(range(1, 102)), {"name": "Test"}
