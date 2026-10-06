@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **`update_records` tool**: bulk-update multiple records of the same model with the same values in one call, instead of looping `update_record`. Capped at 100 distinct record IDs per call; fails the whole batch (no partial write) if any id doesn't exist. Archived records can be updated.
 - **Odoo 20 in CI**: the YOLO integration tests run on Odoo 19 and 20. The README documents the `rpc` scope that Odoo 20 requires for API keys, and the MCP User group.
+- **CI on pull requests to any branch**: the trigger matched only branch names without a `/`, so pull requests against `release/*` ran no CI.
 
 ### Changed
 - **mcp 2.x**: the server runs on `mcp>=2.2,<3` and no longer depends on `pydantic-settings`. `serverInfo.version` reports the package version instead of the SDK version. Over HTTP, the SDK refuses request bodies over 4 MiB with 413, and holds at most 10,000 open sessions.
