@@ -48,7 +48,7 @@ Optional environment variables:
   ODOO_MCP_LOG_LEVEL       Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
   ODOO_MCP_LOG_JSON        Enable structured JSON log output (default: false)
   ODOO_MCP_LOG_FILE        Path for rotating log file (10 MB, 5 backups)
-  ODOO_MCP_DEFAULT_LIMIT   Default record limit (default: 10)
+  ODOO_MCP_DEFAULT_LIMIT   Default record limit (default: 25)
   ODOO_MCP_MAX_LIMIT       Maximum record limit (default: 100)
   ODOO_MCP_MAX_SMART_FIELDS Max fields in smart selection (default: 15)
   ODOO_MCP_TRANSPORT       Transport type: stdio or streamable-http (default: stdio)

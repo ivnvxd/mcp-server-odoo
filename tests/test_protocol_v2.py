@@ -116,3 +116,69 @@ async def test_dynamic_instructions_and_version_reach_the_client(server, mode):
     assert instructions.startswith("MCP server for accessing and managing Odoo ERP data")
     assert "- User: Test" in instructions
     assert version == __version__
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_unknown_argument_is_refused_by_name(server, mode):
+    """The SDK drops unknown arguments silently; a misspelled limit would run with the default."""
+    async with Client(server.app, mode=mode) as client:
+        result = await client.call_tool(
+            "search_records", {"model": "res.partner", "limt": 5, "filter": []}
+        )
+
+    assert result.is_error
+    text = result.content[0].text
+    assert "Unknown argument(s) for search_records: filter, limt" in text
+    assert "limit" in text.split("Valid arguments:")[1]
+    server._mock_connection.search.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "tool,arguments",
+    [
+        ("get_record", {"model": "res.partner", "record_id": True}),
+        ("delete_record", {"model": "res.partner", "record_id": False}),
+        (
+            "update_records",
+            {"model": "res.partner", "record_ids": [5, True], "values": {"name": "X"}},
+        ),
+        ("read_attachment", {"attachment_id": True}),
+    ],
+)
+async def test_boolean_id_is_refused(server, tool, arguments):
+    """Pydantic reads True as 1: record_id=true would act on record 1."""
+    async with Client(server.app, mode="legacy") as client:
+        result = await client.call_tool(tool, arguments)
+
+    assert result.is_error
+    assert "not a boolean" in result.content[0].text
+    connection = server._mock_connection
+    connection.read.assert_not_called()
+    connection.write.assert_not_called()
+    connection.unlink.assert_not_called()
+
+
+async def test_digit_string_id_stays_valid(server):
+    connection = server._mock_connection
+    connection.fields_get.return_value = {"name": {"type": "char"}}
+    connection.read.return_value = [{"id": 7, "name": "Seven"}]
+
+    async with Client(server.app, mode="legacy") as client:
+        result = await client.call_tool(
+            "get_record", {"model": "res.partner", "record_id": "7", "fields": ["name"]}
+        )
+
+    assert not result.is_error, result.content
+    assert connection.read.call_args.args[1] == [7]
+
+
+async def test_search_reads_25_records_by_default(server):
+    connection = server._mock_connection
+    connection.search.return_value = []
+    connection.search_count.return_value = 0
+
+    async with Client(server.app, mode="legacy") as client:
+        result = await client.call_tool("search_records", {"model": "res.partner"})
+
+    assert not result.is_error, result.content
+    assert connection.search.call_args.kwargs["limit"] == 25

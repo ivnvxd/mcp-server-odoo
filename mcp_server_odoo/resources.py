@@ -255,17 +255,22 @@ class OdooResourceHandler:
         @self.app.resource(
             "odoo://{model}/search",
             title="Odoo Search",
-            description="Search records with default settings (first 10 records)",
+            description=(
+                "Search records with default settings "
+                "(the first ODOO_MCP_DEFAULT_LIMIT records, 25 by default)"
+            ),
             annotations=Annotations(audience=["assistant"], priority=0.5),
         )
         async def search_records(model: str, ctx: Optional[Context] = None) -> str:
             """Search records with default settings.
 
-            Returns the first 10 records with only the fields the one-line
+            Returns the first ODOO_MCP_DEFAULT_LIMIT records with only the fields the one-line
             summary renders. For field selection, use the search_records
             tool instead.
             """
-            await self._ctx_info(ctx, f"Searching {model} (default: first 10 records)...")
+            await self._ctx_info(
+                ctx, f"Searching {model} (default: first {self.config.default_limit} records)..."
+            )
             return await self._handle_search(model, None, None, None, None, None)
 
         # No browse resource: FastMCP URI templates cannot carry query parameters —

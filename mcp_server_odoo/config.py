@@ -30,7 +30,7 @@ class OdooConfig:
     # Optional fields with defaults
     database: Optional[str] = None
     log_level: str = "INFO"
-    default_limit: int = 10
+    default_limit: int = 25
     max_limit: int = 100
     max_smart_fields: int = 15
     locale: Optional[str] = None
@@ -276,7 +276,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         password=os.getenv("ODOO_PASSWORD", "").strip() or None,
         database=os.getenv("ODOO_DB", "").strip() or None,
         log_level=os.getenv("ODOO_MCP_LOG_LEVEL", "INFO").strip(),
-        default_limit=get_int_env("ODOO_MCP_DEFAULT_LIMIT", 10),
+        default_limit=get_int_env("ODOO_MCP_DEFAULT_LIMIT", 25),
         max_limit=get_int_env("ODOO_MCP_MAX_LIMIT", 100),
         max_smart_fields=get_int_env("ODOO_MCP_MAX_SMART_FIELDS", 15),
         transport=os.getenv("ODOO_MCP_TRANSPORT", "stdio").strip(),

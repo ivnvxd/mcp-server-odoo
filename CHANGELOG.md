@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CI on pull requests to any branch**: the trigger matched only branch names without a `/`, so pull requests against `release/*` ran no CI.
 
 ### Changed
+- **Default search limit is 25**: `search_records`, `aggregate_records` and the search resource return 25 records by default instead of 10. Set `ODOO_MCP_DEFAULT_LIMIT=10` to keep the old behavior.
+- **Stricter tool input**: a tool refuses arguments it does not take, and names them. Before, a misspelled argument such as `limt` was dropped and the call ran with the defaults. A record ID of `true` or `false` is refused instead of read as 1 or 0.
 - **`get_fields` default view**: without `field_names`, it returns the 60 most relevant value fields plus every relation, file and HTML field, with selection lists cut at 20 values. Pass `["__all__"]` for every field.
 - **mcp 2.x**: the server runs on `mcp>=2.2,<3` and no longer depends on `pydantic-settings`. `serverInfo.version` reports the package version instead of the SDK version. Over HTTP, the SDK refuses request bodies over 4 MiB with 413, and holds at most 10,000 open sessions.
 - **Odoo unreachable at startup**: the server keeps running, `/health` reports unhealthy, and the next request connects. A configuration or authentication error still stops startup.

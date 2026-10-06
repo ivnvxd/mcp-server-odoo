@@ -18,6 +18,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, Set,
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
+from pydantic import BeforeValidator
 
 from .access_control import (
     AccessControlError,
@@ -325,6 +326,17 @@ radius of a single bulk write under YOLO mode (no per-model MCP-side write
 approval)."""
 
 
+def _refuse_bool(value: Any) -> Any:
+    """Refuse a boolean id. Pydantic reads True as 1 and False as 0, so
+    record_id=true would silently act on record 1. Digit strings stay valid."""
+    if isinstance(value, bool):
+        raise ValueError("an id must be an integer, not a boolean")
+    return value
+
+
+RecordId = Annotated[int, BeforeValidator(_refuse_bool)]
+
+
 def _validate_record_id(record_id: int, label: str = "record ID") -> None:
     """Reject ids outside the XML-RPC 32-bit range before any RPC call.
 
@@ -452,6 +464,32 @@ class OdooToolHandler:
 
         # Register tools
         self._register_tools()
+        self._install_argument_check()
+
+    def _install_argument_check(self) -> None:
+        """Refuse tool arguments the tool does not take, by name.
+
+        The SDK (mcp 2.2) drops unknown arguments without a word, so a
+        misspelled parameter (limt, filter) silently runs with the defaults.
+        tools/call goes through the app's public call_tool(); a wrapper on the
+        app instance checks the names against the tool's input schema first.
+        """
+        app = self.app
+        call_tool = app.call_tool
+
+        async def checked_call_tool(name, arguments, context=None):
+            tool = app._tool_manager.get_tool(name)
+            if tool is not None and arguments:
+                known = list(tool.parameters.get("properties", {}))
+                unknown = sorted(set(arguments) - set(known))
+                if unknown:
+                    raise ValidationError(
+                        f"Unknown argument(s) for {name}: {', '.join(unknown)}. "
+                        f"Valid arguments: {', '.join(known)}."
+                    )
+            return await call_tool(name, arguments, context)
+
+        app.call_tool = checked_call_tool  # ty: ignore[invalid-assignment]
 
     def _format_datetime(self, value: str) -> str:
         """Format datetime values to ISO 8601 with timezone."""
@@ -1183,7 +1221,7 @@ class OdooToolHandler:
         )
         async def get_record(
             model: str,
-            record_id: int,
+            record_id: RecordId,
             fields: Optional[List[str]] = None,
             ctx: Optional[Context] = None,
         ) -> RecordResult:
@@ -1394,7 +1432,7 @@ class OdooToolHandler:
         )
         async def update_record(
             model: str,
-            record_id: int,
+            record_id: RecordId,
             values: Dict[str, Any],
             ctx: Optional[Context] = None,
         ) -> UpdateResult:
@@ -1422,7 +1460,7 @@ class OdooToolHandler:
         )
         async def update_records(
             model: str,
-            record_ids: Optional[List[int]] = None,
+            record_ids: Optional[List[RecordId]] = None,
             values: Optional[Dict[str, Any]] = None,
             updates: Optional[List[Dict[str, Any]]] = None,
             ctx: Optional[Context] = None,
@@ -1471,7 +1509,7 @@ class OdooToolHandler:
         )
         async def delete_record(
             model: str,
-            record_id: int,
+            record_id: RecordId,
             ctx: Optional[Context] = None,
         ) -> DeleteResult:
             """Delete a record.
@@ -1497,7 +1535,7 @@ class OdooToolHandler:
         )
         async def post_message(
             model: str,
-            record_id: int,
+            record_id: RecordId,
             body: str,
             subtype: Literal["note", "comment"] = "note",
             message_type: Literal["comment", "notification"] = "comment",
@@ -1552,7 +1590,7 @@ class OdooToolHandler:
         )
         async def read_attachment(
             uri: Optional[str] = None,
-            attachment_id: Optional[int] = None,
+            attachment_id: Optional[RecordId] = None,
             ctx: Optional[Context] = None,
         ) -> Annotated[CallToolResult, ReadAttachmentResult]:
             """Read a file: an attachment, or a binary field such as an image.
@@ -1587,7 +1625,7 @@ class OdooToolHandler:
         )
         async def list_record_attachments(
             model: str,
-            record_id: int,
+            record_id: RecordId,
             ctx: Optional[Context] = None,
         ) -> AttachmentListResult:
             """List the files attached to a record, newest first.
@@ -1617,7 +1655,7 @@ class OdooToolHandler:
         )
         async def upload_attachment(
             model: str,
-            record_id: int,
+            record_id: RecordId,
             name: str,
             data: str,
             mimetype: Optional[str] = None,
@@ -2549,7 +2587,7 @@ class OdooToolHandler:
                 },
                 {
                     "uri_template": "odoo://{model}/search",
-                    "description": "Search records with default settings (first 10 records)",
+                    "description": "Search records with default settings (the first ODOO_MCP_DEFAULT_LIMIT records, 25 by default)",
                     "parameters": {
                         "model": "Odoo model name",
                     },

@@ -366,7 +366,10 @@ class TestOdooToolHandler:
             "odoo://{model}/record/{record_id}": (
                 "Retrieve a specific record from an Odoo model by ID"
             ),
-            "odoo://{model}/search": "Search records with default settings (first 10 records)",
+            "odoo://{model}/search": (
+                "Search records with default settings "
+                "(the first ODOO_MCP_DEFAULT_LIMIT records, 25 by default)"
+            ),
             "odoo://{model}/count": "Count all records in an Odoo model",
             "odoo://{model}/fields": "Get field definitions and metadata for an Odoo model",
             "odoo://{model}/record/{record_id}/{field}": (

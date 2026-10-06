@@ -320,7 +320,7 @@ The server requires the following environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ODOO_MCP_DEFAULT_LIMIT` | `10` | Default number of records returned per search |
+| `ODOO_MCP_DEFAULT_LIMIT` | `25` | Default number of records returned per search |
 | `ODOO_MCP_MAX_LIMIT` | `100` | Maximum allowed record limit per request |
 | `ODOO_MCP_MAX_SMART_FIELDS` | `15` | Maximum fields returned by smart field selection |
 | `ODOO_MCP_LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
@@ -807,7 +807,7 @@ The server also provides direct access to Odoo data through resource URIs:
 | URI Pattern | Description |
 |------------|-------------|
 | `odoo://{model}/record/{id}` | Retrieve a specific record by ID |
-| `odoo://{model}/search` | Search records with default settings (first 10 records) |
+| `odoo://{model}/search` | Search records with default settings (the first `ODOO_MCP_DEFAULT_LIMIT` records, 25 by default) |
 | `odoo://{model}/count` | Count all records in a model |
 | `odoo://{model}/fields` | Get field definitions and metadata for a model |
 | `odoo://{model}/record/{id}/{field}` | Fetch a binary/image field from a record, served with the correct mimeType |
