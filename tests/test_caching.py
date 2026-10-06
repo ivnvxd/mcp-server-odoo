@@ -91,6 +91,38 @@ class TestOdooConnectionCaching:
             # Should call server twice
             assert mock_execute.call_count == 2
 
+    def test_fields_get_allfields_passed_positionally_no_cache(
+        self, mock_config, mock_performance_manager
+    ):
+        """allfields goes to the server as fields_get's first positional arg;
+        name-filtered responses are never cached nor served from cache."""
+        conn = OdooConnection(mock_config, performance_manager=mock_performance_manager)
+
+        conn._connected = True
+        conn._authenticated = True
+        conn._uid = 2
+        conn._database = "test"
+
+        mock_fields = {"name": {"type": "char"}}
+
+        with patch.object(conn, "execute_kw", return_value=mock_fields) as mock_execute:
+            result = conn.fields_get("res.partner", allfields=["name", "email"])
+            assert result == mock_fields
+            mock_execute.assert_called_once_with(
+                "res.partner", "fields_get", [["name", "email"]], {}
+            )
+
+            # The filtered call must not have poisoned the full-schema cache
+            conn.fields_get("res.partner")
+            assert mock_execute.call_count == 2
+            # ... the unfiltered result IS cached
+            conn.fields_get("res.partner")
+            assert mock_execute.call_count == 2
+            # ... and a later filtered call bypasses the populated cache
+            conn.fields_get("res.partner", allfields=["name"])
+            assert mock_execute.call_count == 3
+            assert mock_execute.call_args.args == ("res.partner", "fields_get", [["name"]], {})
+
     def test_read_always_fetches_fresh(self, mock_config, mock_performance_manager):
         """Test read method always queries Odoo (no record caching)."""
         conn = OdooConnection(mock_config, performance_manager=mock_performance_manager)

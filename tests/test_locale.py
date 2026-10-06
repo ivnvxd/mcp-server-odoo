@@ -181,7 +181,9 @@ class TestLocaleInvalidFallback:
         conn = OdooConnection(config_with_locale)
         mock_proxy = _make_connected(conn)
 
-        fault = xmlrpc.client.Fault(2, "Access denied")
+        # faultCode 1 = application error; codes 2/4 are Odoo's business
+        # classes and now surface without the "Operation failed" wrapping.
+        fault = xmlrpc.client.Fault(1, "Some unrelated failure")
         mock_proxy.execute_kw.side_effect = fault
 
         with pytest.raises(OdooConnectionError, match="Operation failed"):
@@ -233,3 +235,33 @@ class TestLocaleConfig:
         ):
             config = load_config()
             assert config.locale is None
+
+
+class TestInvalidLangAttribution:
+    """A caller-supplied bad lang must not disable ODOO_MCP_LOCALE process-wide."""
+
+    def test_caller_lang_failure_leaves_server_locale_intact(self, config_with_locale):
+        conn = OdooConnection(config_with_locale)
+        mock_proxy = _make_connected(conn)
+        mock_proxy.execute_kw.side_effect = [
+            xmlrpc.client.Fault(2, "Invalid language code: xx_XX"),
+            [{"id": 1}],
+        ]
+
+        result = conn.execute_kw("res.partner", "search_read", [[]], {"context": {"lang": "xx_XX"}})
+
+        assert result == [{"id": 1}]
+        assert conn.config.locale == "es_ES", "the configured locale was not at fault"
+
+    def test_configured_locale_failure_still_disables_it(self, config_with_locale):
+        conn = OdooConnection(config_with_locale)
+        mock_proxy = _make_connected(conn)
+        mock_proxy.execute_kw.side_effect = [
+            xmlrpc.client.Fault(2, "Invalid language code: es_ES"),
+            [{"id": 1}],
+        ]
+
+        result = conn.execute_kw("res.partner", "search_read", [[]], {"context": {"lang": "es_ES"}})
+
+        assert result == [{"id": 1}]
+        assert conn.config.locale is None

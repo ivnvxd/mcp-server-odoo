@@ -4,6 +4,7 @@ This module provides the OdooConnection class for managing connections
 to Odoo via XML-RPC using MCP-specific endpoints.
 """
 
+import http.client
 import json
 import logging
 import socket
@@ -12,17 +13,41 @@ import urllib.error
 import urllib.request
 import xmlrpc.client
 from contextlib import contextmanager, suppress
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, NoReturn, Optional, Tuple, Union
 from urllib.parse import urlparse
 
+from .access_control import _http_error_message
 from .config import OdooConfig
 from .error_sanitizer import ErrorSanitizer
+from .field_security import is_sensitive_field_name
 from .performance import PerformanceManager
 
 logger = logging.getLogger(__name__)
 
-# Keys whose values must never appear in logs
+# XML-RPC marshals ints as 32-bit — a larger record id would raise
+# OverflowError mid-request; callers bound-check ids against this up front
+# and reject them with a clean validation error instead.
+XMLRPC_MAX_INT = 2**31 - 1
+
+# Both listing routes failed: /web/database/list is blocked or disabled
+# (list_db = False), and /xmlrpc/db is disabled too or gone (Odoo 20 removed
+# the db RPC service). Only an explicit database name can help then.
+DATABASE_LISTING_FAILED = "Cannot list databases on this server. Set ODOO_DB to the database name."
+
+# Keys whose values must never appear in logs. The exact-name set is kept for
+# the handful of names the heuristic deliberately does not flag; anything
+# credential-SHAPED (smtp_pass, webhook_secret, openai_api_key, ...) is caught
+# by the same detector the read paths use, so a key is never logged in
+# cleartext while reads withhold that very field.
 _SENSITIVE_KEYS = {"password", "api_key", "token", "secret", "access_token", "new_password"}
+
+
+def _is_sensitive_log_key(key: Any) -> bool:
+    """Whether a write-payload key's value must be redacted from logs."""
+    if not isinstance(key, str):
+        return False
+    return key.lower() in _SENSITIVE_KEYS or is_sensitive_field_name(key)
+
 
 # Methods that are read-only on the server and therefore safe to re-send
 # after a keepalive socket timeout (issue #68 recovery). Anything else —
@@ -48,8 +73,7 @@ def _redact_values(value: Any) -> Any:
     """Redact sensitive values in dicts/lists for safe logging."""
     if isinstance(value, dict):
         return {
-            k: "***" if k.lower() in _SENSITIVE_KEYS else _redact_values(v)
-            for k, v in value.items()
+            k: "***" if _is_sensitive_log_key(k) else _redact_values(v) for k, v in value.items()
         }
     if isinstance(value, (list, tuple)):
         return [_redact_values(v) for v in value]
@@ -77,6 +101,98 @@ class OdooConnectionError(Exception):
     """Base exception for Odoo connection errors."""
 
     pass
+
+
+class OdooUnreachableError(OdooConnectionError):
+    """Odoo did not answer: a network failure, a timeout or a gateway error.
+
+    Unlike a refused login or a configuration problem, this can pass on its
+    own, so the server keeps running and connects on a later request.
+    """
+
+    pass
+
+
+# Gateway answers that mean "Odoo behind me is not answering"
+_UNAVAILABLE_HTTP_STATUSES = frozenset({502, 503, 504})
+
+
+def _is_unreachable(exc: BaseException) -> bool:
+    """True when ``exc`` means Odoo did not answer, not that it refused."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in _UNAVAILABLE_HTTP_STATUSES
+    if isinstance(exc, xmlrpc.client.ProtocolError):
+        return exc.errcode in _UNAVAILABLE_HTTP_STATUSES
+    # OSError covers refused connections, timeouts, DNS failures and URLError
+    return isinstance(exc, (OSError, http.client.HTTPException))
+
+
+class OdooValidationFault(OdooConnectionError):  # noqa: N818 — "Fault" mirrors xmlrpc.client.Fault
+    """An XML-RPC fault carrying a user-facing business error.
+
+    Raised when the fault string identifies a validation-class Odoo
+    exception (UserError, ValidationError, MissingError, a leading
+    AccessError, ...) rather than a transport problem. Subclasses
+    OdooConnectionError so every existing ``except OdooConnectionError``
+    ladder keeps working unchanged; handlers list it first to surface the
+    message without a connection-error prefix.
+
+    ``fault_code`` is the XML-RPC fault code, when there was one. The read
+    path uses it to tell an AccessError (``ACCESS_ERROR_FAULT_CODE``) apart.
+    """
+
+    def __init__(self, message: str, fault_code: Optional[int] = None):
+        super().__init__(message)
+        self.fault_code = fault_code
+
+
+# Odoo's ``/xmlrpc/2/*`` endpoint classifies exceptions for us in the fault
+# CODE, and sends the author-written message bare — no class prefix, no
+# traceback (see odoo/addons/rpc/controllers/xmlrpc.py:
+# xmlrpc_handle_exception_int). Routing on the code is therefore the only
+# reliable classification for YOLO mode; the string heuristics below cannot
+# see a class name that is never sent.
+#   2 = RPC_FAULT_CODE_WARNING          -> UserError / ValidationError
+#   4 = RPC_FAULT_CODE_ACCESS_ERROR     -> AccessError (record rules / ACLs)
+# 3 (ACCESS_DENIED) is deliberately absent: a rejected login is auth setup,
+# not a business rule, and must keep reading as a connection problem.
+# Standard mode goes through the MCP module's own proxy. Its 20.0 line (and
+# later backports) sends the same codes as core for Odoo user errors, so the
+# code route works there too. Older module versions re-wrap every exception
+# as faultCode 500 ("Internal Server Error in MCPObjectController: ..."); that
+# envelope carries no exception class, so business errors keep reading as
+# connection failures against them.
+_ODOO_BUSINESS_FAULT_CODES = frozenset({2, 4})
+ACCESS_ERROR_FAULT_CODE = 4
+
+# HTTP-style codes the MCP module's proxy uses for its own refusals, each with
+# a message meant for the user: 400 (a call for another database than the
+# request's), 403 (not in the MCP User group, model not enabled), 429 (rate
+# limit). Shown as-is instead of as a transport failure.
+_MCP_MODULE_REFUSAL_FAULT_CODES = frozenset({400, 403, 429})
+
+
+def _raise_for_fault(fault: xmlrpc.client.Fault) -> NoReturn:
+    """Wrap an application-level XML-RPC fault, classifying validation-class
+    business errors so they don't read as connection problems.
+
+    Classification is code-first (``_ODOO_BUSINESS_FAULT_CODES``) because
+    that is what Odoo actually sends; the message-shape heuristics remain as
+    the fallback for proxies that do not preserve Odoo's codes. Everything
+    unclassified keeps the historical connection-flavored "Operation failed"
+    wrapping.
+    """
+    if fault.faultCode in _ODOO_BUSINESS_FAULT_CODES | _MCP_MODULE_REFUSAL_FAULT_CODES:
+        # Transport says business: keep the message's prose and line
+        # structure instead of running the traceback-shaped reduction.
+        raise OdooValidationFault(
+            ErrorSanitizer.sanitize_business_fault(fault.faultString), fault.faultCode
+        ) from fault
+
+    sanitized_message = ErrorSanitizer.sanitize_xmlrpc_fault(fault.faultString)
+    if ErrorSanitizer.is_business_fault(fault.faultString):
+        raise OdooValidationFault(sanitized_message, fault.faultCode) from fault
+    raise OdooConnectionError(f"Operation failed: {sanitized_message}") from fault
 
 
 class OdooConnection:
@@ -209,10 +325,11 @@ class OdooConnection:
         """Establish connection to Odoo server.
 
         Creates XML-RPC proxies for MCP endpoints but doesn't
-        authenticate yet. Uses connection pooling for better performance.
+        authenticate yet. Proxies are created once and reused for the
+        server's lifetime.
 
-        In standard mode, resolves the target database first using the
-        server-wide ``/xmlrpc/db`` endpoint, then sets the
+        In standard mode, resolves the target database first through the
+        server-wide database listing (see ``list_databases``), then sets the
         ``X-Odoo-Database`` header on the transport so that subsequent
         requests to MCP addon routes (``/mcp/xmlrpc/*``) are routed to
         the correct database — required when multiple DBs exist.
@@ -248,9 +365,9 @@ class OdooConnection:
             logger.info("Successfully connected to Odoo server")
 
         except socket.timeout:
-            raise OdooConnectionError(f"Connection timeout after {self.timeout} seconds") from None
+            raise OdooUnreachableError(f"Connection timeout after {self.timeout} seconds") from None
         except socket.error as e:
-            raise OdooConnectionError(
+            raise OdooUnreachableError(
                 f"Failed to connect to {self._url_components['host']}:"
                 f"{self._url_components['port']}: {e}"
             ) from e
@@ -262,9 +379,10 @@ class OdooConnection:
     def _resolve_and_set_database(self) -> None:
         """Resolve the target database and set it on the transport header.
 
-        Uses the server-wide ``/xmlrpc/db`` proxy (already created) to
-        list databases and pick one, then tells the connection pool to
-        inject ``X-Odoo-Database`` on all subsequent requests.
+        Lists databases (``/web/database/list``, falling back to the
+        ``/xmlrpc/db`` proxy created above) and picks one, then tells the
+        connection pool to inject ``X-Odoo-Database`` on all subsequent
+        requests.
         """
         # If database is explicitly configured, use it directly
         if self.config.database:
@@ -299,6 +417,10 @@ class OdooConnection:
             self._server_version = version.get("server_version", "") if version else None
             logger.debug(f"Server version: {version}")
         except Exception as e:
+            if _is_unreachable(e):
+                raise OdooUnreachableError(
+                    f"Cannot reach Odoo at {self._url_components['base_url']}: {e}"
+                ) from e
             raise OdooConnectionError(f"Connection test failed: {e}") from e
 
     def disconnect(self, suppress_logging: bool = False) -> None:
@@ -389,42 +511,21 @@ class OdooConnection:
 
     @property
     def db_proxy(self) -> xmlrpc.client.ServerProxy:
-        """Get database operations proxy.
-
-        Returns:
-            XML-RPC proxy for database operations
-
-        Raises:
-            OdooConnectionError: If not connected
-        """
+        """XML-RPC proxy for db endpoint; raises OdooConnectionError if not connected."""
         if not self._connected or not self._db_proxy:
             raise OdooConnectionError("Not connected to Odoo")
         return self._db_proxy
 
     @property
     def common_proxy(self) -> xmlrpc.client.ServerProxy:
-        """Get common operations proxy.
-
-        Returns:
-            XML-RPC proxy for common operations
-
-        Raises:
-            OdooConnectionError: If not connected
-        """
+        """XML-RPC proxy for common endpoint; raises OdooConnectionError if not connected."""
         if not self._connected or not self._common_proxy:
             raise OdooConnectionError("Not connected to Odoo")
         return self._common_proxy
 
     @property
     def object_proxy(self) -> xmlrpc.client.ServerProxy:
-        """Get object operations proxy.
-
-        Returns:
-            XML-RPC proxy for object operations
-
-        Raises:
-            OdooConnectionError: If not connected
-        """
+        """XML-RPC proxy for object endpoint; raises OdooConnectionError if not connected."""
         if not self._connected or not self._object_proxy:
             raise OdooConnectionError("Not connected to Odoo")
         return self._object_proxy
@@ -472,6 +573,17 @@ class OdooConnection:
             )
 
         try:
+            databases = self._list_databases_web()
+            logger.info(f"Found {len(databases)} databases")
+            logger.debug(f"Database names: {databases}")
+            return databases
+        except Exception as e:
+            # Route blocked by a proxy, listing disabled (list_db = False), or
+            # an unexpected body: /xmlrpc/db still answers on Odoo 19 and older.
+            logger.debug(f"/web/database/list failed ({e}); falling back to /xmlrpc/db")
+            web_unreachable = _is_unreachable(e)
+
+        try:
             # Call list_db method on database proxy
             with self._db_proxy_lock:
                 databases = self.db_proxy.list()
@@ -489,10 +601,39 @@ class OdooConnection:
                     # Return configured database as fallback
                     return [self.config.database]
             logger.error(f"Failed to list databases: {e}")
-            raise OdooConnectionError(f"Failed to list databases: {e}") from e
+            raise OdooConnectionError(DATABASE_LISTING_FAILED) from e
         except Exception as e:
             logger.error(f"Failed to list databases: {e}")
-            raise OdooConnectionError(f"Failed to list databases: {e}") from e
+            if web_unreachable and _is_unreachable(e):
+                raise OdooUnreachableError(
+                    f"Cannot reach Odoo at {self._url_components['base_url']}: {e}"
+                ) from e
+            raise OdooConnectionError(DATABASE_LISTING_FAILED) from e
+
+    def _list_databases_web(self) -> List[str]:
+        """List databases through ``POST /web/database/list`` (JSON-RPC).
+
+        Odoo 20 removed the ``db`` RPC service behind ``/xmlrpc/db``. This web
+        route exists on Odoo 16 to 20, needs no database context and no addon,
+        and applies dbfilter.
+
+        Raises:
+            Exception: On any failure, so that the caller can fall back.
+        """
+        url = f"{self._url_components['base_url']}/web/database/list"
+        body = json.dumps({"jsonrpc": "2.0", "method": "call", "params": {}}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, list) or not all(isinstance(db, str) for db in result):
+            error = payload.get("error") if isinstance(payload, dict) else None
+            detail = error.get("data", {}).get("message") if isinstance(error, dict) else None
+            raise OdooConnectionError(f"Unexpected /web/database/list response: {detail}")
+        return result
 
     def database_exists(self, db_name: str) -> bool:
         """Check if a specific database exists.
@@ -533,19 +674,10 @@ class OdooConnection:
         if self.config.database:
             db_name = self.config.database
             logger.info(f"Using configured database: {db_name}")
-            # Skip existence check as database listing might be restricted
             return db_name
 
-        # List available databases
-        try:
-            databases = self.list_databases()
-        except Exception as e:
-            # If database listing is restricted, we cannot auto-select
-            logger.warning(f"Cannot list databases (may be restricted): {e}")
-            raise OdooConnectionError(
-                "Database auto-selection failed. Database listing may be restricted. "
-                "Please specify ODOO_DB in your configuration."
-            ) from e
+        # List available databases. A failure already asks for ODOO_DB.
+        databases = self.list_databases()
 
         # Handle different scenarios
         if not databases:
@@ -662,6 +794,8 @@ class OdooConnection:
                 logger.warning(f"YOLO mode: Authentication error: {e.faultString}")
             return False
         except Exception as e:
+            if _is_unreachable(e):
+                raise OdooUnreachableError(f"Failed to authenticate: {e}") from e
             logger.error(f"YOLO mode: Unexpected authentication error: {e}")
             return False
 
@@ -712,12 +846,21 @@ class OdooConnection:
             elif e.code == 429:
                 logger.warning("Rate limit exceeded during MCP API key validation")
                 return False
+            elif e.code == 403:
+                # A valid key whose user is refused, e.g. not in the MCP User
+                # group: the module says why, and a password fallback would
+                # hit the same gate.
+                reason = _http_error_message(e)
+                reason = ErrorSanitizer.sanitize_business_fault(reason) if reason else "HTTP 403"
+                logger.error(f"MCP API key refused: {reason}")
+                raise OdooConnectionError(f"Failed to validate API key: {reason}") from e
             else:
                 logger.error(f"HTTP error during MCP API key validation: {e}")
-                raise OdooConnectionError(f"Failed to validate API key: HTTP {e.code}") from e
+                error_class = OdooUnreachableError if _is_unreachable(e) else OdooConnectionError
+                raise error_class(f"Failed to validate API key: HTTP {e.code}") from e
         except urllib.error.URLError as e:
             logger.error(f"Network error during MCP API key validation: {e}")
-            raise OdooConnectionError(f"Network error during authentication: {e}") from e
+            raise OdooUnreachableError(f"Network error during authentication: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error during MCP API key validation: {e}")
             raise OdooConnectionError(f"Failed to validate API key: {e}") from e
@@ -780,11 +923,18 @@ class OdooConnection:
                 return False
 
         except xmlrpc.client.Fault as e:
+            if e.faultCode in _MCP_MODULE_REFUSAL_FAULT_CODES:
+                # The MCP module refused a verified login (e.g. not in the MCP
+                # User group) and says why
+                reason = ErrorSanitizer.sanitize_business_fault(e.faultString)
+                logger.error(f"Login refused by the MCP module: {reason}")
+                raise OdooConnectionError(f"Failed to authenticate: {reason}") from e
             logger.warning(f"Authentication fault: {e}")
             return False
         except Exception as e:
             logger.error(f"Error during password authentication: {e}")
-            raise OdooConnectionError(f"Failed to authenticate: {e}") from e
+            error_class = OdooUnreachableError if _is_unreachable(e) else OdooConnectionError
+            raise error_class(f"Failed to authenticate: {e}") from e
 
     def authenticate(self, database: Optional[str] = None) -> None:
         """Authenticate with Odoo using available credentials.
@@ -802,13 +952,11 @@ class OdooConnection:
         if not self._connected:
             raise OdooConnectionError("Not connected to Odoo")
 
-        # Get database name
         if database:
             db_name = database
         else:
             db_name = self.auto_select_database()
 
-        # Log authentication strategy
         if self.config.is_yolo_enabled:
             mode_desc = "read-only" if self.config.yolo_mode == "read" else "full access"
             logger.info(f"Authenticating in YOLO {mode_desc} mode for database '{db_name}'")
@@ -817,7 +965,6 @@ class OdooConnection:
 
         auth_errors = []
 
-        # Try API key authentication first (if available)
         if self.config.uses_api_key:
             auth_method = "API key (YOLO mode)" if self.config.is_yolo_enabled else "MCP API key"
             logger.info(f"Attempting {auth_method} authentication")
@@ -830,7 +977,6 @@ class OdooConnection:
                     error_msg = f"{auth_method} authentication failed"
                     auth_errors.append(error_msg)
 
-                    # Only try fallback if we have credentials
                     if self.config.uses_credentials:
                         logger.warning(
                             f"{error_msg} — the configured ODOO_API_KEY was rejected. "
@@ -843,7 +989,6 @@ class OdooConnection:
                 logger.error(f"Critical error during {auth_method} authentication: {e}")
                 raise
 
-        # Try username/password authentication (if available)
         if self.config.uses_credentials:
             logger.info("Attempting username/password authentication")
 
@@ -858,7 +1003,6 @@ class OdooConnection:
                 logger.error(f"Critical error during password authentication: {e}")
                 raise
 
-        # Authentication failed - provide detailed error message
         if auth_errors:
             error_details = "; ".join(auth_errors)
             mode_hint = ""
@@ -985,14 +1129,26 @@ class OdooConnection:
             return result
 
         except xmlrpc.client.Fault as e:
-            # Handle invalid locale — disable and retry without lang
-            if "Invalid language code" in e.faultString and self.config.locale:
-                logger.warning(
-                    f"Locale '{self.config.locale}' is not installed in Odoo. "
-                    "Falling back to default language."
-                )
-                self.config.locale = None
-                kwargs.get("context", {}).pop("lang", None)
+            # Handle an invalid lang — drop it and retry. Only blame (and
+            # permanently disable) the CONFIGURED locale when it is actually
+            # the offending value: a caller-supplied context lang used to null
+            # self.config.locale on the shared config, silently turning
+            # ODOO_MCP_LOCALE off for every later request in the process.
+            context = kwargs.get("context") or {}
+            bad_lang = context.get("lang")
+            if "Invalid language code" in e.faultString and bad_lang:
+                if bad_lang == self.config.locale:
+                    logger.warning(
+                        f"Locale '{bad_lang}' is not installed in Odoo. "
+                        "Falling back to default language."
+                    )
+                    self.config.locale = None
+                else:
+                    logger.warning(
+                        f"Language '{bad_lang}' requested for this call is not installed "
+                        "in Odoo; retrying without it (server locale unchanged)."
+                    )
+                context.pop("lang", None)
                 return self.execute_kw(model, method, args, kwargs)
 
             # Odoo's XML-RPC marshaller (allow_none=False) faults on void
@@ -1003,9 +1159,9 @@ class OdooConnection:
                 return None
 
             logger.error(f"XML-RPC fault during {method} on {model}: {e}")
-            # Sanitize the fault string before exposing to user
-            sanitized_message = ErrorSanitizer.sanitize_xmlrpc_fault(e.faultString)
-            raise OdooConnectionError(f"Operation failed: {sanitized_message}") from e
+            # Sanitize and classify: business errors raise OdooValidationFault,
+            # everything else stays connection-flavored
+            _raise_for_fault(e)
         except socket.timeout:
             logger.error(f"Timeout during {method} on {model}")
             raise OdooConnectionError(f"Operation timeout after {self.timeout} seconds") from None
@@ -1021,15 +1177,26 @@ class OdooConnection:
         Args:
             model: The Odoo model name
             domain: Odoo domain filter (e.g., [['is_company', '=', True]])
-            **kwargs: Additional parameters (limit, offset, order)
+            **kwargs: Additional parameters (limit, offset, order, context —
+                e.g. ``context={"active_test": False}`` to include archived
+                records)
 
         Returns:
             List of record IDs matching the domain
         """
+        if "context" in kwargs:
+            # Copy: execute_kw mutates the context dict (locale injection),
+            # same as read()/search_read(). A caller reusing one dict across
+            # calls must not accumulate our injected keys.
+            kwargs = {**kwargs, "context": dict(kwargs["context"])}
         return self.execute_kw(model, "search", [domain], kwargs)
 
     def read(
-        self, model: str, ids: List[int], fields: Optional[List[str]] = None
+        self,
+        model: str,
+        ids: List[int],
+        fields: Optional[List[str]] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Read records by IDs.
 
@@ -1037,13 +1204,19 @@ class OdooConnection:
             model: The Odoo model name
             ids: List of record IDs to read
             fields: List of field names to read (None for all fields)
+            context: Optional Odoo context override for this call
+                (e.g. ``{"bin_size": True}`` to get binary size placeholders
+                instead of full base64 payloads)
 
         Returns:
             List of dictionaries containing record data
         """
-        kwargs = {}
+        kwargs: Dict[str, Any] = {}
         if fields is not None:
             kwargs["fields"] = fields
+        if context:
+            # Copy: execute_kw mutates the context dict (locale injection)
+            kwargs["context"] = dict(context)
 
         with self._performance_manager.monitor.track_operation(f"read_{model}"):
             records = self.execute_kw(model, "read", [ids], kwargs)
@@ -1055,6 +1228,7 @@ class OdooConnection:
         model: str,
         domain: List[Union[str, List[Any]]],
         fields: Optional[List[str]] = None,
+        context: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> List[Dict[str, Any]]:
         """Search for records and read their data in one operation.
@@ -1063,6 +1237,8 @@ class OdooConnection:
             model: The Odoo model name
             domain: Odoo domain filter
             fields: List of field names to read (None for all fields)
+            context: Optional Odoo context override for this call
+                (e.g. ``{"active_test": False}`` to include archived records)
             **kwargs: Additional parameters (limit, offset, order)
 
         Returns:
@@ -1070,51 +1246,69 @@ class OdooConnection:
         """
         if fields is not None:
             kwargs["fields"] = fields
+        if context:
+            # Copy: execute_kw mutates the context dict (locale injection)
+            kwargs["context"] = dict(context)
         return self.execute_kw(model, "search_read", [domain], kwargs)
 
     def fields_get(
-        self, model: str, attributes: Optional[List[str]] = None
+        self,
+        model: str,
+        attributes: Optional[List[str]] = None,
+        allfields: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Get field definitions for a model.
 
         Args:
             model: The Odoo model name
             attributes: List of field attributes to return
+            allfields: Field names to restrict the result to (Odoo's
+                ``fields_get(allfields=...)`` server-side filter; unknown
+                names are silently omitted). None/empty returns every field.
 
         Returns:
             Dictionary mapping field names to their definitions
         """
-        # Check cache first
+        # Check cache first — only unfiltered, all-attribute calls use it
         cached_fields = self._performance_manager.get_cached_fields(model)
-        if cached_fields and not attributes:  # Only use cache if no specific attributes requested
+        if cached_fields and not attributes and not allfields:
             logger.debug(f"Field definitions for {model} retrieved from cache")
             return cached_fields
 
-        # Get fields from server
+        # Get fields from server (allfields is fields_get's first positional)
+        args: List[Any] = [allfields] if allfields else []
         kwargs = {}
         if attributes:
             kwargs["attributes"] = attributes
 
         with self._performance_manager.monitor.track_operation(f"fields_get_{model}"):
-            fields = self.execute_kw(model, "fields_get", [], kwargs)
+            fields = self.execute_kw(model, "fields_get", args, kwargs)
 
-        # Cache if we got all attributes
-        if not attributes:
+        # Cache only complete responses (all fields, all attributes)
+        if not attributes and not allfields:
             self._performance_manager.cache_fields(model, fields)
 
         return fields
 
-    def search_count(self, model: str, domain: List[Union[str, List[Any]]]) -> int:
+    def search_count(
+        self,
+        model: str,
+        domain: List[Union[str, List[Any]]],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> int:
         """Count records matching a domain.
 
         Args:
             model: The Odoo model name
             domain: Odoo domain filter
+            context: Optional context (e.g. ``{"active_test": False}``)
 
         Returns:
             Number of records matching the domain
         """
-        return self.execute_kw(model, "search_count", [domain], {})
+        # Copy: execute_kw mutates the context dict (locale injection)
+        kwargs = {"context": dict(context)} if context else {}
+        return self.execute_kw(model, "search_count", [domain], kwargs)
 
     def create(self, model: str, values: Dict[str, Any]) -> int:
         """Create a new record.
@@ -1136,6 +1330,45 @@ class OdooConnection:
                 return record_id
         except Exception as e:
             logger.error(f"Failed to create {model} record: {e}")
+            raise
+
+    def create_many(self, model: str, vals_list: List[Dict[str, Any]]) -> List[int]:
+        """Create several records in one ``create(vals_list)`` call.
+
+        One RPC is one transaction: either every record is created or none.
+
+        Returns:
+            IDs of the created records, in the order of ``vals_list``
+        """
+        try:
+            with self._performance_manager.monitor.track_operation(f"create_{model}"):
+                record_ids = self.execute_kw(model, "create", [vals_list], {})
+                logger.info(f"Created {len(record_ids)} {model} record(s)")
+                return record_ids
+        except Exception as e:
+            logger.error(f"Failed to create {model} records: {e}")
+            raise
+
+    def web_save_multi(
+        self, model: str, ids: List[int], vals_list: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Write different values to each record in one call (Odoo 19 and later).
+
+        ``vals_list[i]`` goes to ``ids[i]``. One RPC is one transaction, so
+        either every record is written or none.
+
+        Returns:
+            ``id`` and ``display_name`` of each record, in the order of ``ids``
+        """
+        try:
+            with self._performance_manager.monitor.track_operation(f"web_save_multi_{model}"):
+                rows = self.execute_kw(
+                    model, "web_save_multi", [ids, vals_list, {"display_name": {}}], {}
+                )
+                logger.info(f"Updated {len(ids)} {model} record(s) with per-record values")
+                return rows
+        except Exception as e:
+            logger.error(f"Failed to update {model} records: {e}")
             raise
 
     def write(self, model: str, ids: List[int], values: Dict[str, Any]) -> bool:

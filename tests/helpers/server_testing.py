@@ -29,14 +29,11 @@ class MCPTestServer:
 
     async def start(self) -> None:
         """Start the MCP server for testing."""
-        # Create server instance
+        # Create server instance (registers tools and resources)
         self.server = OdooMCPServer(self.config)
 
         # Establish connection
-        self.server._ensure_connection()
-
-        # Register resources
-        self.server._register_resources()
+        await self.server.ensure_connected()
 
         # Store connection reference
         self.odoo_connection = self.server.connection

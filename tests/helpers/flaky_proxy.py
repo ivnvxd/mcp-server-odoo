@@ -205,7 +205,7 @@ class FlakyProxy:
                 while time.monotonic() < deadline:
                     if self._stop.is_set() or tunnel.drop_event.is_set():
                         return
-                    time.sleep(min(0.05, deadline - time.monotonic()))
+                    time.sleep(max(0.0, min(0.05, deadline - time.monotonic())))
             try:
                 upstream.sendall(data)
             except OSError:
@@ -234,7 +234,7 @@ class FlakyProxy:
                 while time.monotonic() < deadline:
                     if self._stop.is_set() or tunnel.drop_event.is_set():
                         return
-                    time.sleep(min(0.05, deadline - time.monotonic()))
+                    time.sleep(max(0.0, min(0.05, deadline - time.monotonic())))
             try:
                 client.sendall(data)
             except OSError:

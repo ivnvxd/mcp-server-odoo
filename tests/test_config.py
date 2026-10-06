@@ -30,7 +30,7 @@ class TestOdooConfig:
         assert config.uses_api_key is True
         assert config.uses_credentials is False
         assert config.log_level == "INFO"
-        assert config.default_limit == 10
+        assert config.default_limit == 25
         assert config.max_limit == 100
 
     def test_valid_config_with_credentials(self):

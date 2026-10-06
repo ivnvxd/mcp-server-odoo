@@ -11,7 +11,7 @@ import logging
 import os
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import Resource, TextContent, Tool
 
 from .helpers.mcp_test_client import (
@@ -77,8 +77,8 @@ class TestMCPProtocolCompliance:
                 assert isinstance(tool, Tool)
                 assert tool.name
                 assert tool.description
-                assert tool.inputSchema is not None
-                assert tool.inputSchema.get("type") == "object"
+                assert tool.input_schema is not None
+                assert tool.input_schema.get("type") == "object"
 
     @pytest.mark.asyncio
     async def test_resource_listing_format(self, test_env):
@@ -88,7 +88,7 @@ class TestMCPProtocolCompliance:
             # The server's resource surface is URI templates — they must
             # always be advertised
             result = await connected_client.session.list_resource_templates()
-            templates = {t.uriTemplate for t in result.resourceTemplates}
+            templates = {t.uri_template for t in result.resource_templates}
             for expected in (
                 "odoo://{model}/record/{record_id}",
                 "odoo://{model}/search",
@@ -115,7 +115,7 @@ class TestMCPProtocolCompliance:
             search_result = await connected_client.call_tool(
                 "search_records", {"model": "res.partner", "domain": [], "limit": 1}
             )
-            records = search_result.structuredContent["records"]
+            records = search_result.structured_content["records"]
             assert records, "test database must contain at least one res.partner"
             record_id = records[0]["id"]
 
@@ -174,18 +174,18 @@ class TestMCPIntegration:
 
     @pytest.mark.asyncio
     async def test_error_handling_invalid_uri(self, test_env):
-        """Test that an invalid URI scheme raises McpError."""
+        """Test that an invalid URI scheme raises MCPError."""
         client = MCPTestClient()
         async with client.connect() as connected_client:
-            with pytest.raises(McpError):
+            with pytest.raises(MCPError):
                 await connected_client.read_resource("invalid://uri")
 
     @pytest.mark.asyncio
     async def test_error_handling_nonexistent_record(self, test_env):
-        """Test that a non-existent record raises McpError."""
+        """Test that a non-existent record raises MCPError."""
         client = MCPTestClient()
         async with client.connect() as connected_client:
-            with pytest.raises(McpError):
+            with pytest.raises(MCPError):
                 await connected_client.read_resource("odoo://res.partner/record/999999999")
 
 
@@ -202,8 +202,8 @@ class TestMCPInspectorCompatibility:
             assert len(tools) >= len(EXPECTED_TOOLS)
 
             for tool in tools:
-                assert tool.inputSchema is not None
-                assert tool.inputSchema.get("type") == "object"
+                assert tool.input_schema is not None
+                assert tool.input_schema.get("type") == "object"
 
     @pytest.mark.asyncio
     async def test_server_capabilities(self, test_env):

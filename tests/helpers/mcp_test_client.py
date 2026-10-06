@@ -35,6 +35,7 @@ class MCPTestClient:
         # Use python module directly since package isn't published
         self.server_command = server_command or [sys.executable, "-m", "mcp_server_odoo"]
         self.session: Optional[ClientSession] = None
+        self.initialize_result = None  # InitializeResult from the last connect()
         self._server_process: Optional[subprocess.Popen] = None
 
     @asynccontextmanager
@@ -53,8 +54,9 @@ class MCPTestClient:
                 async with ClientSession(read, write) as session:
                     self.session = session
 
-                    # Initialize the connection
-                    await session.initialize()
+                    # Initialize the connection (keep the result — it carries
+                    # the server's instructions and capabilities)
+                    self.initialize_result = await session.initialize()
                     logger.info("Connected to MCP server")
 
                     yield self

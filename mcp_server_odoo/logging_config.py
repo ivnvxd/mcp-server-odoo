@@ -27,7 +27,6 @@ class StructuredFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         """Format log record as JSON."""
-        # Base log data
         log_data: Dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "logger": record.name,
@@ -38,7 +37,6 @@ class StructuredFormatter(logging.Formatter):
             "line": record.lineno,
         }
 
-        # Add extra fields if present
         if hasattr(record, "error_code"):
             log_data["error_code"] = record.error_code
         if hasattr(record, "error_details"):
@@ -54,7 +52,6 @@ class StructuredFormatter(logging.Formatter):
         if hasattr(record, "operation"):
             log_data["operation"] = record.operation
 
-        # Add exception info if present
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
 
@@ -151,22 +148,17 @@ def setup_logging(
         use_json: Whether to use JSON formatting
         log_file: Optional log file path
     """
-    # Get log level from environment or parameter
     if log_level is None:
         log_level = os.getenv("ODOO_MCP_LOG_LEVEL", "INFO")
 
-    # Convert to logging level
     numeric_level = getattr(logging, log_level.upper(), logging.INFO)
 
-    # Get root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
 
-    # Remove existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    # Create formatter
     if use_json or os.getenv("ODOO_MCP_LOG_JSON", "").lower() == "true":
         formatter = StructuredFormatter()
     else:
@@ -243,7 +235,6 @@ def log_request(
     if params:
         log_data["request_params"] = params
 
-    # Limit body size in logs
     if body:
         body_str = str(body)
         if len(body_str) > 1000:

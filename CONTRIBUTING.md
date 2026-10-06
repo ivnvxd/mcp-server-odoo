@@ -136,12 +136,12 @@ Describe the use case and motivation. Explain how the feature would benefit user
 A quick orientation for navigating the codebase:
 
 ```
-__main__.py → OdooConfig → OdooMCPServer → OdooConnection → FastMCP
+__main__.py → OdooConfig → OdooMCPServer → OdooConnection → MCPServer
 ```
 
 | Module | Responsibility |
 |--------|---------------|
-| `server.py` | Orchestrates startup, registers handlers on FastMCP |
+| `server.py` | Orchestrates startup, registers handlers on MCPServer |
 | `config.py` | `OdooConfig` dataclass from env vars, singleton via `get_config()` |
 | `odoo_connection.py` | XML-RPC proxies, auth, CRUD convenience methods, caching |
 | `tools.py` | MCP tool handlers (search, get, create, update, delete, list) |

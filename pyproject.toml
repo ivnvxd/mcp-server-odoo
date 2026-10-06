@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-server-odoo"
-version = "0.7.1"
+version = "0.8.0"
 description = "A Model Context Protocol server for Odoo ERP systems"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,10 +31,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "mcp>=1.26.0,<2",
+    # 2.2 is the floor: MCPServer, run_streamable_http_async(session_idle_timeout=...)
+    # and the public read_resource()/call_tool() overrides the server relies on.
+    "mcp>=2.2,<3",
     "python-dotenv>=1.0.0",
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
+    # mcp 2.x requires pydantic 2.12 or later
+    "pydantic>=2.12",
 ]
 
 [project.urls]
