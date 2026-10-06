@@ -986,7 +986,12 @@ class OdooToolHandler:
             order: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> SearchResult:
-            """Search for records in an Odoo model.
+            """Search for records in an Odoo model. This is the main read tool.
+
+            To read many known records, pass [["id", "in", ids]] as the domain in
+            one call, not one get_record call per ID. Prefer one call with a
+            larger limit over many small pages. For counts and per-group totals,
+            use aggregate_records.
 
             Binary fields (images, files) come back as odoo:// URIs; read one with
             read_attachment.
@@ -1039,6 +1044,7 @@ class OdooToolHandler:
             This tool supports selective field retrieval to optimize performance and response size.
             By default, returns a smart selection of commonly-used fields based on the model's field metadata.
             Binary fields (images, files) come back as odoo:// URIs; read one with read_attachment.
+            To read several records, use search_records with [["id", "in", ids]] in one call.
 
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
@@ -1050,8 +1056,8 @@ class OdooToolHandler:
                     - ["__all__"]: Returns ALL fields (warning: can be very large)
 
             Workflow for field discovery:
-            1. To see all available fields for a model, use the resource:
-               read("odoo://res.partner/fields")
+            1. To see the fields of a model, call get_fields:
+               get_fields("res.partner")
             2. Then request specific fields:
                get_record("res.partner", 1, fields=["name", "email", "phone"])
 
@@ -1936,7 +1942,7 @@ class OdooToolHandler:
                     if field_selection_method == "all_fields_fallback":
                         note = "All fields returned (smart field selection unavailable)."
                     else:
-                        note = f"Limited fields returned for performance. Use fields=['__all__'] for all fields or see odoo://{model}/fields for available fields."
+                        note = "Limited fields returned for performance. Use fields=['__all__'] for all fields or get_fields for the available fields."
                     metadata = FieldSelectionMetadata(
                         fields_returned=len(record),
                         field_selection_method=field_selection_method,

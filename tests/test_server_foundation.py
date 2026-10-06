@@ -486,6 +486,32 @@ class TestDynamicInstructions:
         assert server.app.instructions == static
 
 
+class TestUsageInstructions:
+    """The usage block is part of the static instructions, from the registered tools."""
+
+    def _server(self, **config_kwargs):
+        config = OdooConfig(url="http://localhost:8069", database="test_db", **config_kwargs)
+        with patch("mcp_server_odoo.server.OdooConnection", return_value=_FakeConnection()):
+            return OdooMCPServer(config)
+
+    def test_static_instructions_carry_the_usage_block(self):
+        server = self._server(api_key="test_api_key_12345")
+
+        instructions = server.app.instructions
+        assert instructions == server._static_instructions
+        assert instructions.startswith("MCP server for accessing and managing Odoo ERP data")
+        assert "Usage guidance:" in instructions
+        assert '[["id", "in", ids]]' in instructions
+        assert "call_model_method" not in instructions
+
+    def test_opt_in_method_calls_are_named(self):
+        server = self._server(
+            username="admin", password="admin", yolo_mode="true", enable_method_calls=True
+        )
+
+        assert "call_model_method" in server.app.instructions
+
+
 class TestServerIntegration:
     """Integration tests with real .env configuration."""
 
@@ -993,6 +1019,7 @@ class TestTransportSecurity:
 
         with patch("mcp_server_odoo.server.MCPServer") as mock_fastmcp:
             mock_fastmcp.return_value = Mock()
+            mock_fastmcp.return_value._tool_manager.list_tools.return_value = []
             OdooMCPServer(config)
 
             # Verify MCPServer was called with transport_security=None

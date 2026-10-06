@@ -7,7 +7,7 @@ Spec-compliant MCP clients inject it into the model context on connect
 returns the same block with structured data.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from .logging_config import get_logger
 from .odoo_connection import OdooConnection
@@ -23,6 +23,55 @@ UTC_DATETIME_GUIDANCE = (
     "- Provide datetimes to tools in UTC.\n"
     "- Convert to the user's timezone only for display."
 )
+
+# Cross-tool guidance for initialize.instructions: which tool to use, and one
+# batch call over a loop of single calls. Detail for one tool stays in its
+# description. Each line names the tools it needs, and is left out when one of
+# them is not registered (call_model_method is opt-in).
+_USAGE_LINES = (
+    (
+        ("list_models", "get_fields"),
+        "- Discovery: list_models lists the models you can access. get_fields describes the "
+        "fields of a model, the most relevant ones by default.",
+    ),
+    (
+        ("search_records", "get_record"),
+        "- Reads: search_records is the main read tool. Filter with 'domain' and ask only for "
+        "the columns you need with 'fields'. To read many known records, use one call with "
+        '[["id", "in", ids]], not one get_record call per ID. Prefer one call with a larger '
+        "'limit' over many small pages.",
+    ),
+    (
+        ("aggregate_records",),
+        "- Counts and totals: use aggregate_records for counts and per-group totals, not a "
+        "list of rows.",
+    ),
+    (
+        ("create_records", "update_records"),
+        "- Writes: to create or update many records, use create_records or update_records in "
+        "one atomic call, not a loop of single calls. update_records takes shared values "
+        "(record_ids + values) or per-record values (updates).",
+    ),
+    (
+        ("call_model_method",),
+        "- Business actions: call_model_method runs a public model method, for example "
+        "action_confirm.",
+    ),
+    (
+        ("read_attachment", "list_record_attachments", "upload_attachment"),
+        "- Files: get_record and search_records return binary fields as odoo:// URIs. "
+        "read_attachment returns the content for a URI or an attachment ID. "
+        "list_record_attachments lists the files on a record, and upload_attachment adds one.",
+    ),
+)
+
+
+def usage_guidance(tool_names: Iterable[str]) -> str:
+    """The usage block for initialize.instructions, limited to ``tool_names``."""
+    registered = set(tool_names)
+    lines = [line for tools, line in _USAGE_LINES if registered.issuperset(tools)]
+    return "\n".join(["Usage guidance:", *lines]) if lines else ""
+
 
 # Prefixed to the fallback text so the caller learns WHY the personalized
 # block is missing instead of silently seeing null identity fields. The

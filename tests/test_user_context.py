@@ -14,6 +14,7 @@ from mcp_server_odoo.user_context import (
     build_user_context,
     context_unavailable_text,
     get_user_context_data,
+    usage_guidance,
 )
 
 
@@ -396,3 +397,46 @@ class TestReasonAwareFallback:
         """Matching is by equality after unwrapping, not containment — a
         generic phrase must not suppress the guess it is no better than."""
         assert context_unavailable_text(reason) == CONTEXT_UNAVAILABLE_TEXT
+
+
+class TestUsageGuidance:
+    """The usage block in initialize.instructions names only registered tools."""
+
+    ALL_TOOLS = (
+        "search_records",
+        "get_record",
+        "get_fields",
+        "get_current_context",
+        "list_models",
+        "list_resource_templates",
+        "create_record",
+        "create_records",
+        "update_record",
+        "update_records",
+        "delete_record",
+        "post_message",
+        "aggregate_records",
+        "upload_attachment",
+        "list_record_attachments",
+        "read_attachment",
+        "call_model_method",
+    )
+
+    def test_every_tool_registered(self):
+        text = usage_guidance(self.ALL_TOOLS)
+
+        assert text.startswith("Usage guidance:\n")
+        assert '[["id", "in", ids]]' in text
+        assert "aggregate_records" in text
+        assert "create_records or update_records" in text
+        assert "call_model_method" in text
+        assert "read_attachment" in text
+
+    def test_optional_tool_left_out_when_not_registered(self):
+        text = usage_guidance(t for t in self.ALL_TOOLS if t != "call_model_method")
+
+        assert "call_model_method" not in text
+        assert "aggregate_records" in text
+
+    def test_no_known_tools_gives_no_block(self):
+        assert usage_guidance(["some_other_tool"]) == ""

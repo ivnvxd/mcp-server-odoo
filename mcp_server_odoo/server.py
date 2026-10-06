@@ -25,7 +25,7 @@ from .odoo_connection import OdooConnection, OdooConnectionError, OdooUnreachabl
 from .performance import PerformanceManager
 from .resources import register_resources
 from .tools import register_tools
-from .user_context import build_user_context
+from .user_context import build_user_context, usage_guidance
 
 # Set up logging
 logger = get_logger(__name__)
@@ -143,6 +143,15 @@ class OdooMCPServer:
             self.app, self.connection, self.access_controller, self.config
         )
         self._install_connection_guard()
+
+        # The usage block names only the registered tools and needs no Odoo,
+        # so it joins the static base. MCPServer (mcp 2.2) has no sync tool
+        # listing and no instructions setter: private attrs, as in
+        # _apply_dynamic_instructions().
+        usage = usage_guidance(tool.name for tool in self.app._tool_manager.list_tools())
+        if usage:
+            self._static_instructions = f"{self._static_instructions}\n\n{usage}".lstrip()
+            self.app._lowlevel_server.instructions = self._static_instructions
 
         logger.info(f"Initialized Odoo MCP Server v{SERVER_VERSION}")
 
