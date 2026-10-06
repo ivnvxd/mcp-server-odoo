@@ -7,6 +7,7 @@ actions like creating, updating, or deleting records.
 
 import asyncio
 import base64
+import binascii
 import json
 import re
 import xmlrpc.client
@@ -25,7 +26,7 @@ from .access_control import (
     attachment_scope_domain,
     check_domain_balance,
 )
-from .binary_reads import read_without_binary_payloads
+from .binary_reads import read_without_binary_payloads, uses_odoo_20_binaries
 from .config import OdooConfig, max_offset_for
 from .error_handling import (
     MCPPermissionError,
@@ -61,11 +62,13 @@ from .schemas import (
     ResourceTemplatesResult,
     SearchResult,
     UpdateResult,
+    UploadAttachmentResult,
 )
 from .uri_schema import (
     ATTACHMENT_CONTENT_FIELDS,
     BINARY_FIELD_TYPES,
     URIValidationError,
+    build_attachment_uri,
     build_binary_uri,
     is_binary_payload_dict,
 )
@@ -240,6 +243,11 @@ def _withheld_fields_note(withheld: List[str]) -> str:
     """
     return f"{withheld_note(withheld)} (use the 'fields' parameter)."
 
+
+MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 3 // 4 - 64 * 1024
+"""Largest decoded file upload_attachment accepts. The SDK refuses HTTP request
+bodies over 4 MiB (413) before any tool runs; base64 grows the payload by 4/3,
+and 64 KiB is left for the JSON-RPC envelope."""
 
 MAX_BATCH_RECORDS = 100
 """Cap on records per create_records/update_records call, to bound the blast
@@ -1310,6 +1318,45 @@ class OdooToolHandler:
                 ctx,
             )
             return PostMessageResult(**result)
+
+        @self.app.tool(
+            title="Upload Attachment",
+            annotations=ToolAnnotations(
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=True,
+            ),
+        )
+        async def upload_attachment(
+            model: str,
+            record_id: int,
+            name: str,
+            data: str,
+            mimetype: Optional[str] = None,
+            ctx: Optional[Context] = None,
+        ) -> UploadAttachmentResult:
+            """Attach a file to a record (an ir.attachment on it).
+
+            The file must be plain base64 (no "data:..." prefix), at most about
+            2.9 MB after decoding. Odoo detects the mimetype from the content
+            when it is not given. To show the file in the record's chatter,
+            pass the returned attachment_id to post_message(attachment_ids=...).
+
+            Args:
+                model: The model of the record (e.g., 'res.partner')
+                record_id: The record to attach the file to
+                name: File name, e.g. 'contract.pdf'
+                data: File content, base64-encoded
+                mimetype: Optional mimetype, e.g. 'application/pdf'
+
+            Returns:
+                The new attachment's id and its odoo://attachment/{id} URI.
+            """
+            result = await self._handle_upload_attachment_tool(
+                model, record_id, name, data, mimetype, ctx
+            )
+            return UploadAttachmentResult(**result)
 
         @self.app.tool(
             title="Aggregate Records",
@@ -2693,6 +2740,105 @@ class OdooToolHandler:
             logger.error(f"Error in update_records tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to update records: {sanitized_msg}") from e
+
+    async def _handle_upload_attachment_tool(
+        self,
+        model: str,
+        record_id: int,
+        name: str,
+        data: str,
+        mimetype: Optional[str] = None,
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle upload attachment tool request."""
+        try:
+            with perf_logger.track_operation("tool_upload_attachment", model=model):
+                _validate_record_id(record_id)
+                if model == "ir.attachment":
+                    raise ValidationError(
+                        "Attach the file to a business record, not to another attachment"
+                    )
+                if not name or not name.strip():
+                    raise ValidationError("Provide a file name")
+                if data.startswith("data:"):
+                    raise ValidationError(
+                        "Send the file as plain base64, without the 'data:...;base64,' prefix"
+                    )
+                try:
+                    raw = base64.b64decode(data, validate=True)
+                except (binascii.Error, ValueError) as e:
+                    raise ValidationError(f"'data' is not valid base64: {e}") from e
+                if not raw:
+                    raise ValidationError("The file is empty")
+                if len(raw) > MAX_UPLOAD_BYTES:
+                    raise ValidationError(
+                        f"The file is {len(raw):,} bytes, over the {MAX_UPLOAD_BYTES:,}-byte "
+                        f"limit for one upload"
+                    )
+
+                # Write access on the record the file goes to, and create
+                # access on ir.attachment (standard mode checks both models)
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, model, "write"
+                )
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, "ir.attachment", "create"
+                )
+                await self._ctx_info(ctx, f"Attaching {name} to {model}/{record_id}...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                # res_id is a plain integer: Odoo would attach to a record
+                # that does not exist. active_test=False: archived ones do.
+                exists = await asyncio.to_thread(
+                    self.connection.search_count,
+                    model,
+                    [["id", "=", record_id]],
+                    context={"active_test": False},
+                )
+                if not exists:
+                    raise NotFoundError(f"Record not found: {model} with ID {record_id}")
+
+                # Odoo 20 removed ir.attachment.datas; raw takes the same base64 string
+                content_field = "raw" if uses_odoo_20_binaries(self.connection) else "datas"
+                values = {
+                    "name": name,
+                    "res_model": model,
+                    "res_id": record_id,
+                    content_field: data,
+                }
+                if mimetype:
+                    values["mimetype"] = mimetype
+                attachment_id = await asyncio.to_thread(
+                    self.connection.create, "ir.attachment", values
+                )
+
+                return {
+                    "success": True,
+                    "attachment_id": attachment_id,
+                    "uri": build_attachment_uri(attachment_id),
+                    "name": name,
+                    "size": len(raw),
+                    "message": f"Attached {name} to {model} record {record_id}",
+                }
+
+        except ValidationError:
+            raise
+        except NotFoundError as e:
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except OdooValidationFault as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in upload_attachment tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to upload attachment: {sanitized_msg}") from e
 
     async def _handle_delete_record_tool(
         self,

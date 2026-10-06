@@ -260,6 +260,20 @@ class BulkCreateResult(BaseModel):
     message: str = Field(description="Human-readable success message")
 
 
+# --- Upload Attachment ---
+
+
+class UploadAttachmentResult(BaseModel):
+    """Result of attaching a file to a record."""
+
+    success: bool = Field(description="Whether the attachment was created")
+    attachment_id: int = Field(description="ID of the new ir.attachment")
+    uri: str = Field(description="odoo://attachment/{id} resource URI that serves the file")
+    name: str = Field(description="File name of the attachment")
+    size: int = Field(description="Size of the file in bytes")
+    message: str = Field(description="Human-readable success message")
+
+
 # --- Update Record ---
 
 

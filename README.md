@@ -673,6 +673,21 @@ Delete a record from Odoo.
 }
 ```
 
+### `upload_attachment`
+Attach a file to a record. `data` is the file as plain base64, at most about 2.9 MB after decoding. Odoo detects the mimetype when `mimetype` is not given. The result carries the new attachment's ID and its `odoo://attachment/{id}` URI. To show the file in the chatter, pass the ID to `post_message` as `attachment_ids`.
+
+```json
+{
+  "model": "res.partner",
+  "record_id": 42,
+  "name": "contract.pdf",
+  "data": "JVBERi0xLjQK...",
+  "mimetype": "application/pdf"
+}
+```
+
+In standard mode, the user needs write access on the record's model and create access on `ir.attachment`.
+
 ### `post_message`
 Post a message to a record's chatter (`mail.thread`). `subtype="note"` (default) is an internal log; `subtype="comment"` notifies followers. Set `body_is_html=true` for HTML markup. Optional `subject` sets a message subject line; optional `partner_ids` and `attachment_ids` reference existing partners and attachments.
 

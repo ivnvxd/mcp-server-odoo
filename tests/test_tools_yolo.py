@@ -626,3 +626,57 @@ class TestUpdateRecordsPerRecordYoloIntegration:
             if created_ids:
                 connection.unlink("res.partner", created_ids)
             connection.disconnect()
+
+
+@pytest.mark.yolo
+class TestUploadAttachmentYoloIntegration:
+    """Live round trip: upload_attachment, then read the bytes back as a resource."""
+
+    @pytest.mark.asyncio
+    async def test_upload_then_read_back(self):
+        import base64
+
+        from mcp_server_odoo.access_control import AccessController
+        from mcp_server_odoo.odoo_connection import OdooConnection
+        from mcp_server_odoo.resources import OdooResourceHandler
+
+        config = OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            username=os.getenv("ODOO_USER", "admin"),
+            password=os.getenv("ODOO_PASSWORD", "admin"),
+            database=os.getenv("ODOO_DB"),
+            yolo_mode="true",
+        )
+        connection = OdooConnection(config)
+        connection.connect()
+        connection.authenticate()
+        payload = b"%PDF-1.4 upload round trip"
+        partner_id = attachment_id = None
+        try:
+            partner_id = connection.create("res.partner", {"name": "Upload Round Trip"})
+            access = AccessController(config)
+            tools = OdooToolHandler(MagicMock(), connection, access, config)
+            resources = OdooResourceHandler(MagicMock(), connection, access, config)
+
+            result = await tools._handle_upload_attachment_tool(
+                "res.partner",
+                partner_id,
+                "round-trip.pdf",
+                base64.b64encode(payload).decode("ascii"),
+                "application/pdf",
+            )
+            attachment_id = result["attachment_id"]
+
+            content, mimetype = await resources._handle_attachment_read(str(attachment_id))
+            assert content == payload
+            assert mimetype == "application/pdf"
+            listed = connection.search(
+                "ir.attachment", [["res_model", "=", "res.partner"], ["res_id", "=", partner_id]]
+            )
+            assert attachment_id in listed
+        finally:
+            if attachment_id:
+                connection.unlink("ir.attachment", [attachment_id])
+            if partner_id:
+                connection.unlink("res.partner", [partner_id])
+            connection.disconnect()

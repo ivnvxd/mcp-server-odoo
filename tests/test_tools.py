@@ -98,6 +98,7 @@ class TestOdooToolHandler:
             "update_records",
             "delete_record",
             "post_message",
+            "upload_attachment",
             "aggregate_records",
             "list_resource_templates",
         }
