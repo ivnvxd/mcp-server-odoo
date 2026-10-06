@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tool step messages**: they go to the server log only. mcp 2.x deprecates log notifications to the client.
 
 ### Fixed
+- **Typed tool schemas**: `domain`, `fields`, `arguments` and `keyword_arguments` had an untyped or multi-type schema, which Gemini, VS Code and other strict clients reject. They now have a typed schema, and the tools still accept the same input, strings included. `groupby` and `aggregates` also take a bare string, and `post_message` takes `subtype` and `message_type` in any letter case.
 - **`aggregate_records` with a function that does not fit the field**: `name:sum` reached SQL and came back as a generic connection error. `sum` and `avg` now need a number field, and `bool_and` and `bool_or` need a boolean field.
 - **Object reprs in `json` fields**: a value Odoo could not encode, such as `<function validate at 0x7f...>`, reads as `null` in `get_record` and `search_records`.
 - **Unreadable fields in bulk reads**: a `get_record` or `search_records` read with smart defaults or `["__all__"]` failed as a whole when Odoo refused one field to the user, for example the accounting fields on a contact. Such fields are left out and listed in `skipped_fields`. An explicit field list still fails.

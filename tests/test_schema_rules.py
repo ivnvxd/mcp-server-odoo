@@ -22,16 +22,9 @@ from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.odoo_connection import OdooConnection
 from mcp_server_odoo.tools import OdooToolHandler
 
-# (tool, property) pairs that break a rule today. Each entry must still break
-# one, so the list shrinks as they are fixed. The typed parameters change
-# empties it.
-KNOWN_EXCEPTIONS: Set[Tuple[str, str]] = {
-    ("search_records", "domain"),
-    ("search_records", "fields"),
-    ("aggregate_records", "domain"),
-    ("call_model_method", "arguments"),
-    ("call_model_method", "keyword_arguments"),
-}
+# (tool, property) pairs that may break a rule. Each entry must still break
+# one, so the list only shrinks. Empty since the parameters are typed.
+KNOWN_EXCEPTIONS: Set[Tuple[str, str]] = set()
 
 
 def _walk(schema: Any, path: str) -> Iterator[Tuple[str, Dict[str, Any]]]:

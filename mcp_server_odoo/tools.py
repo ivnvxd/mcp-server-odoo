@@ -14,11 +14,11 @@ import time
 import xmlrpc.client
 from ast import literal_eval as _parse_python_literal
 from datetime import datetime
-from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, WithJsonSchema
 
 from .access_control import (
     AccessControlError,
@@ -335,6 +335,46 @@ def _refuse_bool(value: Any) -> Any:
 
 
 RecordId = Annotated[int, BeforeValidator(_refuse_bool)]
+
+
+def _wrap_bare_string(value: Any) -> Any:
+    """A bare string is a list of one: "partner_id" is ["partner_id"]."""
+    return [value] if isinstance(value, str) else value
+
+
+def _lower_case(value: Any) -> Any:
+    return value.lower() if isinstance(value, str) else value
+
+
+# The parameters below advertise a typed schema (strict clients reject a bare
+# {} or a union of types), but validate as Any: the handlers keep parsing a
+# JSON or Python-literal string, and their error text names the problem.
+Domain = Annotated[
+    Optional[Any],
+    WithJsonSchema(
+        {
+            "anyOf": [{"type": "array", "items": {}}, {"type": "null"}],
+            "description": (
+                "Odoo domain: a list of conditions [field, operator, value], joined by "
+                "'&' (the default), '|' or '!'. Example: [[\"is_company\", \"=\", true]]. "
+                "The 'any' and 'not any' operators, which take a sub-domain as value, need "
+                "Odoo 17 or later."
+            ),
+        }
+    ),
+]
+FieldNames = Annotated[
+    Optional[Any],
+    WithJsonSchema({"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]}),
+]
+ArgumentList = Annotated[
+    Optional[Any], WithJsonSchema({"anyOf": [{"type": "array", "items": {}}, {"type": "null"}]})
+]
+KeywordArguments = Annotated[
+    Optional[Any],
+    WithJsonSchema({"anyOf": [{"type": "object", "additionalProperties": True}, {"type": "null"}]}),
+]
+StringList = Annotated[Optional[List[str]], BeforeValidator(_wrap_bare_string)]
 
 
 def _validate_record_id(record_id: int, label: str = "record ID") -> None:
@@ -1165,8 +1205,8 @@ class OdooToolHandler:
         )
         async def search_records(
             model: str,
-            domain: Optional[Any] = None,
-            fields: Optional[Any] = None,
+            domain: Domain = None,
+            fields: FieldNames = None,
             limit: Optional[int] = None,
             offset: int = 0,
             order: Optional[str] = None,
@@ -1188,6 +1228,7 @@ class OdooToolHandler:
                     - A list: [['is_company', '=', True]]
                     - A JSON string: "[['is_company', '=', true]]"
                     - None: returns all records (default)
+                    The 'any' and 'not any' sub-domain operators need Odoo 17+.
                 fields: Field selection options - can be:
                     - None (default): Returns smart selection of common fields
                     - A list: ["field1", "field2", ...] - Returns only specified fields
@@ -1537,8 +1578,10 @@ class OdooToolHandler:
             model: str,
             record_id: RecordId,
             body: str,
-            subtype: Literal["note", "comment"] = "note",
-            message_type: Literal["comment", "notification"] = "comment",
+            subtype: Annotated[Literal["note", "comment"], BeforeValidator(_lower_case)] = "note",
+            message_type: Annotated[
+                Literal["comment", "notification"], BeforeValidator(_lower_case)
+            ] = "comment",
             partner_ids: Optional[List[int]] = None,
             attachment_ids: Optional[List[int]] = None,
             body_is_html: bool = False,
@@ -1694,9 +1737,9 @@ class OdooToolHandler:
         )
         async def aggregate_records(
             model: str,
-            groupby: Optional[List[str]] = None,
-            aggregates: Optional[List[str]] = None,
-            domain: Optional[Any] = None,
+            groupby: StringList = None,
+            aggregates: StringList = None,
+            domain: Domain = None,
             order: Optional[str] = None,
             limit: Optional[int] = None,
             offset: int = 0,
@@ -1730,6 +1773,7 @@ class OdooToolHandler:
                     group carries a count. Pass ``["__count", "amount_total:sum"]``
                     to get both.
                 domain: Odoo domain filter — list, JSON string, or None.
+                    The 'any' and 'not any' sub-domain operators need Odoo 17+.
                 order: Sort expression over groupby keys / aggregates,
                     e.g. ``"date_order:month"`` or ``"amount_total:sum desc"``.
                 limit: Maximum number of groups. Defaults to
@@ -1787,8 +1831,8 @@ class OdooToolHandler:
             async def call_model_method(
                 model: str,
                 method: str,
-                arguments: Optional[Union[List[Any], str]] = None,
-                keyword_arguments: Optional[Union[Dict[str, Any], str]] = None,
+                arguments: ArgumentList = None,
+                keyword_arguments: KeywordArguments = None,
                 ctx: Optional[Context] = None,
             ) -> CallModelMethodResult:
                 """Call a public Odoo model method via XML-RPC execute_kw.

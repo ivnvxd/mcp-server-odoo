@@ -6191,3 +6191,93 @@ class TestJsonObjectReprScrub:
         result = await handler._handle_get_record_tool("x.model", 3, ["name", "options"])
 
         assert result.record["options"]["validator"] == self.REPR
+
+
+class TestTypedParameters:
+    """Typed schemas for strict clients; the handlers still take the loose input."""
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.get_major_version.return_value = 19
+        connection.search.return_value = []
+        connection.search_count.return_value = 0
+        connection.execute_kw.return_value = []
+        return connection
+
+    @pytest.fixture
+    def app(self, connection):
+        app = MCPServer("typed-test")
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+        OdooToolHandler(app, connection, MagicMock(spec=AccessController), config)
+        return app
+
+    async def _call(self, app, tool, arguments):
+        from mcp import Client
+
+        async with Client(app, mode="legacy") as client:
+            result = await client.call_tool(tool, arguments)
+        assert not result.is_error, result.content
+        return result
+
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            [["is_company", "=", True]],
+            '[["is_company", "=", true]]',
+            "[('is_company', '=', True)]",
+        ],
+        ids=["list", "json-string", "python-string"],
+    )
+    async def test_domain_as_list_or_string(self, app, connection, domain):
+        await self._call(app, "search_records", {"model": "res.partner", "domain": domain})
+
+        # a Python-literal string keeps tuples, which XML-RPC sends as arrays
+        sent = connection.search.call_args.args[1]
+        assert [list(condition) for condition in sent] == [["is_company", "=", True]]
+
+    @pytest.mark.parametrize("operator", ["any", "not any"])
+    async def test_odoo_17_sub_domain_operators_pass_through(self, app, connection, operator):
+        domain = [["child_ids", operator, [["email", "ilike", "@example.com"]]]]
+
+        await self._call(app, "search_records", {"model": "res.partner", "domain": domain})
+
+        assert connection.search.call_args.args[1] == domain
+
+    async def test_domain_schema_names_the_odoo_17_operators(self, app):
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        domain = tools["search_records"].input_schema["properties"]["domain"]
+
+        assert domain["anyOf"][0] == {"type": "array", "items": {}}
+        assert "Odoo 17" in domain["description"]
+
+    async def test_bare_string_groupby_and_aggregates(self, app, connection):
+        await self._call(
+            app,
+            "aggregate_records",
+            {"model": "sale.order", "groupby": "partner_id", "aggregates": "__count"},
+        )
+
+        kwargs = connection.execute_kw.call_args.args[3]
+        assert kwargs["groupby"] == ["partner_id"]
+        assert kwargs["aggregates"] == ["__count"]
+
+    async def test_upper_case_subtype_and_message_type(self, app, connection):
+        connection.execute_kw.return_value = 42
+
+        await self._call(
+            app,
+            "post_message",
+            {
+                "model": "res.partner",
+                "record_id": 1,
+                "body": "Hello",
+                "subtype": "COMMENT",
+                "message_type": "Comment",
+            },
+        )
+
+        kwargs = connection.execute_kw.call_args.args[3]
+        assert kwargs["subtype_xmlid"] == "mail.mt_comment"
+        assert kwargs["message_type"] == "comment"
