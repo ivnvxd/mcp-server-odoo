@@ -13,10 +13,10 @@ import re
 import xmlrpc.client
 from ast import literal_eval as _parse_python_literal
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, Set, Union
 
 from mcp.server.mcpserver import Context, MCPServer
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 from .access_control import (
     AccessControlError,
@@ -43,6 +43,7 @@ from .odoo_connection import (
     OdooConnectionError,
     OdooValidationFault,
 )
+from .resources import _is_text_mimetype
 from .schemas import (
     AggregateResult,
     AttachmentListResult,
@@ -58,6 +59,7 @@ from .schemas import (
     FieldsResult,
     ModelsResult,
     PostMessageResult,
+    ReadAttachmentResult,
     RecordResult,
     RelatedSummary,
     ResourceTemplatesResult,
@@ -67,7 +69,9 @@ from .schemas import (
 )
 from .uri_schema import (
     ATTACHMENT_CONTENT_FIELDS,
+    ATTACHMENT_URI_PATTERN,
     BINARY_FIELD_TYPES,
+    BINARY_FIELD_URI_PATTERN,
     URIValidationError,
     build_attachment_uri,
     build_binary_uri,
@@ -249,6 +253,23 @@ MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 3 // 4 - 64 * 1024
 """Largest decoded file upload_attachment accepts. The SDK refuses HTTP request
 bodies over 4 MiB (413) before any tool runs; base64 grows the payload by 4/3,
 and 64 KiB is left for the JSON-RPC envelope."""
+
+# read_attachment caps: what goes into the model's context, and the largest
+# text file fetched to fill it (beyond that only a link is returned)
+READ_TEXT_MAX_CHARS = 100_000
+READ_TEXT_MAX_BYTES = 1024 * 1024
+READ_IMAGE_MAX_BYTES = 256 * 1024
+
+# Documents whose text Odoo extracts into ir.attachment.index_content
+_EXTRACTED_TEXT_MIMETYPES = (
+    "application/pdf",
+    "application/msword",
+    "application/rtf",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.",
+    "application/vnd.oasis.opendocument.",
+)
 
 MAX_BATCH_RECORDS = 100
 """Cap on records per create_records/update_records call, to bound the blast
@@ -927,6 +948,9 @@ class OdooToolHandler:
         ) -> SearchResult:
             """Search for records in an Odoo model.
 
+            Binary fields (images, files) come back as odoo:// URIs; read one with
+            read_attachment.
+
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
                 domain: Odoo domain filter - can be:
@@ -974,6 +998,7 @@ class OdooToolHandler:
 
             This tool supports selective field retrieval to optimize performance and response size.
             By default, returns a smart selection of commonly-used fields based on the model's field metadata.
+            Binary fields (images, files) come back as odoo:// URIs; read one with read_attachment.
 
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
@@ -1319,6 +1344,41 @@ class OdooToolHandler:
                 ctx,
             )
             return PostMessageResult(**result)
+
+        @self.app.tool(
+            title="Read Attachment",
+            annotations=ToolAnnotations(
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
+            ),
+        )
+        async def read_attachment(
+            uri: Optional[str] = None,
+            attachment_id: Optional[int] = None,
+            ctx: Optional[Context] = None,
+        ) -> Annotated[CallToolResult, ReadAttachmentResult]:
+            """Read a file: an attachment, or a binary field such as an image.
+
+            Pass exactly one of uri or attachment_id. The uri is an odoo://
+            URI from a tool result: odoo://attachment/{id} or
+            odoo://{model}/record/{id}/{field}. What comes back depends on
+            the file:
+
+            - text files: their text (up to 100,000 characters)
+            - PDF and Office files: the text Odoo extracted from them
+            - images up to 256 KB: the image itself
+            - anything else: a download link for a person logged in to Odoo
+
+            Args:
+                uri: odoo:// URI of the file
+                attachment_id: ID of an ir.attachment
+
+            Returns:
+                The file's text or image, or a download link.
+            """
+            return await self._handle_read_attachment_tool(uri, attachment_id, ctx)
 
         @self.app.tool(
             title="List Record Attachments",
@@ -2771,6 +2831,210 @@ class OdooToolHandler:
             logger.error(f"Error in update_records tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to update records: {sanitized_msg}") from e
+
+    async def _handle_read_attachment_tool(
+        self,
+        uri: Optional[str],
+        attachment_id: Optional[int],
+        ctx=None,
+    ) -> CallToolResult:
+        """Handle read attachment tool request.
+
+        Content goes through the app's own resources/read path, so the access
+        gates, the ODOO_MCP_MAX_BINARY_SIZE pre-flight and the Odoo 20 binary
+        handling are the resources' own. Only attachment metadata (incl. the
+        extracted index_content) is read here, under the same gate.
+        """
+        try:
+            with perf_logger.track_operation("tool_read_attachment"):
+                if (uri is None) == (attachment_id is None):
+                    raise ValidationError("Pass exactly one of uri or attachment_id")
+                if attachment_id is not None:
+                    _validate_record_id(attachment_id, "attachment ID")
+                    uri = build_attachment_uri(attachment_id)
+                assert uri is not None
+
+                base_url = self.config.url.rstrip("/")
+                field_match = BINARY_FIELD_URI_PATTERN.match(uri)
+                attachment_match = ATTACHMENT_URI_PATTERN.match(uri)
+                if attachment_match:
+                    attachment_id = int(attachment_match.group(1))
+                    _validate_record_id(attachment_id, "attachment ID")
+                    download_url = f"{base_url}/web/content/{attachment_id}?download=true"
+                    meta = await self._attachment_metadata(attachment_id)
+                elif field_match:
+                    model, record_id, field = field_match.groups()
+                    download_url = (
+                        f"{base_url}/web/content/{model}/{record_id}/{field}?download=true"
+                    )
+                    meta = await self._field_attachment_metadata(model, int(record_id), field)
+                else:
+                    raise ValidationError(
+                        "Pass an odoo://attachment/{id} or odoo://{model}/record/{id}/{field} URI"
+                    )
+                await self._ctx_info(ctx, f"Reading {uri}...")
+
+                result = {
+                    "uri": uri,
+                    "name": meta.get("name"),
+                    "mimetype": meta.get("mimetype"),
+                    "size": meta.get("size"),
+                    "download_url": download_url,
+                }
+                mimetype = meta.get("mimetype") or ""
+                size = meta.get("size")
+
+                if meta.get("type") == "url":
+                    return self._attachment_result(
+                        {**result, "kind": "url", "text": meta.get("url") or ""}
+                    )
+                if mimetype.startswith(_EXTRACTED_TEXT_MIMETYPES):
+                    extracted = (meta.get("index_content") or "").strip()
+                    if extracted:
+                        return self._attachment_text_result(result, extracted, "extracted_text")
+                    return self._attachment_link_result(
+                        result, "Odoo extracted no text from this file."
+                    )
+                if mimetype and _is_text_mimetype(mimetype):
+                    if size is not None and size > READ_TEXT_MAX_BYTES:
+                        return self._attachment_link_result(result, "The text file is too large.")
+                elif mimetype.startswith("image/"):
+                    if size is not None and size > READ_IMAGE_MAX_BYTES:
+                        return self._attachment_link_result(result, "The image is too large.")
+                elif mimetype:
+                    return self._attachment_link_result(
+                        result, f"{mimetype} files are returned as a link."
+                    )
+
+                # Text, an image, or a field without metadata: read the content
+                contents = await self.app.read_resource(uri)
+                item = list(contents)[0]
+                content, mimetype = item.content, item.mime_type or mimetype
+                result["mimetype"] = mimetype
+                if isinstance(content, str):
+                    return self._attachment_text_result(result, content, "text")
+                result["size"] = len(content)
+                if mimetype.startswith("image/") and len(content) <= READ_IMAGE_MAX_BYTES:
+                    payload = base64.b64encode(content).decode("ascii")
+                    return self._attachment_result(
+                        {**result, "kind": "image"},
+                        ImageContent(type="image", data=payload, mime_type=mimetype),
+                    )
+                return self._attachment_link_result(
+                    result,
+                    "The image is too large."
+                    if mimetype.startswith("image/")
+                    else f"{mimetype} files are returned as a link.",
+                )
+
+        except ValidationError:
+            raise
+        except NotFoundError as e:
+            raise ValidationError(str(e)) from e
+        except MCPPermissionError as e:
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except OdooValidationFault as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in read_attachment tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to read attachment: {sanitized_msg}") from e
+
+    async def _attachment_metadata(self, attachment_id: int) -> Dict[str, Any]:
+        """Name, mimetype, size, type, url and extracted text of an attachment (gated)."""
+        await asyncio.to_thread(
+            self.access_controller.validate_model_access, "ir.attachment", "read"
+        )
+        if not self.connection.is_authenticated:
+            raise ValidationError("Not authenticated with Odoo")
+        # Gate on the attached-to model before any metadata leaves Odoo
+        await self._gate_attachment_records([attachment_id])
+        rows = await asyncio.to_thread(
+            self.connection.search_read,
+            "ir.attachment",
+            [["id", "=", attachment_id]],
+            ["name", "mimetype", "file_size", "type", "url", "index_content"],
+            context={"active_test": False},
+        )
+        if not rows:
+            raise NotFoundError(f"Attachment not found: {attachment_id}")
+        row = rows[0]
+        # Odoo answers False for empty values
+        return {
+            **row,
+            "name": row.get("name") or None,
+            "mimetype": row.get("mimetype") or None,
+            "size": row.get("file_size") or None,
+        }
+
+    async def _field_attachment_metadata(
+        self, model: str, record_id: int, field: str
+    ) -> Dict[str, Any]:
+        """Metadata of the attachment that stores a binary field, if readable.
+
+        Empty when there is none (a plain column) or ir.attachment is not
+        accessible; the content read then decides by what comes back.
+        """
+        try:
+            await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
+            await asyncio.to_thread(
+                self.access_controller.validate_model_access, "ir.attachment", "read"
+            )
+            rows = await asyncio.to_thread(
+                self.connection.search_read,
+                "ir.attachment",
+                [
+                    ["res_model", "=", model],
+                    ["res_id", "=", record_id],
+                    ["res_field", "=", field],
+                ],
+                ["name", "mimetype", "file_size"],
+                limit=1,
+            )
+        except AccessControlError as e:
+            if isinstance(e, AccessControlUnavailableError):
+                raise
+            # The model itself must be readable; only ir.attachment may be off
+            await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
+            return {}
+        if not rows:
+            return {}
+        row = rows[0]
+        return {
+            "name": row.get("name"),
+            "mimetype": row.get("mimetype") or None,
+            "size": row.get("file_size") or None,
+        }
+
+    def _attachment_text_result(
+        self, result: Dict[str, Any], text: str, kind: str
+    ) -> CallToolResult:
+        truncated = len(text) > READ_TEXT_MAX_CHARS
+        return self._attachment_result(
+            {**result, "kind": kind, "text": text[:READ_TEXT_MAX_CHARS], "truncated": truncated}
+        )
+
+    def _attachment_link_result(self, result: Dict[str, Any], why: str) -> CallToolResult:
+        return self._attachment_result({**result, "kind": "link", "note": why})
+
+    @staticmethod
+    def _attachment_result(fields: Dict[str, Any], *blocks: Any) -> CallToolResult:
+        """Structured result plus the content blocks the model reads."""
+        structured = ReadAttachmentResult(**fields).model_dump(mode="json")
+        summary = {k: v for k, v in structured.items() if v is not None and k != "text"}
+        lines = [json.dumps(summary, indent=2)]
+        if structured.get("text"):
+            lines.append(structured["text"])
+        return CallToolResult(
+            content=[TextContent(type="text", text="\n\n".join(lines)), *blocks],
+            structured_content=structured,
+        )
 
     async def _handle_list_record_attachments_tool(
         self,

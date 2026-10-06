@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`read_attachment` tool**: returns a file's text, the text Odoo extracted from a PDF or Office file, an image block for images up to 256 KB, or a download link. It takes an `odoo://` URI or an attachment ID.
 - **`list_record_attachments` tool**: lists the files attached to a record, newest first, each with its `odoo://attachment/{id}` URI.
 - **`upload_attachment` tool**: attaches a base64 file of up to about 2.9 MB to a record, and returns its `odoo://attachment/{id}` URI.
 - **`update_records` with per-record values**: `updates=[{"id": ..., "values": {...}}]` writes different values to each record in one transaction, on Odoo 19 and later.

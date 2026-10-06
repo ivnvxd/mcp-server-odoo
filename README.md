@@ -673,6 +673,22 @@ Delete a record from Odoo.
 }
 ```
 
+### `read_attachment`
+Read a file: an attachment or a binary field such as an image. Pass exactly one of `uri` (an `odoo://attachment/{id}` or `odoo://{model}/record/{id}/{field}` URI from a tool result) or `attachment_id`. The result depends on the file:
+
+- text files: their text, up to 100,000 characters
+- PDF and Office files: the text Odoo extracted from them (Odoo extracts PDF text only with the `attachment_indexation` module)
+- images up to 256 KB: the image itself
+- anything else: a download link for a person logged in to Odoo
+
+```json
+{
+  "uri": "odoo://res.partner/record/42/image_1920"
+}
+```
+
+Most chat clients never read MCP resources by themselves, so this tool is the way for the model to see a file.
+
 ### `list_record_attachments`
 List the files attached to a record, newest first, with name, mimetype, size, date and an `odoo://attachment/{id}` URI each. Files behind binary fields such as `image_1920` are not listed, because `get_record` returns those as URIs.
 

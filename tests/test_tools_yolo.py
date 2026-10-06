@@ -732,3 +732,63 @@ class TestListRecordAttachmentsYoloIntegration:
                     connection.unlink("ir.attachment", attachment_ids)
                 connection.unlink("res.partner", [partner_id])
             connection.disconnect()
+
+
+@pytest.mark.yolo
+class TestReadAttachmentYoloIntegration:
+    """Live: read_attachment through the real server, text file and image field."""
+
+    @pytest.mark.asyncio
+    async def test_text_attachment_and_image_field(self):
+        import base64
+
+        from mcp import Client
+
+        from mcp_server_odoo.server import OdooMCPServer
+
+        config = OdooConfig(
+            url=os.getenv("ODOO_URL", "http://localhost:8069"),
+            username=os.getenv("ODOO_USER", "admin"),
+            password=os.getenv("ODOO_PASSWORD", "admin"),
+            database=os.getenv("ODOO_DB"),
+            yolo_mode="true",
+        )
+        server = OdooMCPServer(config)
+        await server.ensure_connected()
+        connection = server.connection
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        partner_id = connection.create(
+            "res.partner",
+            {"name": "Read Attachment", "image_1920": base64.b64encode(png).decode("ascii")},
+        )
+        attachment_id = connection.create(
+            "ir.attachment",
+            {
+                "name": "notes.txt",
+                "res_model": "res.partner",
+                "res_id": partner_id,
+                ("raw" if connection.get_major_version() >= 20 else "datas"): base64.b64encode(
+                    b"meeting notes"
+                ).decode("ascii"),
+                "mimetype": "text/plain",
+            },
+        )
+        try:
+            async with Client(server.app, mode="legacy") as client:
+                text = await client.call_tool("read_attachment", {"attachment_id": attachment_id})
+                image = await client.call_tool(
+                    "read_attachment", {"uri": f"odoo://res.partner/record/{partner_id}/image_1920"}
+                )
+
+            assert text.structured_content["kind"] == "text"
+            assert text.structured_content["text"] == "meeting notes"
+            assert image.structured_content["kind"] == "image"
+            assert image.content[1].type == "image"
+        finally:
+            # The in-process client ran the lifespan, which disconnected on exit
+            await server.ensure_connected()
+            connection.unlink("ir.attachment", [attachment_id])
+            connection.unlink("res.partner", [partner_id])
+            server._cleanup_connection()

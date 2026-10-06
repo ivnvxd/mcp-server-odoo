@@ -234,3 +234,196 @@ class TestListRecordAttachments:
         with pytest.raises(ValidationError, match="Record not found"):
             await handler._handle_list_record_attachments_tool("res.partner", 7)
         connection.search_read.assert_not_called()
+
+
+class TestReadAttachment:
+    """read_attachment: text, extracted text, image block, URL, or a download link."""
+
+    PNG = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    @staticmethod
+    def _serve(handler, connection, meta, content=None, mimetype=None, res_model="res.partner"):
+        """Attachment 9 with ``meta``; resources/read answers ``content``."""
+        from unittest.mock import AsyncMock
+
+        from mcp.server.lowlevel.helper_types import ReadResourceContents
+
+        def search_read(model, domain, fields=None, **kwargs):
+            if fields == ["res_model"]:
+                return [{"id": 9, "res_model": res_model}]
+            return [{"id": 9, **meta}] if meta is not None else []
+
+        connection.search_read.side_effect = search_read
+        handler.app.read_resource = AsyncMock(
+            return_value=[ReadResourceContents(content=content, mime_type=mimetype)]
+        )
+
+    async def test_text_file(self, handler, connection):
+        meta = {"name": "a.txt", "mimetype": "text/plain", "file_size": 5, "type": "binary"}
+        self._serve(handler, connection, meta, "hello", "text/plain")
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "text"
+        assert result.structured_content["text"] == "hello"
+        assert result.structured_content["download_url"].endswith("/web/content/9?download=true")
+        assert "hello" in result.content[0].text
+        handler.app.read_resource.assert_awaited_once_with("odoo://attachment/9")
+
+    async def test_long_text_is_cut(self, handler, connection):
+        from mcp_server_odoo.tools import READ_TEXT_MAX_CHARS
+
+        meta = {"name": "a.txt", "mimetype": "text/plain", "file_size": 1000, "type": "binary"}
+        self._serve(handler, connection, meta, "x" * (READ_TEXT_MAX_CHARS + 5), "text/plain")
+
+        result = await handler._handle_read_attachment_tool("odoo://attachment/9", None)
+
+        assert result.structured_content["truncated"] is True
+        assert len(result.structured_content["text"]) == READ_TEXT_MAX_CHARS
+
+    async def test_large_text_file_is_only_linked(self, handler, connection):
+        meta = {"name": "a.log", "mimetype": "text/plain", "file_size": 5_000_000, "type": "binary"}
+        self._serve(handler, connection, meta)
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "link"
+        handler.app.read_resource.assert_not_awaited()
+
+    async def test_pdf_returns_the_extracted_text(self, handler, connection):
+        meta = {
+            "name": "a.pdf",
+            "mimetype": "application/pdf",
+            "file_size": 90_000,
+            "type": "binary",
+            "index_content": "Invoice 42, total 100 EUR",
+        }
+        self._serve(handler, connection, meta)
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "extracted_text"
+        assert result.structured_content["text"] == "Invoice 42, total 100 EUR"
+        handler.app.read_resource.assert_not_awaited()
+
+    async def test_pdf_without_extracted_text_is_only_linked(self, handler, connection):
+        meta = {"name": "scan.pdf", "mimetype": "application/pdf", "file_size": 9, "type": "binary"}
+        self._serve(handler, connection, {**meta, "index_content": False})
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "link"
+        assert "no text" in result.structured_content["note"]
+
+    async def test_small_image_comes_back_as_an_image_block(self, handler, connection):
+        meta = {
+            "name": "a.png",
+            "mimetype": "image/png",
+            "file_size": len(self.PNG),
+            "type": "binary",
+        }
+        self._serve(handler, connection, meta, self.PNG, "image/png")
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "image"
+        image = result.content[1]
+        assert image.type == "image"
+        assert image.mime_type == "image/png"
+        assert base64.b64decode(image.data) == self.PNG
+
+    async def test_large_image_is_only_linked(self, handler, connection):
+        meta = {"name": "big.png", "mimetype": "image/png", "file_size": 900_000, "type": "binary"}
+        self._serve(handler, connection, meta)
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "link"
+        handler.app.read_resource.assert_not_awaited()
+
+    async def test_url_attachment(self, handler, connection):
+        meta = {
+            "name": "site",
+            "mimetype": False,
+            "file_size": 0,
+            "type": "url",
+            "url": "https://x.y",
+        }
+        self._serve(handler, connection, meta)
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "url"
+        assert result.structured_content["text"] == "https://x.y"
+
+    async def test_other_types_are_only_linked(self, handler, connection):
+        meta = {"name": "a.zip", "mimetype": "application/zip", "file_size": 10, "type": "binary"}
+        self._serve(handler, connection, meta)
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "link"
+        handler.app.read_resource.assert_not_awaited()
+
+    async def test_image_field_uri(self, handler, connection):
+        meta = {"name": "image_1920", "mimetype": "image/png", "file_size": len(self.PNG)}
+        self._serve(handler, connection, meta, self.PNG, "image/png")
+        uri = "odoo://res.partner/record/3/image_1920"
+
+        result = await handler._handle_read_attachment_tool(uri, None)
+
+        assert result.structured_content["kind"] == "image"
+        assert result.structured_content["download_url"].endswith(
+            "/web/content/res.partner/3/image_1920?download=true"
+        )
+        handler.app.read_resource.assert_awaited_once_with(uri)
+
+    async def test_field_uri_without_attachment_access_reads_the_content(
+        self, handler, connection, access
+    ):
+        def check(model, operation):
+            if model == "ir.attachment":
+                raise AccessControlError("not enabled")
+
+        access.validate_model_access.side_effect = check
+        self._serve(handler, connection, None, self.PNG, "image/png")
+
+        result = await handler._handle_read_attachment_tool(
+            "odoo://res.partner/record/3/image_128", None
+        )
+
+        assert result.structured_content["kind"] == "image"
+
+    async def test_attachment_on_an_inaccessible_model_is_refused(
+        self, handler, connection, access
+    ):
+        def check(model, operation):
+            if model == "hr.payslip":
+                raise AccessControlError("not enabled")
+
+        access.validate_model_access.side_effect = check
+        meta = {"name": "p.pdf", "mimetype": "application/pdf", "index_content": "salary"}
+        self._serve(handler, connection, meta, res_model="hr.payslip")
+
+        with pytest.raises(ValidationError, match="hr.payslip"):
+            await handler._handle_read_attachment_tool(None, 9)
+
+    @pytest.mark.parametrize(
+        "uri,attachment_id,message",
+        [
+            (None, None, "exactly one"),
+            ("odoo://attachment/9", 9, "exactly one"),
+            ("odoo://res.partner/record/3", None, "Pass an odoo://attachment"),
+        ],
+    )
+    async def test_refuses_bad_targets(self, handler, uri, attachment_id, message):
+        with pytest.raises(ValidationError, match=message):
+            await handler._handle_read_attachment_tool(uri, attachment_id)
+
+    async def test_missing_attachment(self, handler, connection):
+        self._serve(handler, connection, None)
+
+        with pytest.raises(ValidationError, match="Attachment not found"):
+            await handler._handle_read_attachment_tool(None, 9)

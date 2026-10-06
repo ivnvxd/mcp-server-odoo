@@ -100,6 +100,7 @@ class TestOdooToolHandler:
             "post_message",
             "upload_attachment",
             "list_record_attachments",
+            "read_attachment",
             "aggregate_records",
             "list_resource_templates",
         }

@@ -260,6 +260,33 @@ class BulkCreateResult(BaseModel):
     message: str = Field(description="Human-readable success message")
 
 
+# --- Read Attachment ---
+
+
+class ReadAttachmentResult(BaseModel):
+    """What read_attachment found in a file, and how it is returned."""
+
+    uri: str = Field(description="odoo:// URI of the file")
+    name: Optional[str] = Field(default=None, description="File name, when known")
+    mimetype: Optional[str] = Field(default=None, description="Mimetype, when known")
+    size: Optional[int] = Field(default=None, description="Size in bytes, when known")
+    kind: str = Field(
+        description=(
+            "'text' (file content), 'extracted_text' (text Odoo extracted from a PDF or "
+            "Office file), 'image' (an image block follows), 'url' (a link attachment), "
+            "or 'link' (only a download link)"
+        )
+    )
+    text: Optional[str] = Field(
+        default=None, description="The text, or the URL of a link attachment"
+    )
+    truncated: bool = Field(default=False, description="Whether the text was cut off")
+    download_url: str = Field(
+        description="Odoo download link for a person logged in to Odoo (not for the model)"
+    )
+    note: Optional[str] = Field(default=None, description="Why only a link was returned")
+
+
 # --- Upload Attachment ---
 
 
