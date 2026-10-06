@@ -278,6 +278,32 @@ class TestWriteTools:
         mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "write")
 
     @pytest.mark.asyncio
+    async def test_update_records_calls_validate_model_access_once(
+        self, tool_handler, mock_access_controller, mock_connection
+    ):
+        """Verify update_records calls validate_model_access with 'write' exactly
+        once per batch, not once per record."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+
+        with pytest.raises(ValidationError, match="Access denied"):
+            await tool_handler._handle_update_records_tool(
+                "res.partner", [1, 2, 3], {"name": "Test"}
+            )
+
+        mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "write")
+
+    @pytest.mark.asyncio
+    async def test_update_records_rejects_over_cap(self, tool_handler, mock_access_controller):
+        """More than MAX_BULK_UPDATE_RECORDS ids is rejected before access control runs."""
+        with pytest.raises(ValidationError, match="Too many records"):
+            await tool_handler._handle_update_records_tool(
+                "res.partner", list(range(1, 102)), {"name": "Test"}
+            )
+        mock_access_controller.validate_model_access.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_delete_record_calls_validate_model_access(
         self, tool_handler, mock_access_controller
     ):
@@ -326,6 +352,7 @@ class TestWriteTools:
         # Check that tool decorator was called for write operations
         assert "create_record" in decorated_functions
         assert "update_record" in decorated_functions
+        assert "update_records" in decorated_functions
         assert "delete_record" in decorated_functions
 
 

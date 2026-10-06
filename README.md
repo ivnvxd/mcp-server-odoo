@@ -621,6 +621,19 @@ Update an existing record.
 }
 ```
 
+### `update_records`
+Apply the same values to several records of one model in one call. The call accepts at most 100 distinct record IDs. If any ID does not exist, nothing is written. Archived records can be updated, for example to unarchive them with `"active": true`.
+
+```json
+{
+  "model": "res.partner",
+  "record_ids": [42, 43, 44],
+  "values": {
+    "category_id": [[4, 7]]
+  }
+}
+```
+
 ### `delete_record`
 Delete a record from Odoo.
 

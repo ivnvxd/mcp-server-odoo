@@ -258,6 +258,18 @@ class UpdateResult(BaseModel):
     message: str = Field(description="Human-readable success message")
 
 
+# --- Update Records (Bulk) ---
+
+
+class BulkUpdateResult(BaseModel):
+    """Result of updating multiple existing records in one call."""
+
+    success: bool = Field(description="Whether all records were updated successfully")
+    updated_count: int = Field(description="Number of records updated")
+    records: List[Dict[str, Any]] = Field(description="Essential fields of each updated record")
+    message: str = Field(description="Human-readable success message")
+
+
 # --- Delete Record ---
 
 

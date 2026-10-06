@@ -44,6 +44,7 @@ from .odoo_connection import (
 )
 from .schemas import (
     AggregateResult,
+    BulkUpdateResult,
     CallModelMethodResult,
     CompanyInfo,
     CreateResult,
@@ -237,6 +238,11 @@ def _withheld_fields_note(withheld: List[str]) -> str:
     surface); this wrapper only adds the tools-side 'fields' parameter hint.
     """
     return f"{withheld_note(withheld)} (use the 'fields' parameter)."
+
+
+MAX_BULK_UPDATE_RECORDS = 100
+"""Cap on record_ids per update_records call, to bound the blast radius of a
+single bulk write under YOLO mode (no per-model MCP-side write approval)."""
 
 
 def _validate_record_id(record_id: int, label: str = "record ID") -> None:
@@ -1142,6 +1148,41 @@ class OdooToolHandler:
             """
             result = await self._handle_update_record_tool(model, record_id, values, ctx)
             return UpdateResult(**result)
+
+        @self.app.tool(
+            title="Update Records (Bulk)",
+            annotations=ToolAnnotations(
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
+            ),
+        )
+        async def update_records(
+            model: str,
+            record_ids: List[int],
+            values: Dict[str, Any],
+            ctx: Optional[Context] = None,
+        ) -> BulkUpdateResult:
+            """Update multiple existing records with the same values in one call.
+
+            Use this instead of calling update_record in a loop when applying
+            the same field values to several records of the same model — one
+            RPC round-trip instead of N. Capped at 100 distinct records per
+            call; for larger batches, split into multiple update_records calls.
+            Archived records can be updated (e.g. values={"active": true}).
+
+            Args:
+                model: The Odoo model name (e.g., 'res.partner')
+                record_ids: The record IDs to update (max 100)
+                values: Field values to apply to every record
+
+            Returns:
+                Updated record details (id, display_name) for every record,
+                with confirmation.
+            """
+            result = await self._handle_update_records_tool(model, record_ids, values, ctx)
+            return BulkUpdateResult(**result)
 
         @self.app.tool(
             title="Delete Record",
@@ -2301,6 +2342,113 @@ class OdooToolHandler:
             logger.error(f"Error in update_record tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to update record: {sanitized_msg}") from e
+
+    async def _handle_update_records_tool(
+        self,
+        model: str,
+        record_ids: List[int],
+        values: Dict[str, Any],
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle bulk update_records tool request."""
+        try:
+            with perf_logger.track_operation("tool_update_records", model=model):
+                if not record_ids:
+                    raise ValidationError("No record IDs provided")
+                # A repeated id is one record: dedupe (order kept) before the
+                # cap, so the cap and the reported count are about records
+                record_ids = list(dict.fromkeys(record_ids))
+                if len(record_ids) > MAX_BULK_UPDATE_RECORDS:
+                    raise ValidationError(
+                        f"Too many records: {len(record_ids)} provided, maximum "
+                        f"{MAX_BULK_UPDATE_RECORDS} per call"
+                    )
+                for rid in record_ids:
+                    _validate_record_id(rid)
+
+                # One check for the whole batch — matches update_record's
+                # per-call (not per-record) access-control semantics.
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, model, "write"
+                )
+                await self._ctx_info(ctx, f"Updating {len(record_ids)} {model} record(s)...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                if not values:
+                    raise ValidationError("No values provided for record update")
+
+                _check_xmlrpc_int_bounds(values, "values")
+
+                if model == "ir.attachment":
+                    await self._gate_attachment_records(record_ids)
+                    if "res_model" in values:
+                        await self._gate_attachment_target(
+                            values["res_model"], "attachment would be moved to"
+                        )
+
+                # Check every record exists before writing — a partial batch
+                # write with no rollback signal would be worse than failing
+                # up front and naming what's missing. Uses search(), not
+                # read(model, ids, ["id"]): reading only the id field never
+                # touches the table, so Odoo echoes it back for ids that
+                # don't exist instead of raising or omitting them.
+                # active_test=False: an archived record exists (and unarchiving
+                # one is a common bulk update).
+                existing_ids = set(
+                    await asyncio.to_thread(
+                        self.connection.search,
+                        model,
+                        [["id", "in", record_ids]],
+                        context={"active_test": False},
+                    )
+                )
+                missing_ids = [rid for rid in record_ids if rid not in existing_ids]
+                if missing_ids:
+                    raise NotFoundError(f"Record(s) not found: {model} with ID(s) {missing_ids}")
+
+                success = await asyncio.to_thread(self.connection.write, model, record_ids, values)
+
+                essential_fields = ["id", "display_name"]
+                records = await asyncio.to_thread(
+                    self.connection.read, model, record_ids, essential_fields
+                )
+                if not records:
+                    raise ValidationError(
+                        f"Failed to read updated records: {model} with IDs {record_ids}"
+                    )
+
+                records = [
+                    await asyncio.to_thread(self._process_record_dates, rec, model)
+                    for rec in records
+                ]
+
+                return {
+                    "success": success,
+                    "updated_count": len(records),
+                    "records": records,
+                    "message": (f"Successfully updated {len(records)} {model} record(s)"),
+                }
+
+        except ValidationError:
+            raise
+        except NotFoundError as e:
+            raise ValidationError(str(e)) from e
+        except MCPPermissionError as e:
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except OdooValidationFault as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in update_records tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to update records: {sanitized_msg}") from e
 
     async def _handle_delete_record_tool(
         self,

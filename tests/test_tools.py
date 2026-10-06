@@ -94,6 +94,7 @@ class TestOdooToolHandler:
             "list_models",
             "create_record",
             "update_record",
+            "update_records",
             "delete_record",
             "post_message",
             "aggregate_records",
@@ -2938,6 +2939,172 @@ class TestUpdateRecordTool:
         update_record = mock_app._tools["update_record"]
         with pytest.raises(ValidationError, match="Not authenticated"):
             await update_record(model="res.partner", record_id=1, values={"name": "Test"})
+
+
+class TestUpdateRecordsTool:
+    """Test cases for the bulk update_records tool."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=MCPServer)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        return connection
+
+    @pytest.fixture
+    def mock_access_controller(self):
+        return MagicMock(spec=AccessController)
+
+    @pytest.fixture
+    def valid_config(self):
+        return OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            database="test_db",
+        )
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+
+    @pytest.mark.asyncio
+    async def test_update_records_success(self, handler, mock_connection, mock_app):
+        """Test successful bulk update with existence check and result read."""
+        mock_connection.search.return_value = [10, 11]  # existence check
+        mock_connection.read.return_value = [
+            {"id": 10, "display_name": "Partner 10"},
+            {"id": 11, "display_name": "Partner 11"},
+        ]  # post-update read
+        mock_connection.write.return_value = True
+
+        update_records = mock_app._tools["update_records"]
+        result = await update_records(
+            model="res.partner", record_ids=[10, 11], values={"active": False}
+        )
+
+        assert result.success is True
+        assert result.updated_count == 2
+        assert [r["id"] for r in result.records] == [10, 11]
+        mock_connection.write.assert_called_once_with("res.partner", [10, 11], {"active": False})
+        # One access check for the whole batch, not per record.
+        handler.access_controller.validate_model_access.assert_called_once_with(
+            "res.partner", "write"
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_records_finds_archived_records(self, handler, mock_connection, mock_app):
+        """Unarchiving is a common bulk update; archived ids must count as existing."""
+        mock_connection.search.return_value = [10, 11]
+        mock_connection.write.return_value = True
+        mock_connection.read.return_value = [
+            {"id": 10, "display_name": "A"},
+            {"id": 11, "display_name": "B"},
+        ]
+
+        update_records = mock_app._tools["update_records"]
+        await update_records(model="res.partner", record_ids=[10, 11], values={"active": True})
+
+        mock_connection.search.assert_called_once_with(
+            "res.partner", [["id", "in", [10, 11]]], context={"active_test": False}
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_records_dedupes_ids_before_the_cap(
+        self, handler, mock_connection, mock_app
+    ):
+        mock_connection.search.return_value = [10, 11]
+        mock_connection.write.return_value = True
+        mock_connection.read.return_value = [
+            {"id": 10, "display_name": "A"},
+            {"id": 11, "display_name": "B"},
+        ]
+
+        update_records = mock_app._tools["update_records"]
+        # 101 entries but only two records: within the cap
+        result = await update_records(
+            model="res.partner", record_ids=[10] * 100 + [11], values={"comment": "x"}
+        )
+
+        mock_connection.write.assert_called_once_with("res.partner", [10, 11], {"comment": "x"})
+        assert result.updated_count == 2
+
+    @pytest.mark.asyncio
+    async def test_update_records_empty_ids_rejected(self, handler, mock_app):
+        """An empty record_ids list is rejected before any RPC."""
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match="No record IDs provided"):
+            await update_records(model="res.partner", record_ids=[], values={"name": "Test"})
+
+    @pytest.mark.asyncio
+    async def test_update_records_over_cap_rejected(self, handler, mock_connection, mock_app):
+        """More than MAX_BULK_UPDATE_RECORDS ids is rejected before any RPC."""
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match="Too many records"):
+            await update_records(
+                model="res.partner",
+                record_ids=list(range(1, 102)),
+                values={"name": "Test"},
+            )
+        assert mock_connection.method_calls == []
+
+    @pytest.mark.asyncio
+    async def test_update_records_missing_id_rejected(self, handler, mock_connection, mock_app):
+        """A nonexistent id in the batch fails the whole call, naming it, with no write."""
+        mock_connection.search.return_value = [10]  # 11 missing
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match=r"not found.*\[11\]"):
+            await update_records(model="res.partner", record_ids=[10, 11], values={"name": "Test"})
+        mock_connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_records_oversized_id_rejected(self, handler, mock_connection, mock_app):
+        """An id beyond the XML-RPC 32-bit range fails cleanly before any RPC."""
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match=str(2**31)):
+            await update_records(
+                model="res.partner", record_ids=[1, 2**31], values={"name": "Test"}
+            )
+        assert mock_connection.method_calls == []
+
+    @pytest.mark.asyncio
+    async def test_update_records_empty_values(self, handler, mock_app):
+        """Test update_records rejects empty values."""
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match="No values provided"):
+            await update_records(model="res.partner", record_ids=[1], values={})
+
+    @pytest.mark.asyncio
+    async def test_update_records_access_denied(self, handler, mock_access_controller, mock_app):
+        """Test update_records checks 'write' permission once for the batch."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match="Access denied"):
+            await update_records(model="res.partner", record_ids=[1, 2], values={"name": "Test"})
+        mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "write")
+
+    @pytest.mark.asyncio
+    async def test_update_records_not_authenticated(self, handler, mock_connection, mock_app):
+        """Test update_records when not authenticated."""
+        mock_connection.is_authenticated = False
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match="Not authenticated"):
+            await update_records(model="res.partner", record_ids=[1], values={"name": "Test"})
 
 
 class TestDeleteRecordTool:
