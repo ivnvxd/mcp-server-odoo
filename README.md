@@ -798,6 +798,8 @@ When you omit the `fields` parameter (or set it to `null`), the server automatic
 
 The default limit is 15 fields per request. Responses include metadata showing which fields were returned and how many total fields are available. You can adjust the limit with `ODOO_MCP_MAX_SMART_FIELDS` or bypass it entirely with `fields: ["__all__"]`.
 
+If Odoo refuses a field to the connected user, for example an accounting total on a contact for a user without accounting rights, a smart-default or `["__all__"]` read leaves that field out. The response lists it in `skipped_fields` and in the note. A read with an explicit field list still fails with the access error.
+
 ## Resources
 
 The server also provides direct access to Odoo data through resource URIs:

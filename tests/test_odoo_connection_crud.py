@@ -601,6 +601,28 @@ class TestFaultCodeClassification:
 
         assert str(exc.value) == text
 
+    @pytest.mark.parametrize(
+        "fault",
+        [
+            xmlrpc.client.Fault(4, "You are not allowed to access 'Journal Item' records."),
+            xmlrpc.client.Fault(
+                500,
+                "Traceback (most recent call last):\n"
+                '  File "/opt/odoo/odoo/models.py", line 3720, in read\n'
+                "odoo.exceptions.AccessError: You are not allowed to read.",
+            ),
+        ],
+        ids=["code", "heuristic"],
+    )
+    def test_business_fault_keeps_its_code(self, fault):
+        """The read path tells an AccessError (4) apart by the code."""
+        from mcp_server_odoo.odoo_connection import _raise_for_fault
+
+        with pytest.raises(OdooValidationFault) as exc:
+            _raise_for_fault(fault)
+
+        assert exc.value.fault_code == fault.faultCode
+
     def test_access_denied_code_stays_connection_flavored(self):
         """faultCode 3 is a rejected login — auth setup, not a record rule."""
         from mcp_server_odoo.odoo_connection import _raise_for_fault

@@ -23,6 +23,10 @@ class SearchResult(BaseModel):
         default=None,
         description="Advisory note (e.g. credential-like fields withheld from an '__all__' read)",
     )
+    skipped_fields: Optional[List[str]] = Field(
+        default=None,
+        description="Fields left out of a default or '__all__' read because you cannot read them",
+    )
 
 
 # --- Get Record ---
@@ -68,6 +72,10 @@ class RecordResult(BaseModel):
             "Display-name previews for small x2many collections, keyed by field name. "
             "Absent for large or unreadable relations; ids in 'record' stay unchanged."
         ),
+    )
+    skipped_fields: Optional[List[str]] = Field(
+        default=None,
+        description="Fields left out of a default or '__all__' read because you cannot read them",
     )
 
 

@@ -136,9 +136,14 @@ class OdooValidationFault(OdooConnectionError):  # noqa: N818 — "Fault" mirror
     OdooConnectionError so every existing ``except OdooConnectionError``
     ladder keeps working unchanged; handlers list it first to surface the
     message without a connection-error prefix.
+
+    ``fault_code`` is the XML-RPC fault code, when there was one. The read
+    path uses it to tell an AccessError (``ACCESS_ERROR_FAULT_CODE``) apart.
     """
 
-    pass
+    def __init__(self, message: str, fault_code: Optional[int] = None):
+        super().__init__(message)
+        self.fault_code = fault_code
 
 
 # Odoo's ``/xmlrpc/2/*`` endpoint classifies exceptions for us in the fault
@@ -158,6 +163,7 @@ class OdooValidationFault(OdooConnectionError):  # noqa: N818 — "Fault" mirror
 # envelope carries no exception class, so business errors keep reading as
 # connection failures against them.
 _ODOO_BUSINESS_FAULT_CODES = frozenset({2, 4})
+ACCESS_ERROR_FAULT_CODE = 4
 
 # HTTP-style codes the MCP module's proxy uses for its own refusals, each with
 # a message meant for the user: 400 (a call for another database than the
@@ -180,12 +186,12 @@ def _raise_for_fault(fault: xmlrpc.client.Fault) -> NoReturn:
         # Transport says business: keep the message's prose and line
         # structure instead of running the traceback-shaped reduction.
         raise OdooValidationFault(
-            ErrorSanitizer.sanitize_business_fault(fault.faultString)
+            ErrorSanitizer.sanitize_business_fault(fault.faultString), fault.faultCode
         ) from fault
 
     sanitized_message = ErrorSanitizer.sanitize_xmlrpc_fault(fault.faultString)
     if ErrorSanitizer.is_business_fault(fault.faultString):
-        raise OdooValidationFault(sanitized_message) from fault
+        raise OdooValidationFault(sanitized_message, fault.faultCode) from fault
     raise OdooConnectionError(f"Operation failed: {sanitized_message}") from fault
 
 

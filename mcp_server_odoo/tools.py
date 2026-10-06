@@ -10,10 +10,11 @@ import base64
 import binascii
 import json
 import re
+import time
 import xmlrpc.client
 from ast import literal_eval as _parse_python_literal
 from datetime import datetime
-from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, Set, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, Union
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
@@ -38,6 +39,7 @@ from .field_security import is_sensitive_field_name, strip_sensitive_fields, wit
 from .formatters import MAX_RELATED_ITEMS
 from .logging_config import get_logger, perf_logger
 from .odoo_connection import (
+    ACCESS_ERROR_FAULT_CODE,
     XMLRPC_MAX_INT,
     OdooConnection,
     OdooConnectionError,
@@ -251,6 +253,11 @@ _STRUCTURE_FIELD_TYPES = ("one2many", "many2many", *BINARY_FIELD_TYPES, "html")
 _SCHEMA_SCORING_ATTRIBUTES = ("type", "required", "store", "related")
 
 
+def _skipped_fields_note(skipped: List[str]) -> str:
+    """Note naming the fields a bulk read left out because Odoo refused them."""
+    return f"Left out {len(skipped)} field(s) that you cannot read: {', '.join(skipped)}."
+
+
 def _withheld_fields_note(withheld: List[str]) -> str:
     """Note explaining that credential-like fields were withheld from a bulk read.
 
@@ -264,6 +271,10 @@ MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 3 // 4 - 64 * 1024
 """Largest decoded file upload_attachment accepts. The SDK refuses HTTP request
 bodies over 4 MiB (413) before any tool runs; base64 grows the payload by 4/3,
 and 64 KiB is left for the JSON-RPC envelope."""
+
+# How long the fields a bulk read had to leave out stay known: the lifetime of
+# the fields_get cache (PerformanceManager.cache_fields)
+UNREADABLE_FIELDS_TTL = 3600
 
 # read_attachment caps: what goes into the model's context, and the largest
 # text file fetched to fill it (beyond that only a link is returned)
@@ -410,6 +421,8 @@ class OdooToolHandler:
         self.connection = connection
         self.access_controller = access_controller
         self.config = config
+        # (model, requested field names) -> (time found, names Odoo refused)
+        self._unreadable_fields: Dict[Tuple[str, Tuple[str, ...]], Tuple[float, List[str]]] = {}
 
         # Register tools
         self._register_tools()
@@ -708,6 +721,70 @@ class OdooToolHandler:
             logger.warning(f"Could not determine default fields for {model}: {e}")
             # Return None to indicate we should get all fields
             return None
+
+    def _read_bulk(
+        self, model: str, ids: List[int], fields: Optional[List[str]]
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """read_without_binary_payloads for a bulk field selection (smart
+        defaults or every field), leaving out the fields Odoo refuses (blocking).
+
+        A computed field can read a model the user cannot access (the
+        accounting totals on a contact), and then the whole read fails with an
+        AccessError. The fields that fail are left out, and their names are
+        returned. They are cached per model and field list for
+        UNREADABLE_FIELDS_TTL; the server runs as one uid, so the key needs no
+        user. An explicit field list does not come here: it keeps the error.
+        """
+        key = (model, tuple(fields) if fields is not None else ())
+        found_at, skipped = self._unreadable_fields.get(key, (0.0, []))
+        if time.monotonic() - found_at > UNREADABLE_FIELDS_TTL:
+            skipped = []
+
+        def every_name() -> List[str]:
+            return fields if fields is not None else list(self.connection.fields_get(model))
+
+        try:
+            to_read = [name for name in every_name() if name not in skipped] if skipped else fields
+            return read_without_binary_payloads(self.connection, model, ids, to_read), skipped
+        except OdooValidationFault as e:
+            if e.fault_code != ACCESS_ERROR_FAULT_CODE or not ids:
+                raise
+            error = e
+
+        names = every_name()
+        # Binaries stay out of the probe: on Odoo 20 a read returns their content
+        binary_names = self._binary_field_names(model)
+        probe_names = [name for name in names if name not in binary_names]
+        skipped = self._find_unreadable_fields(model, ids[0], probe_names)
+        readable = [name for name in names if name not in skipped]
+        if not skipped or not readable:
+            # Not a field the user cannot read: the record itself, for example
+            raise error
+        self._unreadable_fields[key] = (time.monotonic(), skipped)
+        logger.info(f"Leaving out fields of {model} that the user cannot read: {skipped}")
+        return read_without_binary_payloads(self.connection, model, ids, readable), skipped
+
+    def _find_unreadable_fields(self, model: str, record_id: int, names: List[str]) -> List[str]:
+        """The names whose read of one record fails with an AccessError (blocking).
+
+        Halves the list on each failure, so k refused fields among n cost about
+        2·k·log2(n) reads instead of n. One record is enough: the failure comes
+        from model access, not from the record.
+        """
+        if not names:
+            return []
+        try:
+            self.connection.read(model, [record_id], names, {"bin_size": True})
+            return []
+        except OdooValidationFault as e:
+            if e.fault_code != ACCESS_ERROR_FAULT_CODE:
+                raise
+        if len(names) == 1:
+            return list(names)
+        middle = len(names) // 2
+        return self._find_unreadable_fields(
+            model, record_id, names[:middle]
+        ) + self._find_unreadable_fields(model, record_id, names[middle:])
 
     def _binary_field_names(self, model: str) -> Set[str]:
         """Names of binary/image fields on ``model``.
@@ -1768,14 +1845,22 @@ class OdooToolHandler:
                 # populated binaries are swapped for odoo:// URIs below.
                 records = []
                 withheld_fields: Set[str] = set()
+                skipped_fields: List[str] = []
+                explicit_fields = bool(parsed_fields) and parsed_fields != ["__all__"]
                 if record_ids:
-                    records = await asyncio.to_thread(
-                        read_without_binary_payloads,
-                        self.connection,
-                        model,
-                        record_ids,
-                        fields_to_fetch,
-                    )
+                    if explicit_fields:
+                        # An explicit field list keeps an AccessError
+                        records = await asyncio.to_thread(
+                            read_without_binary_payloads,
+                            self.connection,
+                            model,
+                            record_ids,
+                            fields_to_fetch,
+                        )
+                    else:
+                        records, skipped_fields = await asyncio.to_thread(
+                            self._read_bulk, model, record_ids, fields_to_fetch
+                        )
                     if fields_to_fetch is None:
                         # Bulk all-fields read (["__all__"] or smart-default
                         # fallback): strip credential-like fields; an explicit
@@ -1803,15 +1888,19 @@ class OdooToolHandler:
                     records = [_json_safe(record) for record in records]
                 await self._ctx_info(ctx, f"Returning {len(records)} records")
 
+                notes = []
+                if withheld_fields:
+                    notes.append(_withheld_fields_note(sorted(withheld_fields)))
+                if skipped_fields:
+                    notes.append(_skipped_fields_note(skipped_fields))
                 return {
                     "records": records,
                     "total": total_count,
                     "limit": limit,
                     "offset": offset,
                     "model": model,
-                    "note": (
-                        _withheld_fields_note(sorted(withheld_fields)) if withheld_fields else None
-                    ),
+                    "note": " ".join(notes) or None,
+                    "skipped_fields": skipped_fields or None,
                 }
 
         except ValidationError:
@@ -1887,13 +1976,20 @@ class OdooToolHandler:
 
                 # Read the record without binary payloads (see read_without_binary_payloads);
                 # populated binaries are swapped for odoo:// URIs below.
-                records = await asyncio.to_thread(
-                    read_without_binary_payloads,
-                    self.connection,
-                    model,
-                    [record_id],
-                    fields_to_fetch,
-                )
+                # An explicit field list keeps an AccessError.
+                skipped_fields: List[str] = []
+                if field_selection_method == "explicit":
+                    records = await asyncio.to_thread(
+                        read_without_binary_payloads,
+                        self.connection,
+                        model,
+                        [record_id],
+                        fields_to_fetch,
+                    )
+                else:
+                    records, skipped_fields = await asyncio.to_thread(
+                        self._read_bulk, model, [record_id], fields_to_fetch
+                    )
 
                 if not records:
                     raise ValidationError(f"Record not found: {model} with ID {record_id}")
@@ -1950,12 +2046,19 @@ class OdooToolHandler:
                         note=note,
                     )
 
-                # Surface withheld credential-like fields (bulk paths only).
-                # Local name deliberately differs from the module-level
-                # field_security.withheld_note import — shadowing it here
-                # would hide the helper for the rest of this function.
-                if withheld_fields:
-                    withheld_message = _withheld_fields_note(withheld_fields)
+                # Surface withheld credential-like fields and refused fields
+                # (bulk paths only). Local name deliberately differs from the
+                # module-level field_security.withheld_note import — shadowing
+                # it here would hide the helper for the rest of this function.
+                withheld_message = " ".join(
+                    note
+                    for note in (
+                        _withheld_fields_note(withheld_fields) if withheld_fields else "",
+                        _skipped_fields_note(skipped_fields) if skipped_fields else "",
+                    )
+                    if note
+                )
+                if withheld_message:
                     if metadata is not None:
                         metadata.note = (
                             f"{metadata.note} {withheld_message}"
@@ -1971,7 +2074,10 @@ class OdooToolHandler:
                         )
 
                 return RecordResult(
-                    record=record, metadata=metadata, related_summaries=related_summaries
+                    record=record,
+                    metadata=metadata,
+                    related_summaries=related_summaries,
+                    skipped_fields=skipped_fields or None,
                 )
 
         except ValidationError:
