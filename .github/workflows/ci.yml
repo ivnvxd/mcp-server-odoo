@@ -137,10 +137,12 @@ jobs:
 
     - name: Start Odoo and initialize database
       run: |
+        # --http-interface 0.0.0.0: Odoo 20 listens on 127.0.0.1 by default,
+        # which the published port cannot reach
         docker run -d --name odoo --network "${{ job.services.postgres.network }}" \
           -e HOST=postgres -e USER=odoo -e PASSWORD=odoo \
           -p 8069:8069 \
-          odoo:${{ matrix.odoo }} -- --database test --init base,mail --without-demo all
+          odoo:${{ matrix.odoo }} -- --http-interface 0.0.0.0 --database test --init base,mail --without-demo all
 
         # Wait for Odoo to finish initializing
         echo "Waiting for Odoo to initialize database..."
@@ -157,11 +159,16 @@ jobs:
             exit(1)
         " 2>/dev/null; then
             echo "Odoo is ready!"
-            break
+            exit 0
           fi
           echo "Waiting... ($i/60)"
           sleep 5
         done
+        # Fail here: tests/conftest.py skips every test when Odoo does not
+        # answer, so the leg would pass while testing nothing
+        echo "::error::Odoo did not answer within 5 minutes"
+        docker logs --tail 50 odoo
+        exit 1
 
     - name: Generate API key for admin user
       id: yolo-apikey
@@ -294,11 +301,12 @@ jobs:
 
     - name: Start Odoo with MCP module and initialize database
       run: |
+        # --http-interface 0.0.0.0: see the YOLO job
         docker run -d --name odoo-mcp --network "${{ job.services.postgres.network }}" \
           -e HOST=postgres -e USER=odoo -e PASSWORD=odoo \
           -v "${{ github.workspace }}/odoo-apps:/mnt/extra-addons" \
           -p 8069:8069 \
-          odoo-mcp-ci:${{ matrix.odoo }} -- --database test --init base,mcp_server --without-demo all
+          odoo-mcp-ci:${{ matrix.odoo }} -- --http-interface 0.0.0.0 --database test --init base,mcp_server --without-demo all
 
         # Wait for Odoo to finish initializing (includes MCP module install)
         echo "Waiting for Odoo to initialize database with MCP module..."
@@ -315,11 +323,14 @@ jobs:
             exit(1)
         " 2>/dev/null; then
             echo "Odoo is ready!"
-            break
+            exit 0
           fi
           echo "Waiting... ($i/90)"
           sleep 5
         done
+        echo "::error::Odoo did not answer within 7.5 minutes"
+        docker logs --tail 50 odoo-mcp
+        exit 1
 
     - name: Configure MCP module
       run: |
@@ -411,7 +422,7 @@ jobs:
           -e HOST=postgres -e USER=odoo -e PASSWORD=odoo \
           -v "${{ github.workspace }}/odoo-apps:/mnt/extra-addons" \
           -p 8069:8069 \
-          odoo-mcp-ci:${{ matrix.odoo }} -- --database test
+          odoo-mcp-ci:${{ matrix.odoo }} -- --http-interface 0.0.0.0 --database test
 
         # Without /mcp/health, tests/conftest.py skips every mcp-marked test
         # and the leg would pass while testing nothing.
