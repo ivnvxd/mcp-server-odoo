@@ -309,8 +309,9 @@ The server requires the following environment variables:
 | `ODOO_ALLOWED_COMPANIES` | No | Comma-separated company IDs to scope all operations to (multi-company setups) | `1`, `1,3` |
 | `ODOO_YOLO` | No | YOLO mode - bypasses MCP security (⚠️ DEV ONLY) | `off`, `read`, `true` |
 | `ODOO_MCP_ENABLE_METHOD_CALLS` | No | Enable the `call_model_method` tool — requires `ODOO_YOLO=true` (⚠️ Dangerous, see [`call_model_method`](#call_model_method)) | `false`, `true` |
+| `ODOO_RPC_TRANSPORT` | No | RPC protocol in YOLO mode: `auto` (XML-RPC), `xmlrpc`, or `json2` for Odoo's JSON-2 API (Odoo 19 and later, API key only) | `auto`, `json2` |
 
-*Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required. In YOLO mode, `ODOO_USER` is required even when using an API key.
+*Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required. In YOLO mode over XML-RPC, `ODOO_USER` is required even when using an API key. Over JSON-2 the API key alone is enough, because Odoo reads the user from the key.
 
 **Notes:**
 - If database listing is restricted on your server, you must specify `ODOO_DB`
@@ -801,6 +802,8 @@ Some calls are blocked for safety even in full YOLO mode:
 - **`web_*` methods** — the web-client data-access family
 
 List results are truncated to 100 items.
+
+Over JSON-2 (`ODOO_RPC_TRANSPORT=json2`), Odoo takes named arguments only. `arguments` can then hold only the record IDs, as its first item. Pass every other argument in `keyword_arguments`, by its parameter name, for example `{"partner_ids": [3]}`.
 
 > [!WARNING]
 > This tool can still invoke destructive workflow methods (e.g. `button_draft`, `action_cancel`, `toggle_active`, custom methods). Enable only in trusted environments where you accept the blast radius. Odoo's record rules and ACLs still apply for the authenticated user.

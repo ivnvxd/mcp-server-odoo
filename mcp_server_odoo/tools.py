@@ -2047,7 +2047,9 @@ class OdooToolHandler:
                     arguments: Positional argument list for ``execute_kw``, as a
                         list or JSON-string. For recordset methods, the first
                         element is typically the list of ids: ``[[42]]`` runs on
-                        id 42. Defaults to ``[]``.
+                        id 42. Defaults to ``[]``. Over JSON-2 it can hold only
+                        that id list; pass every other argument in
+                        keyword_arguments, by parameter name.
                     keyword_arguments: Optional dict (or JSON-object string) of
                         keyword arguments for ``execute_kw`` (e.g. ``{"context": {...}}``).
 

@@ -552,26 +552,137 @@ class TestJson2Connection:
 
 
 class TestJson2Arguments:
-    @pytest.mark.parametrize(
-        "args,kwargs,body",
-        [
-            ([], {"domain": []}, {"domain": []}),
-            ([[1, 2]], {}, {"ids": [1, 2]}),
-            ([5], {"context": {"lang": "fr_FR"}}, {"ids": [5], "context": {"lang": "fr_FR"}}),
-        ],
-    )
-    def test_ids_and_keyword_arguments(self, args, kwargs, body):
-        assert json2_arguments(args, kwargs) == body
+    """Positional XML-RPC arguments get their JSON-2 parameter names."""
 
     @pytest.mark.parametrize(
-        "args",
+        "method,args,kwargs,body",
         [
-            [[["name", "=", "x"]]],
-            [[1], ["name"]],
-            [True],
-            [[]],  # an empty domain as much as an empty id list
+            ("search", [[["id", "=", 3]]], {"limit": 1}, {"domain": [["id", "=", 3]], "limit": 1}),
+            ("search", [[]], {}, {"domain": []}),
+            (
+                "search_read",
+                [[["active", "=", True]], ["name"]],
+                {},
+                {"domain": [["active", "=", True]], "fields": ["name"]},
+            ),
+            (
+                "search_count",
+                [[]],
+                {"context": {"active_test": False}},
+                {"domain": [], "context": {"active_test": False}},
+            ),
+            (
+                "fields_get",
+                [["name"]],
+                {"attributes": ["type"]},
+                {"allfields": ["name"], "attributes": ["type"]},
+            ),
+            ("fields_get", [], {}, {}),
+            ("create", [{"name": "A"}], {}, {"vals_list": {"name": "A"}}),
+            (
+                "create",
+                [[{"name": "A"}, {"name": "B"}]],
+                {},
+                {"vals_list": [{"name": "A"}, {"name": "B"}]},
+            ),
+            ("read", [[3], ["name", "active"]], {}, {"ids": [3], "fields": ["name", "active"]}),
+            ("read", [[3]], {"fields": ["name"]}, {"ids": [3], "fields": ["name"]}),
+            ("write", [[3, 4], {"name": "B"}], {}, {"ids": [3, 4], "vals": {"name": "B"}}),
+            ("unlink", [[3]], {}, {"ids": [3]}),
+            ("unlink", [[]], {}, {"ids": []}),
+            (
+                "web_save_multi",
+                [[3], [{"name": "B"}], {"display_name": {}}],
+                {},
+                {"ids": [3], "vals_list": [{"name": "B"}], "specification": {"display_name": {}}},
+            ),
+            ("message_post", [7], {"body": "Hi"}, {"ids": [7], "body": "Hi"}),
+            (
+                "formatted_read_group",
+                [[]],
+                {"groupby": ["is_company"], "aggregates": ["__count"]},
+                {"domain": [], "groupby": ["is_company"], "aggregates": ["__count"]},
+            ),
+            ("context_get", [], {}, {}),
+            # call_model_method: any other method, a leading id list only
+            ("action_archive", [[5, 6]], {}, {"ids": [5, 6]}),
+            (
+                "action_confirm",
+                [5],
+                {"context": {"lang": "de_DE"}},
+                {"ids": [5], "context": {"lang": "de_DE"}},
+            ),
+            ("get_import_templates", [], {}, {}),
         ],
     )
-    def test_other_positional_arguments_are_refused(self, args):
-        with pytest.raises(OdooConnectionError, match="named arguments only"):
-            json2_arguments(args, {})
+    def test_table(self, method, args, kwargs, body):
+        assert json2_arguments("res.partner", method, args, kwargs) == body
+
+    @pytest.mark.parametrize(
+        "method,args,message",
+        [
+            ("action_confirm", [[5], "x"], "pass the arguments of res.partner.action_confirm"),
+            ("action_confirm", [True], "keyword_arguments"),
+            ("action_confirm", [[]], "keyword_arguments"),
+            ("name_create", ["Acme"], "keyword_arguments"),
+            ("read", [["name"]], "needs the record ids first"),
+            ("write", [], "needs the record ids first"),
+            ("read", [[True]], "needs the record ids first"),
+            ("search", [[], 0, 10, "name", "extra"], "takes at most 4 arguments"),
+        ],
+    )
+    def test_refusals(self, method, args, message):
+        with pytest.raises(OdooValidationFault, match=message):
+            json2_arguments("res.partner", method, args, {})
+
+    def test_a_name_given_twice(self):
+        with pytest.raises(OdooValidationFault, match="domain is given twice"):
+            json2_arguments("res.partner", "search", [[]], {"domain": []})
+
+
+def connected_json2(server, **config):
+    server.script = [{"json": VERSION_20}, {"json": {"uid": 2}}] + server.script
+    connection = json2_connection(server, database="odoo", **config)
+    connection.connect()
+    connection.authenticate()
+    return connection
+
+
+class TestJson2ResultsAndFallbacks:
+    def test_create_with_one_dict_returns_the_id(self, server):
+        server.script = [{"json": [41]}, {"json": [42, 43]}]
+        connection = connected_json2(server)
+
+        assert connection.create("res.partner", {"name": "A"}) == 41
+        assert connection.create_many("res.partner", [{"name": "B"}, {"name": "C"}]) == [42, 43]
+
+    def test_an_invalid_language_is_dropped_and_retried(self, server):
+        invalid = odoo_error("odoo.exceptions.UserError", "Invalid language code: xx_XX")
+        server.script = [{"status": 422, "json": invalid}, {"json": [3]}]
+        connection = connected_json2(server, locale="xx_XX")
+
+        assert connection.search("res.partner", [["id", "=", 3]]) == [3]
+        assert server.requests[2][2]["context"] == {"lang": "xx_XX"}
+        assert "lang" not in server.requests[3][2].get("context", {})
+        assert connection.config.locale is None
+
+    def test_another_user_error_is_not_retried(self, server):
+        server.script = [
+            {"status": 422, "json": odoo_error("odoo.exceptions.UserError", "Nope")},
+        ]
+        connection = connected_json2(server, locale="de_DE")
+
+        with pytest.raises(OdooValidationFault, match="Nope"):
+            connection.search("res.partner", [])
+        assert connection.config.locale == "de_DE"
+
+    def test_the_company_check_reads_over_json2(self, server):
+        """check_allowed_companies passes the fields of read positionally."""
+        server.script = [{"json": [{"id": 2, "company_ids": [1, 3]}]}]
+        connection = connected_json2(server, allowed_companies=[3])
+
+        connection.check_allowed_companies()
+
+        path, _, body = server.requests[2]
+        assert path == "/json/2/res.users/read"
+        assert body == {"ids": [2], "fields": ["company_ids"]}

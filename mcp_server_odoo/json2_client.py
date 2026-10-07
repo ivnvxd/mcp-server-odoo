@@ -25,6 +25,7 @@ from .odoo_connection import (
     _UNAVAILABLE_HTTP_STATUSES,
     OdooConnectionError,
     OdooUnreachableError,
+    OdooValidationFault,
     _raise_for_fault,
 )
 
@@ -238,25 +239,74 @@ def _error_body(data: bytes) -> Optional[Tuple[str, str]]:
     return str(body.get("name") or ""), body["message"]
 
 
-def json2_arguments(args: List[Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+# Positional parameters of the methods the package sends through execute_kw,
+# by name, from the Odoo 19 and 20 signatures. The flag marks a record method:
+# its first positional argument is the record ids. A model method takes none,
+# and JSON-2 refuses ids for it. read_group is left out on purpose: its
+# signature changed in Odoo 20, and the package calls it only before Odoo 19.
+_SIGNATURES: Dict[str, Tuple[bool, Tuple[str, ...]]] = {
+    "search": (False, ("domain", "offset", "limit", "order")),
+    "search_read": (False, ("domain", "fields", "offset", "limit", "order")),
+    "search_count": (False, ("domain", "limit")),
+    "fields_get": (False, ("allfields", "attributes")),
+    "create": (False, ("vals_list",)),
+    "default_get": (False, ("fields",)),
+    "name_search": (False, ("name", "domain", "operator", "limit")),
+    "formatted_read_group": (
+        False,
+        ("domain", "groupby", "aggregates", "having", "offset", "limit", "order"),
+    ),
+    "context_get": (False, ()),
+    "read": (True, ("fields", "load")),
+    "write": (True, ("vals",)),
+    "unlink": (True, ()),
+    "web_save_multi": (True, ("vals_list", "specification")),
+    "message_post": (True, ()),
+}
+
+
+def json2_arguments(
+    model: str, method: str, args: List[Any], kwargs: Dict[str, Any]
+) -> Dict[str, Any]:
     """The JSON-2 body for an ``execute_kw(model, method, args, kwargs)`` call.
 
-    JSON-2 takes named arguments only. A leading id or list of ids becomes
-    ``ids``; the keyword arguments pass through, ``context`` included.
+    JSON-2 takes named arguments only. For a method in ``_SIGNATURES`` the
+    positional arguments get their parameter names. For any other method
+    (``call_model_method``) only a leading id or list of ids can be named,
+    as ``ids``; the keyword arguments pass through, ``context`` included.
 
     Raises:
-        OdooConnectionError: any other positional argument
+        OdooValidationFault: an argument that cannot be named
     """
     body = dict(kwargs)
     rest = list(args)
-    if rest and _is_ids(rest[0]):
-        first = rest.pop(0)
-        body["ids"] = [first] if isinstance(first, int) else list(first)
-    if rest:
-        raise OdooConnectionError(
-            "JSON-2 takes named arguments only; this call has positional arguments"
-        )
+    signature = _SIGNATURES.get(method)
+    if signature is None:
+        if rest and _is_ids(rest[0]):
+            body["ids"] = _as_ids(rest.pop(0))
+        if rest:
+            raise OdooValidationFault(
+                f"JSON-2 takes named arguments only: pass the arguments of {model}.{method} "
+                "after the record ids in keyword_arguments, by parameter name"
+            )
+        return body
+
+    takes_ids, names = signature
+    if takes_ids:
+        if not rest or not (_is_ids(rest[0]) or rest[0] in ([], ())):
+            raise OdooValidationFault(f"{model}.{method} needs the record ids first")
+        body["ids"] = _as_ids(rest.pop(0))
+    if len(rest) > len(names):
+        raise OdooValidationFault(f"{model}.{method} takes at most {len(names)} arguments")
+    for name, value in zip(names[: len(rest)], rest, strict=True):
+        if name in body:
+            raise OdooValidationFault(f"{model}.{method}: {name} is given twice")
+        body[name] = value
     return body
+
+
+def _as_ids(value: Any) -> List[int]:
+    return [value] if isinstance(value, int) else list(value)
 
 
 def _is_ids(value: Any) -> bool:

@@ -44,6 +44,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                        true — full read/write via vanilla XML-RPC
   ODOO_LOCALE        Locale for formatting (e.g. en_US, de_DE)
   ODOO_ALLOWED_COMPANIES  Company IDs to scope every call to (e.g. 1,3)
+  ODOO_RPC_TRANSPORT RPC protocol in YOLO mode: auto, xmlrpc or json2 (default: auto)
 
 Optional environment variables:
   ODOO_MCP_LOG_LEVEL       Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)

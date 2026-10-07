@@ -1266,26 +1266,8 @@ class OdooConnection:
             return result
 
         except xmlrpc.client.Fault as e:
-            # Handle an invalid lang — drop it and retry. Only blame (and
-            # permanently disable) the CONFIGURED locale when it is actually
-            # the offending value: a caller-supplied context lang used to null
-            # self.config.locale on the shared config, silently turning
-            # ODOO_MCP_LOCALE off for every later request in the process.
-            context = kwargs.get("context") or {}
-            bad_lang = context.get("lang")
-            if "Invalid language code" in e.faultString and bad_lang:
-                if bad_lang == self.config.locale:
-                    logger.warning(
-                        f"Locale '{bad_lang}' is not installed in Odoo. "
-                        "Falling back to default language."
-                    )
-                    self.config.locale = None
-                else:
-                    logger.warning(
-                        f"Language '{bad_lang}' requested for this call is not installed "
-                        "in Odoo; retrying without it (server locale unchanged)."
-                    )
-                context.pop("lang", None)
+            # Handle an invalid lang — drop it and retry
+            if "Invalid language code" in e.faultString and self._drop_invalid_lang(kwargs):
                 return self.execute_kw(model, method, args, kwargs)
 
             # Odoo's XML-RPC marshaller (allow_none=False) faults on void
@@ -1308,10 +1290,39 @@ class OdooConnection:
             sanitized_message = ErrorSanitizer.sanitize_message(str(e))
             raise OdooConnectionError(f"Operation failed: {sanitized_message}") from e
 
+    def _drop_invalid_lang(self, kwargs: Dict[str, Any]) -> bool:
+        """Remove the context lang after Odoo refused it; True when there was one.
+
+        Only blame (and permanently disable) the CONFIGURED locale when it is
+        actually the offending value: a caller-supplied context lang used to
+        null self.config.locale on the shared config, silently turning
+        ODOO_MCP_LOCALE off for every later request in the process.
+        """
+        context = kwargs.get("context") or {}
+        bad_lang = context.get("lang")
+        if not bad_lang:
+            return False
+        if bad_lang == self.config.locale:
+            logger.warning(
+                f"Locale '{bad_lang}' is not installed in Odoo. Falling back to default language."
+            )
+            self.config.locale = None
+        else:
+            logger.warning(
+                f"Language '{bad_lang}' requested for this call is not installed "
+                "in Odoo; retrying without it (server locale unchanged)."
+            )
+        context.pop("lang", None)
+        return True
+
     def _execute_json2(
         self, model: str, method: str, args: List[Any], kwargs: Dict[str, Any]
     ) -> Any:
-        """``execute_kw`` over JSON-2: the same call with named arguments."""
+        """``execute_kw`` over JSON-2: the same call with named arguments.
+
+        The result has XML-RPC's shape: JSON-2 returns a created record as a
+        one-item id list, and XML-RPC returns the id when one dict was given.
+        """
         from .json2_client import json2_arguments
 
         assert self._json2 is not None
@@ -1320,11 +1331,24 @@ class OdooConnection:
                 f"Executing {method} on {model} over JSON-2 with "
                 f"args={_describe_args(args)}, kwargs={_redact_values(kwargs)}"
             )
-        body = json2_arguments(args, kwargs)
-        with self._performance_manager.monitor.track_operation(f"json2_{model}_{method}"):
-            return self._json2.call(
-                model, method, body, retry_safe=method in _TIMEOUT_RETRY_SAFE_METHODS
-            )
+        body = json2_arguments(model, method, args, kwargs)
+        try:
+            with self._performance_manager.monitor.track_operation(f"json2_{model}_{method}"):
+                result = self._json2.call(
+                    model, method, body, retry_safe=method in _TIMEOUT_RETRY_SAFE_METHODS
+                )
+        except OdooValidationFault as e:
+            # A UserError "Invalid language code: xx_XX"
+            if (
+                e.fault_code == 2
+                and str(e).startswith("Invalid language code")
+                and self._drop_invalid_lang(kwargs)
+            ):
+                return self.execute_kw(model, method, args, kwargs)
+            raise
+        if method == "create" and args and isinstance(args[0], dict) and isinstance(result, list):
+            return result[0] if result else result
+        return result
 
     def search(self, model: str, domain: List[Union[str, List[Any]]], **kwargs) -> List[int]:
         """Search for records matching a domain.
