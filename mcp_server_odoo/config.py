@@ -35,6 +35,10 @@ class OdooConfig:
     max_smart_fields: int = 15
     locale: Optional[str] = None
 
+    # Company scoping: comma-separated company IDs injected as
+    # allowed_company_ids into every RPC context (record rules + defaults).
+    allowed_companies: Optional[list[int]] = None
+
     # MCP transport configuration
     transport: Literal["stdio", "streamable-http"] = "stdio"
     host: str = "localhost"
@@ -242,6 +246,18 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         except ValueError:
             raise ValueError(f"{key} must be a valid number") from None
 
+    def get_company_ids_env(key: str) -> Optional[list[int]]:
+        value = os.getenv(key)
+        if value is None or not value.strip():
+            return None
+        try:
+            ids = [int(c) for c in value.split(",") if c.strip()]
+        except ValueError:
+            raise ValueError(f"{key} must be a comma-separated list of integer IDs") from None
+        # A value of only separators/whitespace (e.g. ",") parses to an empty
+        # list; treat it as unset so scoping is never half-configured.
+        return ids or None
+
     def get_bool_env(key: str, default: bool = False) -> bool:
         raw = os.getenv(key)
         if raw is None:
@@ -284,6 +300,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         port=get_int_env("ODOO_MCP_PORT", 8000),
         session_idle_timeout=get_optional_float_env("ODOO_MCP_SESSION_IDLE_TIMEOUT"),
         locale=os.getenv("ODOO_LOCALE", "").strip() or None,
+        allowed_companies=get_company_ids_env("ODOO_ALLOWED_COMPANIES"),
         yolo_mode=get_yolo_mode(),
         enable_method_calls=get_bool_env("ODOO_MCP_ENABLE_METHOD_CALLS", False),
         allowed_hosts=parse_allowed_hosts(),

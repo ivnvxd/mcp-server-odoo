@@ -2363,7 +2363,9 @@ class OdooToolHandler:
         with perf_logger.track_operation("tool_get_current_context"):
             await self._ctx_info(ctx, "Reading current session context...")
             try:
-                data = await asyncio.to_thread(get_user_context_data, self.connection)
+                data = await asyncio.to_thread(
+                    get_user_context_data, self.connection, self.config.allowed_companies
+                )
             except Exception as e:
                 logger.warning(f"Could not read user context, returning UTC guidance only: {e}")
                 return CurrentContextResult(text=context_unavailable_text(str(e)))
