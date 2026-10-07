@@ -195,6 +195,11 @@ def _raise_for_fault(fault: xmlrpc.client.Fault) -> NoReturn:
     raise OdooConnectionError(f"Operation failed: {sanitized_message}") from fault
 
 
+def _context_kwargs(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """execute_kw kwargs carrying ``context``, copied: execute_kw adds keys to it."""
+    return {"context": dict(context)} if context else {}
+
+
 class OdooConnection:
     """Manages XML-RPC connections to Odoo with dynamic endpoint selection.
 
@@ -1359,12 +1364,15 @@ class OdooConnection:
         kwargs = {"context": dict(context)} if context else {}
         return self.execute_kw(model, "search_count", [domain], kwargs)
 
-    def create(self, model: str, values: Dict[str, Any]) -> int:
+    def create(
+        self, model: str, values: Dict[str, Any], context: Optional[Dict[str, Any]] = None
+    ) -> int:
         """Create a new record.
 
         Args:
             model: The Odoo model name
             values: Dictionary of field values for the new record
+            context: Optional Odoo context for this call
 
         Returns:
             ID of the created record
@@ -1374,14 +1382,19 @@ class OdooConnection:
         """
         try:
             with self._performance_manager.monitor.track_operation(f"create_{model}"):
-                record_id = self.execute_kw(model, "create", [values], {})
+                record_id = self.execute_kw(model, "create", [values], _context_kwargs(context))
                 logger.info(f"Created {model} record with ID {record_id}")
                 return record_id
         except Exception as e:
             logger.error(f"Failed to create {model} record: {e}")
             raise
 
-    def create_many(self, model: str, vals_list: List[Dict[str, Any]]) -> List[int]:
+    def create_many(
+        self,
+        model: str,
+        vals_list: List[Dict[str, Any]],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> List[int]:
         """Create several records in one ``create(vals_list)`` call.
 
         One RPC is one transaction: either every record is created or none.
@@ -1391,7 +1404,7 @@ class OdooConnection:
         """
         try:
             with self._performance_manager.monitor.track_operation(f"create_{model}"):
-                record_ids = self.execute_kw(model, "create", [vals_list], {})
+                record_ids = self.execute_kw(model, "create", [vals_list], _context_kwargs(context))
                 logger.info(f"Created {len(record_ids)} {model} record(s)")
                 return record_ids
         except Exception as e:
@@ -1399,7 +1412,11 @@ class OdooConnection:
             raise
 
     def web_save_multi(
-        self, model: str, ids: List[int], vals_list: List[Dict[str, Any]]
+        self,
+        model: str,
+        ids: List[int],
+        vals_list: List[Dict[str, Any]],
+        context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Write different values to each record in one call (Odoo 19 and later).
 
@@ -1412,7 +1429,10 @@ class OdooConnection:
         try:
             with self._performance_manager.monitor.track_operation(f"web_save_multi_{model}"):
                 rows = self.execute_kw(
-                    model, "web_save_multi", [ids, vals_list, {"display_name": {}}], {}
+                    model,
+                    "web_save_multi",
+                    [ids, vals_list, {"display_name": {}}],
+                    _context_kwargs(context),
                 )
                 logger.info(f"Updated {len(ids)} {model} record(s) with per-record values")
                 return rows
@@ -1420,13 +1440,20 @@ class OdooConnection:
             logger.error(f"Failed to update {model} records: {e}")
             raise
 
-    def write(self, model: str, ids: List[int], values: Dict[str, Any]) -> bool:
+    def write(
+        self,
+        model: str,
+        ids: List[int],
+        values: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Update existing records.
 
         Args:
             model: The Odoo model name
             ids: List of record IDs to update
             values: Dictionary of field values to update
+            context: Optional Odoo context for this call
 
         Returns:
             True if update was successful
@@ -1436,7 +1463,7 @@ class OdooConnection:
         """
         try:
             with self._performance_manager.monitor.track_operation(f"write_{model}"):
-                result = self.execute_kw(model, "write", [ids, values], {})
+                result = self.execute_kw(model, "write", [ids, values], _context_kwargs(context))
                 logger.info(f"Updated {len(ids)} {model} record(s)")
                 return result
         except Exception as e:

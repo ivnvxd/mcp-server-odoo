@@ -29,7 +29,11 @@ def uses_odoo_20_binaries(connection: Any) -> bool:
 
 
 def read_without_binary_payloads(
-    connection: Any, model: str, ids: List[int], fields: Optional[List[str]]
+    connection: Any,
+    model: str,
+    ids: List[int],
+    fields: Optional[List[str]],
+    context: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """``read(ids, fields)`` with binaries as URIs or ``False``, never payloads (blocking).
 
@@ -37,14 +41,18 @@ def read_without_binary_payloads(
     per stored binary field finds the populated records. Odoo 20 cannot
     search a non-stored binary (``avatar_128``), so it always gets its URI and
     the resource read decides whether it holds content.
+
+    ``context`` is the caller's context. ``bin_size`` and the search's
+    ``active_test=False`` win over it: they keep the read correct.
     """
+    read_context = {**(context or {}), "bin_size": True}
     if not uses_odoo_20_binaries(connection):
-        return connection.read(model, ids, fields, {"bin_size": True})
+        return connection.read(model, ids, fields, read_context)
     try:
         fields_info = connection.fields_get(model)
     except Exception as e:
         logger.warning(f"Could not get field metadata for {model}; reading binaries as-is: {e}")
-        return connection.read(model, ids, fields, {"bin_size": True})
+        return connection.read(model, ids, fields, read_context)
 
     binary_names = {
         name for name, meta in fields_info.items() if (meta or {}).get("type") in BINARY_FIELD_TYPES
@@ -52,11 +60,11 @@ def read_without_binary_payloads(
     if fields is not None:
         binary_names &= set(fields)
     if not binary_names:
-        return connection.read(model, ids, fields, {"bin_size": True})
+        return connection.read(model, ids, fields, read_context)
 
     requested = fields if fields is not None else list(fields_info)
     readable = [name for name in requested if name not in binary_names] or ["id"]
-    records = connection.read(model, ids, readable, {"bin_size": True})
+    records = connection.read(model, ids, readable, read_context)
 
     for name in binary_names:
         # Absent metadata means stored, per fields_get's own default
@@ -66,7 +74,7 @@ def read_without_binary_payloads(
                 connection.search(
                     model,
                     [["id", "in", ids], [name, "!=", False]],
-                    context={"active_test": False},
+                    context={**(context or {}), "active_test": False},
                 )
             )
         else:

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Per-call `context`**: the read and write tools take a `context` with `allowed_company_ids`, `lang`, `tz` and `active_test`, so company-dependent fields such as `standard_price` can be read and written per company. Other keys are refused by name (#129, @lucianosanchez-ui).
 - **`ODOO_ALLOWED_COMPANIES`**: limits every call to the listed companies of a multi-company database. The first one is the active company. At startup the server makes sure that each ID is one of the user's companies (#107, @jflaflamme).
 - **Usage guidance in the instructions**: the `initialize` instructions tell the model which tool to use for discovery, reads, counts, bulk writes and files, and to read many records in one `search_records` call. Only registered tools are named.
 - **`read_attachment` tool**: returns a file's text, the text Odoo extracted from a PDF or Office file, an image block for images up to 256 KB, or a download link. It takes an `odoo://` URI or an attachment ID.

@@ -836,6 +836,28 @@ The default limit is 15 fields per request. Responses include metadata showing w
 
 If Odoo refuses a field to the connected user, for example an accounting total on a contact for a user without accounting rights, a smart-default or `["__all__"]` read leaves that field out. The response lists it in `skipped_fields` and in the note. A read with an explicit field list still fails with the access error.
 
+### Per-call context
+
+`search_records`, `get_record`, `aggregate_records`, `create_record`, `create_records`, `update_record` and `update_records` take an optional `context` object. It accepts four keys:
+
+| Key | Effect |
+|---|---|
+| `allowed_company_ids` | The companies of the call. The first one is the active company, so company-dependent fields such as `standard_price` read and write its value. |
+| `lang` | The language of labels and translated values. |
+| `tz` | The timezone of the call. |
+| `active_test` | `false` includes archived records in searches. |
+
+The tool refuses any other key and names it. Each company must be one of the user's companies, and one of `ODOO_ALLOWED_COMPANIES` when that is set. The context applies to the search, the count, the read, the existence check and the read-back after a write.
+
+```json
+{
+  "model": "product.product",
+  "record_id": 42,
+  "values": {"standard_price": 12.5},
+  "context": {"allowed_company_ids": [5]}
+}
+```
+
 ## Resources
 
 The server also provides direct access to Odoo data through resource URIs:
