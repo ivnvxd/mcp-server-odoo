@@ -52,6 +52,11 @@ _FAULT_WARNING = 2
 _FAULT_APPLICATION = 1
 
 
+class Json2RouteError(OdooConnectionError):
+    """An answer without a JSON-2 error body: a redirect, or a page from a proxy
+    or for an unknown database. ``ODOO_RPC_TRANSPORT=auto`` then uses XML-RPC."""
+
+
 class Json2Client:
     """One persistent HTTP(S) connection to ``/json/2``, used under a lock."""
 
@@ -198,13 +203,13 @@ class Json2Client:
         if status in _UNAVAILABLE_HTTP_STATUSES:
             raise OdooUnreachableError(f"Odoo did not answer (HTTP {status})")
         if 300 <= status < 400:
-            raise OdooConnectionError(
+            raise Json2RouteError(
                 f"Odoo redirected the request (HTTP {status}) to {headers.get('Location')}. "
                 "Set ODOO_URL to the address it redirects to."
             )
         error = _error_body(data)
         if error is None:
-            raise OdooConnectionError(f"Operation failed: HTTP {status} without a JSON error")
+            raise Json2RouteError(f"Operation failed: HTTP {status} without a JSON error")
         name, message = error
         short_name = name.rsplit(".", 1)[-1]
         if status == 401:

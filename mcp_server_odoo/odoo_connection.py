@@ -278,6 +278,8 @@ class OdooConnection:
         self._server_version: Optional[str] = None
         # Set by connect() when the calls go over JSON-2 instead of XML-RPC
         self._json2: Optional["Json2Client"] = None
+        # ODOO_RPC_TRANSPORT=auto found no JSON-2 and uses XML-RPC from then on
+        self._json2_unavailable = False
 
         mode_info = f" (YOLO mode: {config.yolo_mode})" if config.is_yolo_enabled else ""
         logger.info(f"Initialized OdooConnection for {self._url_components['host']}{mode_info}")
@@ -352,8 +354,15 @@ class OdooConnection:
             return
 
         if self._wants_json2():
-            self._connect_json2()
-            return
+            try:
+                self._connect_json2()
+                return
+            except OdooUnreachableError:
+                raise
+            except OdooConnectionError as e:
+                if self.config.rpc_transport == "json2":
+                    raise
+                self._fall_back_to_xmlrpc(str(e))
 
         try:
             # 1. Create DB proxy first (server-wide /xmlrpc/db — works without DB context)
@@ -419,8 +428,34 @@ class OdooConnection:
         logger.info(f"Set X-Odoo-Database header to '{db_name}'")
 
     def _wants_json2(self) -> bool:
-        """Whether this connection goes over JSON-2 (``ODOO_RPC_TRANSPORT=json2``)."""
-        return self.config.rpc_transport == "json2"
+        """Whether to try JSON-2: forced, or ``auto`` in YOLO mode with an API key.
+
+        Standard mode stays on XML-RPC: it goes through the MCP module's
+        ``/mcp/xmlrpc`` endpoints. ``auto`` falls back to XML-RPC when the
+        server has no JSON-2 (see ``_fall_back_to_xmlrpc``).
+        """
+        if self.config.rpc_transport == "json2":
+            return True
+        return (
+            self.config.rpc_transport == "auto"
+            and self.config.is_yolo_enabled
+            and bool(self.config.api_key)
+            and not self._json2_unavailable
+        )
+
+    def _fall_back_to_xmlrpc(self, reason: str) -> None:
+        """``ODOO_RPC_TRANSPORT=auto`` without JSON-2: use XML-RPC from now on.
+
+        Raises:
+            OdooConnectionError: XML-RPC needs ODOO_USER with the API key
+        """
+        self._json2_unavailable = True
+        logger.info(f"JSON-2 is not available ({reason}); using XML-RPC")
+        if not self.config.uses_credentials and not self.config.username:
+            raise OdooConnectionError(
+                f"ODOO_RPC_TRANSPORT=auto fell back to XML-RPC ({reason}), and XML-RPC needs "
+                "ODOO_USER with the API key. Set ODOO_USER, or connect to Odoo 19 or later."
+            )
 
     def _connect_json2(self) -> None:
         """Connect over JSON-2: no XML-RPC request, the version from ``/web/version``.
@@ -434,6 +469,11 @@ class OdooConnection:
         self._json2 = Json2Client(self.config.url, self.config.api_key or "", None, self.timeout)
         try:
             self._test_connection()
+            major = self.get_major_version()
+            if major is not None and major < 19:
+                raise OdooConnectionError(
+                    f"JSON-2 needs Odoo 19 or later; this server runs {self._server_version}"
+                )
         except Exception:
             self._json2.close()
             self._json2 = None
@@ -1018,8 +1058,22 @@ class OdooConnection:
             db_name = self.auto_select_database()
 
         if self._json2 is not None:
-            self._authenticate_json2(db_name)
-            return
+            # Imported here: json2_client imports this module
+            from .json2_client import Json2RouteError
+
+            try:
+                self._authenticate_json2(db_name)
+                return
+            except Json2RouteError as e:
+                # A proxy can pass /web/version and still block /json/2
+                if self.config.rpc_transport == "json2":
+                    raise
+                self._json2.close()
+                self._json2 = None
+                self._connected = False
+                self._fall_back_to_xmlrpc(str(e))
+            self.connect()
+            return self.authenticate(database)
 
         if self.config.is_yolo_enabled:
             mode_desc = "read-only" if self.config.yolo_mode == "read" else "full access"

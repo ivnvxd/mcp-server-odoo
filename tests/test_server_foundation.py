@@ -30,6 +30,7 @@ class _FakeConnection:
         self.is_authenticated = False
         self.database = "test_db"
         self.auth_method = "api_key"
+        self.rpc_transport = "xmlrpc"
         self.uid = 2
         self.connect_calls = 0
         self.authenticate_calls = 0

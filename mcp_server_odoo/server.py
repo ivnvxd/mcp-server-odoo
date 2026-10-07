@@ -260,7 +260,8 @@ class OdooMCPServer:
                 raise
         self.access_controller.database = self.connection.database
         self.access_controller.auth_method = self.connection.auth_method
-        logger.info(f"Successfully connected to Odoo at {self.config.url}")
+        transport = "JSON-2" if self.connection.rpc_transport == "json2" else "XML-RPC"
+        logger.info(f"Successfully connected to Odoo at {self.config.url} over {transport}")
 
     def _cleanup_connection(self):
         """Close the Odoo connection; the objects stay for a later reconnect."""
@@ -472,6 +473,7 @@ class OdooMCPServer:
             "version": SERVER_VERSION,
             "connection": {
                 "connected": is_connected,
+                "rpc_transport": self.connection.rpc_transport if is_connected else None,
             },
         }
 

@@ -309,7 +309,7 @@ The server requires the following environment variables:
 | `ODOO_ALLOWED_COMPANIES` | No | Comma-separated company IDs to scope all operations to (multi-company setups) | `1`, `1,3` |
 | `ODOO_YOLO` | No | YOLO mode - bypasses MCP security (⚠️ DEV ONLY) | `off`, `read`, `true` |
 | `ODOO_MCP_ENABLE_METHOD_CALLS` | No | Enable the `call_model_method` tool — requires `ODOO_YOLO=true` (⚠️ Dangerous, see [`call_model_method`](#call_model_method)) | `false`, `true` |
-| `ODOO_RPC_TRANSPORT` | No | RPC protocol in YOLO mode: `auto` (XML-RPC), `xmlrpc`, or `json2` for Odoo's JSON-2 API (Odoo 19 and later, API key only) | `auto`, `json2` |
+| `ODOO_RPC_TRANSPORT` | No | RPC protocol in YOLO mode: `auto` (JSON-2 on Odoo 19 and later with an API key, else XML-RPC), `xmlrpc`, or `json2` for Odoo's JSON-2 API (Odoo 19 and later, API key only) | `auto`, `json2` |
 
 *Either `ODOO_API_KEY` or both `ODOO_USER` and `ODOO_PASSWORD` are required. In YOLO mode over XML-RPC, `ODOO_USER` is required even when using an API key. Over JSON-2 the API key alone is enough, because Odoo reads the user from the key.
 

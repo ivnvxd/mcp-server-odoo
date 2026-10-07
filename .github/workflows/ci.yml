@@ -92,14 +92,24 @@ jobs:
         path: coverage-unit.xml
 
   yolo-integration-test:
-    name: YOLO Integration Tests (Odoo ${{ matrix.odoo }})
+    # ODOO_RPC_TRANSPORT=auto takes JSON-2 on Odoo 19 and later; those
+    # versions also run once over XML-RPC. Each leg fails unless the
+    # transport in use is the one in its name (tests/test_transport_e2e.py).
+    name: YOLO Integration Tests (Odoo ${{ matrix.odoo }}, ${{ matrix.label }})
     runs-on: ubuntu-latest
     needs: [lint, test]
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
     strategy:
       fail-fast: false
       matrix:
-        odoo: ['16', '17', '18', '19', '20']
+        include:
+          - {odoo: '16', rpc: auto, expect: xmlrpc, label: XML-RPC}
+          - {odoo: '17', rpc: auto, expect: xmlrpc, label: XML-RPC}
+          - {odoo: '18', rpc: auto, expect: xmlrpc, label: XML-RPC}
+          - {odoo: '19', rpc: auto, expect: json2, label: JSON-2}
+          - {odoo: '19', rpc: xmlrpc, expect: xmlrpc, label: XML-RPC}
+          - {odoo: '20', rpc: auto, expect: json2, label: JSON-2}
+          - {odoo: '20', rpc: xmlrpc, expect: xmlrpc, label: XML-RPC}
 
     services:
       postgres:
@@ -201,7 +211,7 @@ jobs:
 
     - name: Run YOLO integration tests
       run: |
-        pytest -m "yolo" -v --cov=mcp_server_odoo --cov-report=xml:coverage-yolo-${{ matrix.odoo }}.xml --cov-report=term
+        pytest -m "yolo" -v --cov=mcp_server_odoo --cov-report=xml:coverage-yolo-${{ matrix.odoo }}-${{ matrix.rpc }}.xml --cov-report=term
       env:
         ODOO_URL: http://localhost:8069
         ODOO_DB: test
@@ -210,13 +220,15 @@ jobs:
         ODOO_YOLO: "true"
         ODOO_MCP_ENABLE_METHOD_CALLS: "true"
         ODOO_API_KEY: ${{ steps.yolo-apikey.outputs.key }}
+        ODOO_RPC_TRANSPORT: ${{ matrix.rpc }}
+        ODOO_EXPECT_RPC_TRANSPORT: ${{ matrix.expect }}
 
     - name: Upload coverage artifact
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: coverage-yolo-${{ matrix.odoo }}
-        path: coverage-yolo-${{ matrix.odoo }}.xml
+        name: coverage-yolo-${{ matrix.odoo }}-${{ matrix.rpc }}
+        path: coverage-yolo-${{ matrix.odoo }}-${{ matrix.rpc }}.xml
 
   mcp-integration-test:
     # Each leg runs the module branch of its Odoo version

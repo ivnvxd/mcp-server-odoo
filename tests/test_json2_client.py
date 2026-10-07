@@ -686,3 +686,143 @@ class TestJson2ResultsAndFallbacks:
         path, _, body = server.requests[2]
         assert path == "/json/2/res.users/read"
         assert body == {"ids": [2], "fields": ["company_ids"]}
+
+
+def xmlrpc_proxies(monkeypatch, connection, version="18.0"):
+    """Stand-in XML-RPC proxies, so a fallback can finish without a real Odoo."""
+    from unittest.mock import MagicMock
+
+    proxy = MagicMock()
+    proxy.version.return_value = {"server_version": version}
+    proxy.authenticate.return_value = 2
+    monkeypatch.setattr(
+        connection._performance_manager, "get_optimized_connection", lambda endpoint: proxy
+    )
+    return proxy
+
+
+def auto_connection(server, **config):
+    return json2_connection(server, **{"rpc_transport": "auto", **config})
+
+
+class TestAutoSelection:
+    def test_odoo_19_and_later_with_a_key_take_json2(self, server):
+        server.script = [{"json": VERSION_20}, {"json": {"uid": 2}}]
+        connection = auto_connection(server, database="odoo")
+
+        connection.connect()
+        connection.authenticate()
+
+        assert connection.rpc_transport == "json2"
+
+    def test_no_web_version_falls_back_to_xmlrpc(self, server, monkeypatch, caplog):
+        caplog.set_level("INFO", logger="mcp_server_odoo.odoo_connection")
+        server.script = [HTML_404]
+        connection = auto_connection(server, database="odoo", username="admin")
+        proxy = xmlrpc_proxies(monkeypatch, connection)
+
+        connection.connect()
+        connection.authenticate()
+
+        assert connection.rpc_transport == "xmlrpc"
+        assert connection.server_version == "18.0"
+        assert proxy.authenticate.called
+        assert "JSON-2 is not available" in caplog.text
+
+    def test_an_old_version_string_falls_back_to_xmlrpc(self, server, monkeypatch):
+        """A server that answers /web/version but runs Odoo 18."""
+        server.script = [{"json": {"version_info": [18, 0], "version": "saas~18.4"}}]
+        connection = auto_connection(server, database="odoo", username="admin")
+        xmlrpc_proxies(monkeypatch, connection)
+
+        connection.connect()
+
+        assert connection.rpc_transport == "xmlrpc"
+
+    def test_the_fallback_needs_odoo_user(self, server):
+        server.script = [HTML_404]
+        connection = auto_connection(server, database="odoo")
+
+        with pytest.raises(OdooConnectionError, match="needs ODOO_USER with the API key"):
+            connection.connect()
+        assert not connection.is_connected
+
+    def test_a_blocked_json2_route_falls_back_to_xmlrpc(self, server, monkeypatch):
+        """/web/version answers, but a proxy answers /json/2 with an HTML page."""
+        server.script = [{"json": VERSION_20}, HTML_404]
+        connection = auto_connection(server, database="odoo", username="admin")
+        xmlrpc_proxies(monkeypatch, connection, version="20.0")
+
+        connection.connect()
+        connection.authenticate()
+
+        assert connection.rpc_transport == "xmlrpc"
+        assert connection.is_authenticated
+
+    def test_a_refused_key_does_not_fall_back(self, server):
+        server.script = [
+            {"json": VERSION_20},
+            {
+                "status": 401,
+                "json": odoo_error("werkzeug.exceptions.Unauthorized", "Invalid apikey", 401),
+            },
+        ]
+        connection = auto_connection(server, database="odoo", username="admin")
+        connection.connect()
+
+        with pytest.raises(OdooConnectionError, match="refused the API key"):
+            connection.authenticate()
+
+    def test_forced_json2_never_falls_back(self, server):
+        server.script = [{"json": VERSION_20}, HTML_404]
+        connection = json2_connection(server, database="odoo", username="admin")
+        connection.connect()
+
+        with pytest.raises(OdooConnectionError, match="HTTP 404"):
+            connection.authenticate()
+
+    def test_odoo_down_is_unreachable_not_a_fallback(self, server, monkeypatch):
+        server.script = [{"status": 503, "raw": b"down", "content_type": "text/plain"}]
+        connection = auto_connection(server, database="odoo", username="admin")
+        proxy = xmlrpc_proxies(monkeypatch, connection)
+
+        with pytest.raises(OdooUnreachableError):
+            connection.connect()
+        assert not proxy.version.called
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {"yolo_mode": "off"},  # standard mode: the MCP module's XML-RPC
+            {"api_key": None, "username": "admin", "password": "admin"},  # no key
+            {"rpc_transport": "xmlrpc", "username": "admin"},
+        ],
+        ids=["standard-mode", "password-only", "forced-xmlrpc"],
+    )
+    def test_xmlrpc_without_trying_json2(self, server, monkeypatch, config):
+        connection = auto_connection(server, database="odoo", **config)
+        xmlrpc_proxies(monkeypatch, connection)
+        monkeypatch.setattr(connection, "_resolve_and_set_database", lambda: None)
+
+        connection.connect()
+
+        assert connection.rpc_transport == "xmlrpc"
+        assert server.requests == []
+
+
+class TestHealth:
+    def test_health_names_the_transport(self, server):
+        from unittest.mock import patch
+
+        from mcp_server_odoo.server import OdooMCPServer
+
+        server.script = [{"json": VERSION_20}, {"json": {"uid": 2}}]
+        config = OdooConfig(url=server.url, api_key="key-123", yolo_mode="read", database="odoo")
+        with patch("mcp_server_odoo.server.build_user_context", return_value="ctx"):
+            mcp_server = OdooMCPServer(config)
+            mcp_server._connect()
+
+        assert mcp_server.get_health_status()["connection"] == {
+            "connected": True,
+            "rpc_transport": "json2",
+        }

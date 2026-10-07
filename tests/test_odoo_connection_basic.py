@@ -36,6 +36,8 @@ def test_config():
         default_limit=10,
         max_limit=100,
         yolo_mode=os.getenv("ODOO_YOLO", "off"),
+        # These tests check the XML-RPC proxies; "auto" takes JSON-2 on Odoo 19+
+        rpc_transport="xmlrpc",
     )
 
 
