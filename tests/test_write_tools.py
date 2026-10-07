@@ -777,8 +777,11 @@ class TestCallModelMethodIntegration:
 
     @pytest.mark.yolo
     @pytest.mark.asyncio
-    async def test_toggle_active_round_trip(self, real_tool_handler):
-        """Happy path: toggle_active flips res.partner.active; idempotent under double toggle."""
+    async def test_archive_round_trip(self, real_tool_handler):
+        """Happy path: action_archive and action_unarchive flip res.partner.active.
+
+        Not toggle_active: Odoo 20 removed it. Both methods exist on 16 to 20.
+        """
         handler = real_tool_handler
 
         create_result = await handler._handle_create_record_tool(
@@ -787,17 +790,17 @@ class TestCallModelMethodIntegration:
         partner_id = create_result["record"]["id"]
 
         try:
-            # First toggle: True -> False (do not assert toggle_active's return
-            # value; it varies across Odoo versions).
+            # Archive: True -> False (do not assert the return value; it varies
+            # across Odoo versions).
             await handler._handle_call_model_method_tool(
-                "res.partner", "toggle_active", [[partner_id]], None
+                "res.partner", "action_archive", [[partner_id]], None
             )
             row = handler.connection.read("res.partner", [partner_id], ["active"])
             assert row[0]["active"] is False, "expected partner deactivated"
 
-            # Second toggle: False -> True
+            # Unarchive: False -> True
             await handler._handle_call_model_method_tool(
-                "res.partner", "toggle_active", [[partner_id]], None
+                "res.partner", "action_unarchive", [[partner_id]], None
             )
             row = handler.connection.read("res.partner", [partner_id], ["active"])
             assert row[0]["active"] is True, "expected partner reactivated"
@@ -820,7 +823,7 @@ class TestCallModelMethodIntegration:
 
         try:
             await handler._handle_call_model_method_tool(
-                "res.partner", "toggle_active", f"[[{partner_id}]]", None
+                "res.partner", "action_archive", f"[[{partner_id}]]", None
             )
             row = handler.connection.read("res.partner", [partner_id], ["active"])
             assert row[0]["active"] is False
@@ -832,8 +835,8 @@ class TestCallModelMethodIntegration:
 
     @pytest.mark.yolo
     @pytest.mark.asyncio
-    async def test_kwargs_path_via_toggle_active_with_context(self, real_tool_handler):
-        """``keyword_arguments`` reach execute_kw — a context kwarg rides along toggle_active.
+    async def test_kwargs_path_via_action_archive_with_context(self, real_tool_handler):
+        """``keyword_arguments`` reach execute_kw — a context kwarg rides along action_archive.
 
         (``read`` used to be the vehicle here, but ORM data-access primitives
         are now denylisted; any method accepts a ``context`` kwarg via execute_kw.)
@@ -848,7 +851,7 @@ class TestCallModelMethodIntegration:
         try:
             result = await handler._handle_call_model_method_tool(
                 "res.partner",
-                "toggle_active",
+                "action_archive",
                 [[partner_id]],
                 {"context": {"lang": "en_US"}},
             )
