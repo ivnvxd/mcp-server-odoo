@@ -17,7 +17,7 @@ import socket
 import ssl
 import threading
 import xmlrpc.client
-from typing import Any, Dict, NoReturn, Optional, Tuple
+from typing import Any, Dict, List, NoReturn, Optional, Tuple
 from urllib.parse import quote, urlparse
 
 from .error_sanitizer import ErrorSanitizer
@@ -90,7 +90,7 @@ class Json2Client:
         }
         if self.database:
             headers["X-Odoo-Database"] = self.database
-        status, response_headers, data = self._send(path, payload, headers, retry_safe)
+        status, response_headers, data = self._send("POST", path, payload, headers, retry_safe)
         if status == 200:
             try:
                 return json.loads(data)
@@ -100,21 +100,52 @@ class Json2Client:
                 ) from e
         self._raise_for_status(status, response_headers, data)
 
+    def version(self) -> Dict[str, Any]:
+        """``GET /web/version``: the server version, without a login (blocking).
+
+        Odoo 19 and later answer ``{"version_info": [...], "version": "20.0"}``.
+        Odoo 18 and older have no such route, and JSON-2 neither.
+
+        Raises:
+            OdooUnreachableError: Odoo did not answer
+            OdooConnectionError: no version route, so no JSON-2
+        """
+        status, headers, data = self._send(
+            "GET", f"{self._base_path}/web/version", None, {"Accept": "application/json"}, True
+        )
+        if status == 200:
+            try:
+                info = json.loads(data)
+            except ValueError:
+                info = None
+            if isinstance(info, dict) and isinstance(info.get("version"), str):
+                return info
+        if status in _UNAVAILABLE_HTTP_STATUSES:
+            raise OdooUnreachableError(f"Odoo did not answer (HTTP {status})")
+        raise OdooConnectionError(
+            f"Odoo has no /web/version route (HTTP {status}): JSON-2 needs Odoo 19 or later"
+        )
+
     def close(self) -> None:
         """Close the connection; the next call opens a new one."""
         with self._lock:
             self._close()
 
     def _send(
-        self, path: str, payload: bytes, headers: Dict[str, str], retry_safe: bool
+        self,
+        verb: str,
+        path: str,
+        payload: Optional[bytes],
+        headers: Dict[str, str],
+        retry_safe: bool,
     ) -> Tuple[int, http.client.HTTPMessage, bytes]:
-        """POST under the lock, with one retry on a stale keepalive connection."""
+        """One request under the lock, with one retry on a stale keepalive connection."""
         with self._lock:
             for attempt in (0, 1):
                 reused = self._connection is not None and self._connection.sock is not None
                 connection = self._open()
                 try:
-                    connection.request("POST", path, body=payload, headers=headers)
+                    connection.request(verb, path, body=payload, headers=headers)
                     response = connection.getresponse()
                     data = response.read()
                     if response.will_close:
@@ -205,3 +236,35 @@ def _error_body(data: bytes) -> Optional[Tuple[str, str]]:
     if not isinstance(body, dict) or not isinstance(body.get("message"), str):
         return None
     return str(body.get("name") or ""), body["message"]
+
+
+def json2_arguments(args: List[Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """The JSON-2 body for an ``execute_kw(model, method, args, kwargs)`` call.
+
+    JSON-2 takes named arguments only. A leading id or list of ids becomes
+    ``ids``; the keyword arguments pass through, ``context`` included.
+
+    Raises:
+        OdooConnectionError: any other positional argument
+    """
+    body = dict(kwargs)
+    rest = list(args)
+    if rest and _is_ids(rest[0]):
+        first = rest.pop(0)
+        body["ids"] = [first] if isinstance(first, int) else list(first)
+    if rest:
+        raise OdooConnectionError(
+            "JSON-2 takes named arguments only; this call has positional arguments"
+        )
+    return body
+
+
+def _is_ids(value: Any) -> bool:
+    """An id or a list of ids (booleans excluded: True is not record 1)."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    return isinstance(value, (list, tuple)) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in value
+    )

@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 import xmlrpc.client
 from contextlib import contextmanager, suppress
-from typing import Any, Dict, List, NoReturn, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, NoReturn, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 from .access_control import _http_error_message
@@ -21,6 +21,9 @@ from .config import OdooConfig
 from .error_sanitizer import ErrorSanitizer
 from .field_security import is_sensitive_field_name
 from .performance import PerformanceManager
+
+if TYPE_CHECKING:
+    from .json2_client import Json2Client
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +276,8 @@ class OdooConnection:
         self._authenticated = False
         self._auth_method: Optional[str] = None  # 'api_key' or 'password'
         self._server_version: Optional[str] = None
+        # Set by connect() when the calls go over JSON-2 instead of XML-RPC
+        self._json2: Optional["Json2Client"] = None
 
         mode_info = f" (YOLO mode: {config.yolo_mode})" if config.is_yolo_enabled else ""
         logger.info(f"Initialized OdooConnection for {self._url_components['host']}{mode_info}")
@@ -346,6 +351,10 @@ class OdooConnection:
             logger.warning("Already connected to Odoo")
             return
 
+        if self._wants_json2():
+            self._connect_json2()
+            return
+
         try:
             # 1. Create DB proxy first (server-wide /xmlrpc/db — works without DB context)
             self._db_proxy = self._performance_manager.get_optimized_connection(self.DB_ENDPOINT)
@@ -409,12 +418,46 @@ class OdooConnection:
         self._db_proxy = self._performance_manager.get_optimized_connection(self.DB_ENDPOINT)
         logger.info(f"Set X-Odoo-Database header to '{db_name}'")
 
+    def _wants_json2(self) -> bool:
+        """Whether this connection goes over JSON-2 (``ODOO_RPC_TRANSPORT=json2``)."""
+        return self.config.rpc_transport == "json2"
+
+    def _connect_json2(self) -> None:
+        """Connect over JSON-2: no XML-RPC request, the version from ``/web/version``.
+
+        The database is chosen in ``authenticate()``, which sets it on the
+        client's ``X-Odoo-Database`` header.
+        """
+        # Imported here: json2_client imports this module
+        from .json2_client import Json2Client
+
+        self._json2 = Json2Client(self.config.url, self.config.api_key or "", None, self.timeout)
+        try:
+            self._test_connection()
+        except Exception:
+            self._json2.close()
+            self._json2 = None
+            raise
+        self._connected = True
+        logger.info(f"Connected to Odoo {self._server_version} over JSON-2")
+
+    @property
+    def rpc_transport(self) -> str:
+        """The RPC protocol in use: ``json2`` or ``xmlrpc``."""
+        return "json2" if self._json2 is not None else "xmlrpc"
+
     def _test_connection(self) -> None:
         """Test connection by calling server_version.
+
+        On JSON-2 the version comes from ``GET /web/version``, without XML-RPC.
 
         Raises:
             OdooConnectionError: If test fails
         """
+        if self._json2 is not None:
+            self._server_version = self._json2.version()["version"]
+            logger.debug(f"Server version: {self._server_version}")
+            return
         try:
             # Try to get server version via common endpoint
             with self._common_proxy_lock:
@@ -438,6 +481,10 @@ class OdooConnection:
                     # Ignore logging errors during cleanup
                     pass
             return
+
+        if self._json2 is not None:
+            self._json2.close()
+            self._json2 = None
 
         # Close each proxy's transport — otherwise cached keepalive
         # sockets linger until GC (matters for connect/disconnect cycles)
@@ -583,6 +630,14 @@ class OdooConnection:
             logger.debug(f"Database names: {databases}")
             return databases
         except Exception as e:
+            if self._json2 is not None:
+                # No XML-RPC on the JSON-2 path, so no /xmlrpc/db fallback
+                logger.error(f"Failed to list databases: {e}")
+                if _is_unreachable(e):
+                    raise OdooUnreachableError(
+                        f"Cannot reach Odoo at {self._url_components['base_url']}: {e}"
+                    ) from e
+                raise OdooConnectionError(DATABASE_LISTING_FAILED) from e
             # Route blocked by a proxy, listing disabled (list_db = False), or
             # an unexpected body: /xmlrpc/db still answers on Odoo 19 and older.
             logger.debug(f"/web/database/list failed ({e}); falling back to /xmlrpc/db")
@@ -962,6 +1017,10 @@ class OdooConnection:
         else:
             db_name = self.auto_select_database()
 
+        if self._json2 is not None:
+            self._authenticate_json2(db_name)
+            return
+
         if self.config.is_yolo_enabled:
             mode_desc = "read-only" if self.config.yolo_mode == "read" else "full access"
             logger.info(f"Authenticating in YOLO {mode_desc} mode for database '{db_name}'")
@@ -1052,6 +1111,27 @@ class OdooConnection:
                 f"ODOO_ALLOWED_COMPANIES names companies the user cannot access: {foreign}. "
                 f"The user's companies are {sorted(user_companies)}."
             )
+
+    def _authenticate_json2(self, database: str) -> None:
+        """Read the API key's user from ``res.users/context_get`` over JSON-2.
+
+        Raises:
+            OdooConnectionError: Odoo refused the key, or named no user for it
+        """
+        assert self._json2 is not None
+        self._json2.database = database
+        logger.info(f"Authenticating with the API key over JSON-2 for database '{database}'")
+        user_context = self._json2.call("res.users", "context_get", {}, retry_safe=True)
+        uid = user_context.get("uid") if isinstance(user_context, dict) else None
+        if not isinstance(uid, int) or isinstance(uid, bool) or uid < 1:
+            raise OdooConnectionError(
+                "Authentication failed: Odoo named no user for the API key (res.users/context_get)"
+            )
+        self._uid = uid
+        self._database = database
+        self._auth_method = "api_key"
+        self._authenticated = True
+        logger.info(f"Successfully authenticated over JSON-2 as user ID {uid}")
 
     @property
     def is_authenticated(self) -> bool:
@@ -1159,6 +1239,9 @@ class OdooConnection:
             else:
                 kwargs["context"]["allowed_company_ids"] = limit
 
+        if self._json2 is not None:
+            return self._execute_json2(model, method, args, kwargs)
+
         try:
             # Log the operation (values redacted — write payloads can carry
             # passwords/PII that must not land in log files)
@@ -1224,6 +1307,24 @@ class OdooConnection:
             # Sanitize generic errors as well
             sanitized_message = ErrorSanitizer.sanitize_message(str(e))
             raise OdooConnectionError(f"Operation failed: {sanitized_message}") from e
+
+    def _execute_json2(
+        self, model: str, method: str, args: List[Any], kwargs: Dict[str, Any]
+    ) -> Any:
+        """``execute_kw`` over JSON-2: the same call with named arguments."""
+        from .json2_client import json2_arguments
+
+        assert self._json2 is not None
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"Executing {method} on {model} over JSON-2 with "
+                f"args={_describe_args(args)}, kwargs={_redact_values(kwargs)}"
+            )
+        body = json2_arguments(args, kwargs)
+        with self._performance_manager.monitor.track_operation(f"json2_{model}_{method}"):
+            return self._json2.call(
+                model, method, body, retry_safe=method in _TIMEOUT_RETRY_SAFE_METHODS
+            )
 
     def search(self, model: str, domain: List[Union[str, List[Any]]], **kwargs) -> List[int]:
         """Search for records matching a domain.
@@ -1505,6 +1606,8 @@ class OdooConnection:
         """
         if not self._connected:
             return None
+        if self._json2 is not None:
+            return {"server_version": self._server_version}
 
         try:
             with self._common_proxy_lock:

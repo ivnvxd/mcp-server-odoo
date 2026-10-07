@@ -160,9 +160,20 @@ class TestAuthConfigValidation:
         assert config.uses_credentials
 
     def test_yolo_requires_username_with_api_key(self):
-        """YOLO mode needs username even with API key."""
+        """YOLO mode over XML-RPC needs a username even with an API key."""
         with pytest.raises(ValueError, match="YOLO mode requires"):
-            OdooConfig(url="http://localhost:8069", api_key="some_key", yolo_mode="read")
+            OdooConfig(
+                url="http://localhost:8069",
+                api_key="some_key",
+                yolo_mode="read",
+                rpc_transport="xmlrpc",
+            )
+
+    def test_yolo_api_key_alone_for_json2(self):
+        """JSON-2 reads the user from the key, so "auto" and "json2" take it alone."""
+        config = OdooConfig(url="http://localhost:8069", api_key="some_key", yolo_mode="read")
+        assert config.rpc_transport == "auto"
+        assert config.username is None
 
     def test_yolo_api_key_plus_username_valid(self):
         """YOLO mode with API key + username (no password) is valid."""

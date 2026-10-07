@@ -13,8 +13,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from mcp_server_odoo.json2_client import Json2Client
+from mcp_server_odoo.config import OdooConfig
+from mcp_server_odoo.json2_client import Json2Client, json2_arguments
 from mcp_server_odoo.odoo_connection import (
+    DATABASE_LISTING_FAILED,
+    OdooConnection,
     OdooConnectionError,
     OdooUnreachableError,
     OdooValidationFault,
@@ -68,10 +71,17 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def do_GET(self):
+        self.server.requests.append((self.path, dict(self.headers), None))
+        self._answer()
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
         self.server.requests.append((self.path, dict(self.headers), json.loads(body or b"{}")))
+        self._answer()
+
+    def _answer(self):
         step = self.server.script.pop(0)
         if step.get("delay"):
             time.sleep(step["delay"])
@@ -377,3 +387,184 @@ class TestErrors:
         for text in (str(error), str(error.__cause__), repr(error.__cause__)):
             for sentinel in SENTINELS:
                 assert sentinel not in text
+
+
+VERSION_20 = {"version_info": [20, 0, 0, "final", 0, ""], "version": "20.0"}
+HTML_404 = {
+    "status": 404,
+    "raw": b"<!DOCTYPE html><title>Not Found</title>",
+    "content_type": "text/html",
+}
+
+
+def json2_connection(server, **config):
+    config = OdooConfig(
+        **{
+            "url": server.url,
+            "api_key": "key-123",
+            "yolo_mode": "read",
+            "rpc_transport": "json2",
+            **config,
+        }
+    )
+    return OdooConnection(config, timeout=2)
+
+
+def paths(server):
+    return [path for path, _, _ in server.requests]
+
+
+class TestVersion:
+    def test_web_version(self, server):
+        server.script = [{"json": VERSION_20}]
+
+        assert client_for(server).version() == VERSION_20
+        assert server.requests[0][0] == "/web/version"
+        assert "Authorization" not in server.requests[0][1]
+
+    def test_no_version_route_means_no_json2(self, server):
+        """Odoo 18 and older answer /web/version with the HTML 404 page."""
+        server.script = [HTML_404]
+
+        with pytest.raises(OdooConnectionError, match="JSON-2 needs Odoo 19 or later"):
+            client_for(server).version()
+
+    def test_a_gateway_error_is_unreachable(self, server):
+        server.script = [{"status": 503, "raw": b"down", "content_type": "text/plain"}]
+
+        with pytest.raises(OdooUnreachableError):
+            client_for(server).version()
+
+
+class TestJson2Connection:
+    def test_connect_and_authenticate_send_no_xmlrpc(self, server):
+        server.script = [{"json": VERSION_20}, {"json": {"lang": "en_US", "tz": "UTC", "uid": 7}}]
+        connection = json2_connection(server, database="odoo")
+
+        connection.connect()
+        connection.authenticate()
+
+        assert paths(server) == ["/web/version", "/json/2/res.users/context_get"]
+        assert server.requests[1][1]["X-Odoo-Database"] == "odoo"
+        assert connection.rpc_transport == "json2"
+        assert connection.get_major_version() == 20
+        assert (connection.uid, connection.database, connection.auth_method) == (
+            7,
+            "odoo",
+            "api_key",
+        )
+        assert connection.is_authenticated
+
+    def test_the_database_comes_from_the_web_listing(self, server):
+        server.script = [
+            {"json": VERSION_20},
+            {"json": {"jsonrpc": "2.0", "id": None, "result": ["odoo"]}},
+            {"json": {"uid": 2}},
+        ]
+        connection = json2_connection(server)
+
+        connection.connect()
+        connection.authenticate()
+
+        assert paths(server) == [
+            "/web/version",
+            "/web/database/list",
+            "/json/2/res.users/context_get",
+        ]
+        assert connection.database == "odoo"
+
+    def test_a_failed_listing_has_no_xmlrpc_fallback(self, server):
+        server.script = [{"json": VERSION_20}, HTML_404]
+        connection = json2_connection(server)
+        connection.connect()
+
+        with pytest.raises(OdooConnectionError) as caught:
+            connection.authenticate()
+        assert str(caught.value) == DATABASE_LISTING_FAILED
+        assert not any(path.startswith("/xmlrpc") for path in paths(server))
+
+    def test_a_refused_key(self, server):
+        server.script = [
+            {"json": VERSION_20},
+            {
+                "status": 401,
+                "json": odoo_error("werkzeug.exceptions.Unauthorized", "Invalid apikey", 401),
+            },
+        ]
+        connection = json2_connection(server, database="odoo")
+        connection.connect()
+
+        with pytest.raises(OdooConnectionError, match="refused the API key"):
+            connection.authenticate()
+        assert not connection.is_authenticated
+
+    @pytest.mark.parametrize("answer", [{"lang": "en_US"}, {"uid": False}, {"uid": True}, []])
+    def test_no_user_for_the_key(self, server, answer):
+        server.script = [{"json": VERSION_20}, {"json": answer}]
+        connection = json2_connection(server, database="odoo")
+        connection.connect()
+
+        with pytest.raises(OdooConnectionError, match="named no user for the API key"):
+            connection.authenticate()
+        assert not connection.is_authenticated
+
+    def test_connect_on_odoo_18_fails_cleanly(self, server):
+        server.script = [HTML_404]
+        connection = json2_connection(server)
+
+        with pytest.raises(OdooConnectionError, match="Odoo 19 or later"):
+            connection.connect()
+        assert not connection.is_connected
+        assert connection.rpc_transport == "xmlrpc"
+
+    def test_execute_kw_goes_over_json2(self, server):
+        server.script = [
+            {"json": VERSION_20},
+            {"json": {"uid": 2}},
+            {"json": [3, 4]},
+            {"json": True},
+        ]
+        connection = json2_connection(server, database="odoo")
+        connection.connect()
+        connection.authenticate()
+
+        found = connection.execute_kw(
+            "res.partner", "search", [], {"domain": [], "limit": 2, "context": {"lang": "de_DE"}}
+        )
+        connection.execute_kw("res.partner", "unlink", [[3, 4]], {})
+
+        assert found == [3, 4]
+        assert server.requests[2][0] == "/json/2/res.partner/search"
+        assert server.requests[2][2] == {"domain": [], "limit": 2, "context": {"lang": "de_DE"}}
+        assert server.requests[3][0] == "/json/2/res.partner/unlink"
+        assert server.requests[3][2] == {"ids": [3, 4]}
+
+    def test_disconnect_closes_the_client(self, server):
+        server.script = [{"json": VERSION_20}, {"json": {"uid": 2}}]
+        connection = json2_connection(server, database="odoo")
+        connection.connect()
+        connection.authenticate()
+
+        connection.disconnect()
+
+        assert connection.rpc_transport == "xmlrpc"
+        assert not connection.is_connected and not connection.is_authenticated
+
+
+class TestJson2Arguments:
+    @pytest.mark.parametrize(
+        "args,kwargs,body",
+        [
+            ([], {"domain": []}, {"domain": []}),
+            ([[1, 2]], {}, {"ids": [1, 2]}),
+            ([5], {"context": {"lang": "fr_FR"}}, {"ids": [5], "context": {"lang": "fr_FR"}}),
+            ([()], {}, {"ids": []}),
+        ],
+    )
+    def test_ids_and_keyword_arguments(self, args, kwargs, body):
+        assert json2_arguments(args, kwargs) == body
+
+    @pytest.mark.parametrize("args", [[[["name", "=", "x"]]], [[1], ["name"]], [True]])
+    def test_other_positional_arguments_are_refused(self, args):
+        with pytest.raises(OdooConnectionError, match="named arguments only"):
+            json2_arguments(args, {})

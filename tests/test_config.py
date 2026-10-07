@@ -376,13 +376,52 @@ class TestYoloMode:
         )
         assert config.is_yolo_enabled is True
 
-        # YOLO mode without proper auth - should fail
+        # XML-RPC needs a username with the API key
         with pytest.raises(ValueError, match="YOLO mode requires"):
             OdooConfig(
                 url="http://localhost:8069",
                 api_key="test-key",  # Missing username
                 yolo_mode="read",
+                rpc_transport="xmlrpc",
             )
+
+        # JSON-2 reads the user from the key, so "auto" and "json2" take it alone
+        for transport in ("auto", "json2"):
+            config = OdooConfig(
+                url="http://localhost:8069",
+                api_key="test-key",
+                yolo_mode="read",
+                rpc_transport=transport,
+            )
+            assert config.username is None
+
+    def test_rpc_transport(self, monkeypatch):
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_YOLO", "read")
+        monkeypatch.delenv("ODOO_RPC_TRANSPORT", raising=False)
+        assert load_config().rpc_transport == "auto"
+
+        monkeypatch.setenv("ODOO_RPC_TRANSPORT", " JSON2 ")
+        assert load_config().rpc_transport == "json2"
+
+        monkeypatch.setenv("ODOO_RPC_TRANSPORT", "grpc")
+        with pytest.raises(ValueError, match="Invalid ODOO_RPC_TRANSPORT: grpc"):
+            load_config()
+
+    def test_json2_needs_an_api_key(self):
+        with pytest.raises(ValueError, match="json2 needs ODOO_API_KEY"):
+            OdooConfig(
+                url="http://localhost:8069",
+                username="admin",
+                password="admin",
+                yolo_mode="read",
+                rpc_transport="json2",
+            )
+
+    def test_json2_is_refused_in_standard_mode(self):
+        with pytest.raises(ValueError, match="json2 needs ODOO_YOLO=read or true"):
+            OdooConfig(url="http://localhost:8069", api_key="k", rpc_transport="json2")
 
     def test_yolo_mode_from_env(self, monkeypatch):
         """Test loading YOLO mode from environment variables."""

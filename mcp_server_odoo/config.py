@@ -52,6 +52,10 @@ class OdooConfig:
     # YOLO mode configuration
     yolo_mode: str = "off"  # "off", "read", or "true"
 
+    # RPC protocol to Odoo: "auto", "xmlrpc" or "json2" (JSON-2, Odoo 19 and
+    # later, API key only)
+    rpc_transport: str = "auto"
+
     # Opt-in for call_model_method (effective only with yolo_mode == "true").
     enable_method_calls: bool = False
 
@@ -81,12 +85,37 @@ class OdooConfig:
                 f"Must be one of: {', '.join(valid_yolo_modes)}"
             )
 
+        valid_rpc_transports = {"auto", "xmlrpc", "json2"}
+        if self.rpc_transport not in valid_rpc_transports:
+            raise ValueError(
+                f"Invalid ODOO_RPC_TRANSPORT: {self.rpc_transport}. "
+                f"Must be one of: {', '.join(sorted(valid_rpc_transports))}"
+            )
+
         has_api_key = bool(self.api_key)
         has_credentials = bool(self.username and self.password)
 
-        # In YOLO mode, we might need username even with API key for standard auth
+        if self.rpc_transport == "json2":
+            if not has_api_key:
+                raise ValueError(
+                    "ODOO_RPC_TRANSPORT=json2 needs ODOO_API_KEY: JSON-2 accepts API keys only"
+                )
+            if not self.is_yolo_enabled:
+                raise ValueError(
+                    "ODOO_RPC_TRANSPORT=json2 needs ODOO_YOLO=read or true: standard mode "
+                    "goes through the MCP module's XML-RPC endpoints"
+                )
+
+        # In YOLO mode, XML-RPC needs a username even with an API key. JSON-2
+        # reads the user from the key, so "auto" and "json2" take a key alone;
+        # startup refuses "auto" without a username if it resolves to XML-RPC.
         if self.is_yolo_enabled:
-            if not has_credentials and not (has_api_key and self.username):
+            key_alone_allowed = has_api_key and self.rpc_transport != "xmlrpc"
+            if (
+                not has_credentials
+                and not (has_api_key and self.username)
+                and not key_alone_allowed
+            ):
                 raise ValueError("YOLO mode requires either username/password or username/API key")
         else:
             if not has_api_key and not has_credentials:
@@ -302,6 +331,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         locale=os.getenv("ODOO_LOCALE", "").strip() or None,
         allowed_companies=get_company_ids_env("ODOO_ALLOWED_COMPANIES"),
         yolo_mode=get_yolo_mode(),
+        rpc_transport=os.getenv("ODOO_RPC_TRANSPORT", "").strip().lower() or "auto",
         enable_method_calls=get_bool_env("ODOO_MCP_ENABLE_METHOD_CALLS", False),
         allowed_hosts=parse_allowed_hosts(),
         max_binary_size=get_int_env("ODOO_MCP_MAX_BINARY_SIZE", 50 * 1024 * 1024),
