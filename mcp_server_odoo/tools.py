@@ -337,6 +337,26 @@ def _refuse_bool(value: Any) -> Any:
 RecordId = Annotated[int, BeforeValidator(_refuse_bool)]
 
 
+# Domain operators that take a sub-domain as their value; Odoo 17 added them
+_SUB_DOMAIN_OPERATORS = ("any", "not any")
+
+
+def _uses_sub_domain_operators(domain: Any) -> bool:
+    """Whether a parsed domain has an 'any' or 'not any' condition.
+
+    The top level is enough: '|' and '&' are prefix operators, so a domain is a
+    flat list, and a sub-domain can only sit inside an 'any' condition.
+    """
+    if not isinstance(domain, (list, tuple)):
+        return False
+    for term in domain:
+        if isinstance(term, (list, tuple)) and len(term) == 3:
+            operator = term[1]
+            if isinstance(operator, str) and operator.strip().lower() in _SUB_DOMAIN_OPERATORS:
+                return True
+    return False
+
+
 def _wrap_bare_string(value: Any) -> Any:
     """A bare string is a list of one: "partner_id" is ["partner_id"]."""
     return [value] if isinstance(value, str) else value
@@ -613,6 +633,20 @@ class OdooToolHandler:
             logger.debug(f"Could not read the user's companies: {e}")
             return None
         return list(user.get("company_ids") or [])
+
+    def _check_domain_operators(self, domain: List[Any]) -> None:
+        """Refuse 'any' and 'not any' before Odoo 17 (blocking: reads the version).
+
+        Odoo 16 has no such operator and fails with "unhashable type: 'list'",
+        which reads as a connection error. A dotted path does the same there.
+        """
+        major = self.connection.get_major_version()
+        if isinstance(major, int) and major < 17 and _uses_sub_domain_operators(domain):
+            raise ValidationError(
+                f"The 'any' and 'not any' operators need Odoo 17 or later; this server runs "
+                f"Odoo {major}. Use a dotted path instead, for example "
+                '[["child_ids.email", "!=", false]].'
+            )
 
     def _install_argument_check(self) -> None:
         """Refuse tool arguments the tool does not take, by name.
@@ -2051,6 +2085,7 @@ class OdooToolHandler:
 
                 call_context = await asyncio.to_thread(self._call_context, context)
                 parsed_domain = self._parse_domain_input(domain)
+                await asyncio.to_thread(self._check_domain_operators, parsed_domain)
                 if model == "ir.attachment":
                     # Scope to accessible res_models — an attachment row
                     # carries url and index_content (the extracted document
@@ -4135,6 +4170,7 @@ class OdooToolHandler:
                 groupby = list(groupby) if groupby else []
 
                 parsed_domain = self._parse_domain_input(domain)
+                await asyncio.to_thread(self._check_domain_operators, parsed_domain)
                 if model == "ir.attachment":
                     scope = await asyncio.to_thread(
                         attachment_scope_domain, self.config, self.access_controller

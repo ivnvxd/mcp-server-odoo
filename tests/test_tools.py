@@ -6283,3 +6283,64 @@ class TestTypedParameters:
         kwargs = connection.execute_kw.call_args.args[3]
         assert kwargs["subtype_xmlid"] == "mail.mt_comment"
         assert kwargs["message_type"] == "comment"
+
+
+class TestSubDomainOperatorsBeforeOdoo17:
+    """Odoo 16 has no 'any' / 'not any': it fails with "unhashable type: 'list'",
+    which reached the model as a connection error."""
+
+    DOMAINS = [
+        [["child_ids", "any", [["email", "!=", False]]]],
+        ["|", ["name", "=", "A"], ["child_ids", "not any", [["active", "=", False]]]],
+        [["parent_id", "any", [["category_id", "any", [["name", "=", "VIP"]]]]]],
+    ]
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.search.return_value = []
+        connection.search_count.return_value = 0
+        connection.execute_kw.return_value = []
+        return connection
+
+    @pytest.fixture
+    def handler(self, connection):
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+        return OdooToolHandler(
+            MagicMock(spec=MCPServer), connection, MagicMock(spec=AccessController), config
+        )
+
+    @pytest.mark.parametrize("domain", DOMAINS)
+    async def test_refused_on_odoo_16(self, handler, connection, domain):
+        connection.get_major_version.return_value = 16
+
+        with pytest.raises(ValidationError, match=r"need Odoo 17 or later.*child_ids\.email"):
+            await handler._handle_search_tool("res.partner", domain, ["name"], 10, 0, None)
+        connection.search.assert_not_called()
+
+    async def test_refused_in_aggregate_records_on_odoo_16(self, handler, connection):
+        connection.get_major_version.return_value = 16
+
+        with pytest.raises(ValidationError, match="need Odoo 17 or later"):
+            await handler._handle_aggregate_records_tool(
+                "res.partner", None, None, self.DOMAINS[0], None, None, 0
+            )
+        connection.execute_kw.assert_not_called()
+
+    @pytest.mark.parametrize("major", [17, 18, 19, 20])
+    async def test_sent_on_odoo_17_and_later(self, handler, connection, major):
+        connection.get_major_version.return_value = major
+
+        await handler._handle_search_tool("res.partner", self.DOMAINS[1], ["name"], 10, 0, None)
+
+        assert connection.search.call_args.args[1] == self.DOMAINS[1]
+
+    async def test_a_value_named_any_is_not_an_operator(self, handler, connection):
+        connection.get_major_version.return_value = 16
+
+        await handler._handle_search_tool(
+            "res.partner", [["name", "=", "any"]], ["name"], 10, 0, None
+        )
+
+        connection.search.assert_called_once()
