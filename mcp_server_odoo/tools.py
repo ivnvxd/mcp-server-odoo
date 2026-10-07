@@ -4020,7 +4020,11 @@ class OdooToolHandler:
               v19 aggregate expression (``"amount_total:sum desc"``) raises a
               fault here that surfaces cleanly as a ValidationError.
         """
-        # __count is implicit in read_group; passing it as a field raises a fault.
+        # __count is implicit in read_group (lazy=False), so it is dropped
+        # beside other aggregates. Alone it is sent as the only field:
+        # fields=[] makes Odoo 16 fail without a groupby (it cannot marshal
+        # the None it puts in the row) and aggregate every numeric field with
+        # one. fields=["__count"] works on 16, 17 and 18.
         fields_kwarg = [a for a in aggregates if a != "__count"]
 
         # read_group returns every aggregate under its BARE field name, so an
@@ -4062,7 +4066,7 @@ class OdooToolHandler:
             seen_fields[bare] = spec
 
         kwargs: Dict[str, Any] = {
-            "fields": fields_kwarg,
+            "fields": fields_kwarg or ["__count"],
             "groupby": groupby,
             "limit": limit,
             "offset": offset,

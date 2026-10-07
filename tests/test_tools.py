@@ -2384,20 +2384,22 @@ class TestAggregateRecordsReadGroupFallback:
         assert result.has_more is True
         assert result.next_hint == "aggregate_records with offset=2, limit=2"
 
-    @pytest.mark.asyncio
-    async def test_count_stripped_from_fields(
-        self, handler, mock_connection, mock_access_controller, mock_app
+    @pytest.mark.parametrize("groupby", [[], ["partner_id"]])
+    async def test_count_alone_is_sent_as_the_count_field(
+        self, handler, mock_connection, mock_access_controller, mock_app, groupby
     ):
-        """__count must NOT be passed to read_group's fields= (it's implicit)."""
+        """fields=[] fails on Odoo 16 without a groupby (Odoo cannot marshal the
+        None it puts in the row), and with one it aggregates every numeric
+        field. fields=["__count"] works on 16, 17 and 18."""
         mock_access_controller.validate_model_access.return_value = None
         mock_connection.execute_kw.return_value = []
 
         aggregate_records = mock_app._tools["aggregate_records"]
-        # Caller omits aggregates → tool defaults to ["__count"] → stripped before fields=
-        await aggregate_records(model="sale.order", groupby=["partner_id"])
+        # Caller omits aggregates → tool defaults to ["__count"]
+        await aggregate_records(model="sale.order", groupby=groupby)
 
         passed_kwargs = mock_connection.execute_kw.call_args.args[3]
-        assert passed_kwargs["fields"] == []
+        assert passed_kwargs["fields"] == ["__count"]
 
     @pytest.mark.asyncio
     async def test_count_stripped_keeps_other_aggregates(
