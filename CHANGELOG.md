@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **JSON-2 transport**: in YOLO mode with an API key, the server talks to Odoo 19 and later through the JSON-2 API (`/json/2`) instead of the deprecated XML-RPC, and falls back to XML-RPC when JSON-2 is not available. `ODOO_RPC_TRANSPORT` (`auto`, `xmlrpc`, `json2`) overrides the choice, and `/health` shows it. `ODOO_USER` is not needed over JSON-2. Every tool returns the same results as over XML-RPC.
+- **JSON-2 transport**: in YOLO mode with an API key, the server talks to Odoo 19 and later through the JSON-2 API (`/json/2`) instead of the deprecated XML-RPC, and falls back to XML-RPC when JSON-2 is not available. `ODOO_RPC_TRANSPORT` (`auto`, `xmlrpc`, `json2`) overrides the choice, and `/health` shows it. `ODOO_USER` is not needed over JSON-2.
 - **Per-call `context`**: the read and write tools take a `context` with `allowed_company_ids`, `lang`, `tz` and `active_test`, so company-dependent fields such as `standard_price` can be read and written per company. Other keys are refused by name (#129, @lucianosanchez-ui).
 - **`ODOO_ALLOWED_COMPANIES`**: limits every call to the listed companies of a multi-company database. The first one is the active company. At startup the server makes sure that each ID is one of the user's companies (#107, @jflaflamme).
 - **Usage guidance in the instructions**: the `initialize` instructions tell the model which tool to use for discovery, reads, counts, bulk writes and files, and to read many records in one `search_records` call. Only registered tools are named.
@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CI on pull requests to any branch**: the trigger matched only branch names without a `/`, so pull requests against `release/*` ran no CI.
 
 ### Changed
+- **JSON-2 by default on Odoo 19 and later**: YOLO setups with an API key switch from XML-RPC to JSON-2. There `call_model_method` takes only the record IDs in `arguments`; pass every other argument in `keyword_arguments`. `ODOO_RPC_TRANSPORT=xmlrpc` keeps XML-RPC.
 - **Default search limit is 25**: `search_records`, `aggregate_records` and the search resource return 25 records by default instead of 10. Set `ODOO_MCP_DEFAULT_LIMIT=10` to keep the old behavior.
 - **Stricter tool input**: a tool refuses arguments it does not take, and names them. Before, a misspelled argument such as `limt` was dropped and the call ran with the defaults. A record ID of `true` or `false` is refused instead of read as 1 or 0.
 - **`get_fields` default view**: without `field_names`, it returns the 60 most relevant value fields plus every relation, file and HTML field, with selection lists cut at 20 values. Pass `["__all__"]` for every field.

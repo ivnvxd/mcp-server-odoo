@@ -803,7 +803,7 @@ Some calls are blocked for safety even in full YOLO mode:
 
 List results are truncated to 100 items.
 
-Over JSON-2 (`ODOO_RPC_TRANSPORT=json2`), Odoo takes named arguments only. `arguments` can then hold only the record IDs, as its first item. Pass every other argument in `keyword_arguments`, by its parameter name, for example `{"partner_ids": [3]}`.
+Over JSON-2 (Odoo 19 and later in YOLO mode with an API key, or `ODOO_RPC_TRANSPORT=json2`), Odoo takes named arguments only. `arguments` can then hold only the record IDs, as its first item. Pass every other argument in `keyword_arguments`, by its parameter name, for example `{"partner_ids": [3]}`.
 
 > [!WARNING]
 > This tool can still invoke destructive workflow methods (e.g. `button_draft`, `action_cancel`, `toggle_active`, custom methods). Enable only in trusted environments where you accept the blast radius. Odoo's record rules and ACLs still apply for the authenticated user.

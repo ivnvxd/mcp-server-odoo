@@ -52,9 +52,14 @@ _FAULT_WARNING = 2
 _FAULT_APPLICATION = 1
 
 
+class Json2UnavailableError(OdooConnectionError):
+    """The server has no JSON-2: no ``/web/version`` route, or Odoo before 19.
+    ``ODOO_RPC_TRANSPORT=auto`` then uses XML-RPC."""
+
+
 class Json2RouteError(OdooConnectionError):
-    """An answer without a JSON-2 error body: a redirect, or a page from a proxy
-    or for an unknown database. ``ODOO_RPC_TRANSPORT=auto`` then uses XML-RPC."""
+    """A ``/json/2`` answer without a JSON-2 error body: a page from a proxy that
+    blocks the route, or from Odoo for an unknown database."""
 
 
 class Json2Client:
@@ -128,7 +133,9 @@ class Json2Client:
                 return info
         if status in _UNAVAILABLE_HTTP_STATUSES:
             raise OdooUnreachableError(f"Odoo did not answer (HTTP {status})")
-        raise OdooConnectionError(
+        if 300 <= status < 400:
+            raise OdooConnectionError(_redirect_message(status, headers))
+        raise Json2UnavailableError(
             f"Odoo has no /web/version route (HTTP {status}): JSON-2 needs Odoo 19 or later"
         )
 
@@ -203,10 +210,7 @@ class Json2Client:
         if status in _UNAVAILABLE_HTTP_STATUSES:
             raise OdooUnreachableError(f"Odoo did not answer (HTTP {status})")
         if 300 <= status < 400:
-            raise Json2RouteError(
-                f"Odoo redirected the request (HTTP {status}) to {headers.get('Location')}. "
-                "Set ODOO_URL to the address it redirects to."
-            )
+            raise OdooConnectionError(_redirect_message(status, headers))
         error = _error_body(data)
         if error is None:
             raise Json2RouteError(f"Operation failed: HTTP {status} without a JSON error")
@@ -231,6 +235,13 @@ class Json2Client:
             # and the sanitizer decides whether it is a business error
             code, fault_string = _FAULT_APPLICATION, f"{short_name}: {message}"
         _raise_for_fault(xmlrpc.client.Fault(code, fault_string))
+
+
+def _redirect_message(status: int, headers: http.client.HTTPMessage) -> str:
+    return (
+        f"Odoo redirected the request (HTTP {status}) to {headers.get('Location')}. "
+        "Set ODOO_URL to the address it redirects to."
+    )
 
 
 def _error_body(data: bytes) -> Optional[Tuple[str, str]]:

@@ -354,12 +354,15 @@ class OdooConnection:
             return
 
         if self._wants_json2():
+            # Imported here: json2_client imports this module
+            from .json2_client import Json2UnavailableError
+
             try:
                 self._connect_json2()
                 return
-            except OdooUnreachableError:
-                raise
-            except OdooConnectionError as e:
+            except Json2UnavailableError as e:
+                # Only a server without JSON-2 falls back: a redirect or Odoo
+                # being down keeps its own error
                 if self.config.rpc_transport == "json2":
                     raise
                 self._fall_back_to_xmlrpc(str(e))
@@ -464,14 +467,14 @@ class OdooConnection:
         client's ``X-Odoo-Database`` header.
         """
         # Imported here: json2_client imports this module
-        from .json2_client import Json2Client
+        from .json2_client import Json2Client, Json2UnavailableError
 
         self._json2 = Json2Client(self.config.url, self.config.api_key or "", None, self.timeout)
         try:
             self._test_connection()
             major = self.get_major_version()
             if major is not None and major < 19:
-                raise OdooConnectionError(
+                raise Json2UnavailableError(
                     f"JSON-2 needs Odoo 19 or later; this server runs {self._server_version}"
                 )
         except Exception:
@@ -1065,7 +1068,13 @@ class OdooConnection:
                 self._authenticate_json2(db_name)
                 return
             except Json2RouteError as e:
-                # A proxy can pass /web/version and still block /json/2
+                # A proxy can pass /web/version and still block /json/2. Odoo
+                # answers an unknown database with the same page, so look the
+                # name up first: a typo must not read as "no JSON-2".
+                if not self._database_may_exist(db_name):
+                    raise OdooConnectionError(
+                        f"Database '{db_name}' does not exist on this server"
+                    ) from e
                 if self.config.rpc_transport == "json2":
                     raise
                 self._json2.close()
@@ -1165,6 +1174,13 @@ class OdooConnection:
                 f"ODOO_ALLOWED_COMPANIES names companies the user cannot access: {foreign}. "
                 f"The user's companies are {sorted(user_companies)}."
             )
+
+    def _database_may_exist(self, database: str) -> bool:
+        """False only when the database listing works and lacks ``database``."""
+        try:
+            return database in self._list_databases_web()
+        except Exception:
+            return True
 
     def _authenticate_json2(self, database: str) -> None:
         """Read the API key's user from ``res.users/context_get`` over JSON-2.

@@ -749,7 +749,8 @@ class TestAutoSelection:
 
     def test_a_blocked_json2_route_falls_back_to_xmlrpc(self, server, monkeypatch):
         """/web/version answers, but a proxy answers /json/2 with an HTML page."""
-        server.script = [{"json": VERSION_20}, HTML_404]
+        listing = {"json": {"jsonrpc": "2.0", "id": None, "result": ["odoo"]}}
+        server.script = [{"json": VERSION_20}, HTML_404, listing]
         connection = auto_connection(server, database="odoo", username="admin")
         xmlrpc_proxies(monkeypatch, connection, version="20.0")
 
@@ -758,6 +759,48 @@ class TestAutoSelection:
 
         assert connection.rpc_transport == "xmlrpc"
         assert connection.is_authenticated
+
+    def test_a_failed_listing_still_falls_back(self, server, monkeypatch):
+        server.script = [{"json": VERSION_20}, HTML_404, HTML_404]
+        connection = auto_connection(server, database="odoo", username="admin")
+        xmlrpc_proxies(monkeypatch, connection, version="20.0")
+
+        connection.connect()
+        connection.authenticate()
+
+        assert connection.rpc_transport == "xmlrpc"
+
+    @pytest.mark.parametrize("transport", ["auto", "json2"])
+    def test_an_unknown_database_is_named_not_a_fallback(self, server, transport):
+        """Odoo answers /json/2 for an unknown database with its HTML 404 page."""
+        listing = {"json": {"jsonrpc": "2.0", "id": None, "result": ["odoo"]}}
+        server.script = [{"json": VERSION_20}, HTML_404, listing]
+        connection = json2_connection(server, database="nope", rpc_transport=transport)
+        connection.connect()
+
+        with pytest.raises(OdooConnectionError, match="Database 'nope' does not exist"):
+            connection.authenticate()
+        assert connection.rpc_transport == "json2"
+
+    @pytest.mark.parametrize("transport", ["auto", "json2"])
+    def test_a_redirect_is_not_a_fallback(self, server, monkeypatch, transport):
+        """http:// redirected to https:// on an Odoo 19: not a server without JSON-2."""
+        server.script = [
+            {
+                "status": 301,
+                "raw": b"",
+                "headers": {"Location": "https://odoo.example.com/web/version"},
+            }
+        ]
+        connection = json2_connection(
+            server, database="odoo", username="admin", rpc_transport=transport
+        )
+        proxy = xmlrpc_proxies(monkeypatch, connection)
+
+        with pytest.raises(OdooConnectionError, match="https://odoo.example.com") as caught:
+            connection.connect()
+        assert "Odoo 19 or later" not in str(caught.value)
+        assert not proxy.version.called
 
     def test_a_refused_key_does_not_fall_back(self, server):
         server.script = [
