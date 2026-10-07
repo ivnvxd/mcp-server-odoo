@@ -92,8 +92,7 @@ jobs:
         path: coverage-unit.xml
 
   yolo-integration-test:
-    # The 19 leg keeps the historical check name
-    name: YOLO Integration Tests${{ matrix.odoo != '19' && format(' (Odoo {0})', matrix.odoo) || '' }}
+    name: YOLO Integration Tests (Odoo ${{ matrix.odoo }})
     runs-on: ubuntu-latest
     needs: [lint, test]
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
@@ -220,9 +219,8 @@ jobs:
         path: coverage-yolo-${{ matrix.odoo }}.xml
 
   mcp-integration-test:
-    # The 19 leg keeps the historical check name. Each leg runs the module
-    # branch of its Odoo version.
-    name: MCP Integration Tests${{ matrix.odoo != '19' && format(' (Odoo {0})', matrix.odoo) || '' }}
+    # Each leg runs the module branch of its Odoo version
+    name: MCP Integration Tests (Odoo ${{ matrix.odoo }})
     runs-on: ubuntu-latest
     needs: [lint, test]
     # Skip for fork PRs AND Dependabot PRs — repository secrets

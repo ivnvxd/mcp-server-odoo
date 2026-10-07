@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`update_records` with per-record values**: `updates=[{"id": ..., "values": {...}}]` writes different values to each record in one transaction, on Odoo 19 and later.
 - **`create_records` tool**: creates up to 100 records of one model in one `create` call. It is one transaction, so either every record is created or none.
 - **`update_records` tool**: bulk-update multiple records of the same model with the same values in one call, instead of looping `update_record`. Capped at 100 distinct record IDs per call; fails the whole batch (no partial write) if any id doesn't exist. Archived records can be updated.
-- **Odoo 16 to 20 in CI**: the YOLO and MCP integration tests run on Odoo 16, 17, 18, 19 and 20. The MCP job uses the module branch of each version. A leg fails when Odoo or `/mcp/health` does not answer: the Odoo 20 YOLO leg had skipped every test, because Odoo 20 listens on 127.0.0.1 by default. The README documents the `rpc` scope that Odoo 20 requires for API keys, and the MCP User group.
+- **Odoo 16 to 20 in CI**: the YOLO and MCP integration tests run on Odoo 16, 17, 18, 19 and 20, one check per version, named "(Odoo N)". The MCP job uses the module branch of each version. A leg fails when Odoo or `/mcp/health` does not answer: the Odoo 20 YOLO leg had skipped every test, because Odoo 20 listens on 127.0.0.1 by default. The README documents the `rpc` scope that Odoo 20 requires for API keys, and the MCP User group.
 - **CI on pull requests to any branch**: the trigger matched only branch names without a `/`, so pull requests against `release/*` ran no CI.
 
 ### Changed
