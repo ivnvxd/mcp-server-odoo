@@ -260,11 +260,16 @@ def json2_arguments(args: List[Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _is_ids(value: Any) -> bool:
-    """An id or a list of ids (booleans excluded: True is not record 1)."""
+    """An id or a non-empty list of ids (booleans excluded: True is not record 1).
+
+    An empty list is not taken as ids: it can as well be an empty domain.
+    """
     if isinstance(value, bool):
         return False
     if isinstance(value, int):
         return True
-    return isinstance(value, (list, tuple)) and all(
-        isinstance(item, int) and not isinstance(item, bool) for item in value
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) > 0
+        and all(isinstance(item, int) and not isinstance(item, bool) for item in value)
     )

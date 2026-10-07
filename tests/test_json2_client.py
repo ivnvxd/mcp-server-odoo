@@ -558,13 +558,20 @@ class TestJson2Arguments:
             ([], {"domain": []}, {"domain": []}),
             ([[1, 2]], {}, {"ids": [1, 2]}),
             ([5], {"context": {"lang": "fr_FR"}}, {"ids": [5], "context": {"lang": "fr_FR"}}),
-            ([()], {}, {"ids": []}),
         ],
     )
     def test_ids_and_keyword_arguments(self, args, kwargs, body):
         assert json2_arguments(args, kwargs) == body
 
-    @pytest.mark.parametrize("args", [[[["name", "=", "x"]]], [[1], ["name"]], [True]])
+    @pytest.mark.parametrize(
+        "args",
+        [
+            [[["name", "=", "x"]]],
+            [[1], ["name"]],
+            [True],
+            [[]],  # an empty domain as much as an empty id list
+        ],
+    )
     def test_other_positional_arguments_are_refused(self, args):
         with pytest.raises(OdooConnectionError, match="named arguments only"):
             json2_arguments(args, {})
