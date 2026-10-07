@@ -535,7 +535,8 @@ class TestSearchResourceIntegration:
         try:
             result = await handler._handle_search(
                 "res.partner",
-                quote(json.dumps([["is_company", "=", True]])),  # Search for companies
+                # Top-level partners: Odoo 20 sets is_company only with a VAT
+                quote(json.dumps([["parent_id", "=", False]])),
                 "name,email,country_id",  # Specific fields
                 5,  # Limit
                 0,  # Offset
@@ -549,7 +550,7 @@ class TestSearchResourceIntegration:
         # Verify result structure
         assert "Search Results: res.partner" in result
         assert "Search criteria:" in result
-        assert "is_company = True" in result
+        assert "parent_id = False" in result
         assert "Fields: name, email, country_id" in result
         assert "Page 1 of" in result
 

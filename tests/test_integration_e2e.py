@@ -231,7 +231,9 @@ class TestResourceOperations:
         import json
         from urllib.parse import quote
 
-        domain = [["is_company", "=", True]]
+        # Top-level partners exist on every version without demo data; Odoo 20
+        # sets is_company only for a partner with a VAT
+        domain = [["parent_id", "=", False]]
         result = await handler._handle_search(
             "res.partner", quote(json.dumps(domain)), None, 5, 0, None
         )
@@ -242,7 +244,7 @@ class TestResourceOperations:
         # The displayed total must match the domain-filtered count, proving
         # the domain was actually applied and not silently dropped
         expected = conn.search_count("res.partner", domain)
-        assert expected > 0, "test database must contain at least one company partner"
+        assert expected > 0, "test database must contain at least one top-level partner"
         assert f"of {expected}" in result
 
     @pytest.mark.asyncio
