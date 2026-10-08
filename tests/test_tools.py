@@ -1709,6 +1709,7 @@ class TestRelatedSummaries:
     ):
         """1..5 ids → display names resolved; ids in the record stay untouched."""
         mock_connection.fields_get.return_value = {
+            "name": {"type": "char"},
             "child_ids": {"type": "one2many", "relation": "res.partner", "store": True},
         }
 
@@ -3145,6 +3146,27 @@ class TestUpdateRecordTool:
         mock_connection.write.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_create_record_unknown_field(self, handler, mock_connection, mock_app):
+        """The Odoo 20 MCP module hides Odoo's own error as "Internal server error"."""
+        mock_connection.fields_get.return_value = {"name": {"type": "char"}}
+
+        with pytest.raises(ValidationError, match="Invalid field 'nope' on res.partner"):
+            await mock_app._tools["create_record"](
+                model="res.partner", values={"name": "x", "nope": 1}
+            )
+        mock_connection.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_record_unknown_field(self, handler, mock_connection, mock_app):
+        mock_connection.fields_get.return_value = {"name": {"type": "char"}}
+
+        with pytest.raises(ValidationError, match="Invalid field 'nope' on res.partner"):
+            await mock_app._tools["get_record"](
+                model="res.partner", record_id=1, fields=["name", "nope"]
+            )
+        mock_connection.read.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_update_record_not_found(self, handler, mock_connection, mock_app):
         """Test update_record when record doesn't exist."""
         mock_connection.search_count.return_value = 0  # existence check fails
@@ -4135,6 +4157,12 @@ class TestParseDomainInput:
     )
     def test_balanced_domains_pass_through(self, handler, domain):
         assert handler._parse_domain_input(domain) is domain
+
+    @pytest.mark.parametrize("domain", [[["name", "ilike"]], [["name"]], ["&", ["a", "=", 1, 2]]])
+    def test_a_condition_without_three_parts_is_refused(self, handler, domain):
+        """Odoo answers it with a bare unpacking or index error."""
+        with pytest.raises(ValidationError, match="a condition has three parts"):
+            handler._parse_domain_input(domain)
 
     @pytest.mark.parametrize(
         "domain",
@@ -5961,7 +5989,10 @@ class TestAttachmentGatingInTools:
         connection.is_authenticated = True
         connection.search.return_value = []
         connection.search_count.return_value = 0
-        connection.fields_get.return_value = {"id": {"type": "integer", "string": "ID"}}
+        connection.fields_get.return_value = {
+            "id": {"type": "integer", "string": "ID"},
+            "name": {"type": "char", "string": "Name"},
+        }
         return connection
 
     @pytest.fixture

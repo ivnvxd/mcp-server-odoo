@@ -253,7 +253,7 @@ class TestInvalidLangAttribution:
             True,
         ]
 
-        with pytest.raises(OdooValidationFault, match="Invalid language code: xx_XX"):
+        with pytest.raises(OdooValidationFault, match="Language .xx_XX. is not installed in Odoo"):
             conn.execute_kw(
                 "product.template",
                 "write",
@@ -282,7 +282,7 @@ class TestInvalidLangAttribution:
         mock_proxy = _make_connected(conn)
         mock_proxy.execute_kw.side_effect = [xmlrpc.client.Fault(2, "Invalid language code: es_ES")]
 
-        with pytest.raises(OdooValidationFault, match="Invalid language code: es_ES"):
+        with pytest.raises(OdooValidationFault, match="Language .es_ES. is not installed in Odoo"):
             conn.execute_kw(
                 "res.partner", "write", [[1], {"name": "x"}], {"context": {"lang": "es_ES"}}
             )

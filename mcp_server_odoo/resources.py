@@ -486,7 +486,7 @@ class OdooResourceHandler:
                 model, [["id", "=", record_id]], context=count_context
             ):
                 raise NotFoundError(
-                    f"Record not found: {model} with ID {record_id} does not exist",
+                    f"Record not found: {model} with ID {record_id}",
                     context=context,
                 )
             raise NotFoundError(
@@ -711,7 +711,7 @@ class OdooResourceHandler:
                     )
                     if not probe:
                         raise NotFoundError(
-                            f"Record not found: {model} with ID {record_id} does not exist",
+                            f"Record not found: {model} with ID {record_id}",
                             context=context,
                         )
                     placeholder = probe[0].get(field)
@@ -742,7 +742,7 @@ class OdooResourceHandler:
                 )
                 if not records:
                     raise NotFoundError(
-                        f"Record not found: {model} with ID {record_id} does not exist",
+                        f"Record not found: {model} with ID {record_id}",
                         context=context,
                     )
                 value = records[0].get(field)
@@ -972,7 +972,7 @@ class OdooResourceHandler:
 
                 if not record_ids:
                     raise NotFoundError(
-                        f"Record not found: {model} with ID {record_id} does not exist",
+                        f"Record not found: {model} with ID {record_id}",
                         context=context,
                     )
 
@@ -989,9 +989,7 @@ class OdooResourceHandler:
                 await asyncio.to_thread(scrub_json_fields, self.connection, model, records)
 
                 if not records:
-                    raise NotFoundError(
-                        f"Record not found: {model} with ID {record_id} does not exist"
-                    )
+                    raise NotFoundError(f"Record not found: {model} with ID {record_id}")
 
                 record = records[0]
                 if safe_fields is None:

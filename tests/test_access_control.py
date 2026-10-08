@@ -189,6 +189,8 @@ class TestAccessControl:
 
         assert not isinstance(exc_info.value, AccessControlUnavailableError)
         assert str(exc_info.value) == "Model 'sale.order' not found in Odoo instance."
+        # A missing model is not an access problem
+        assert access_denied_message(exc_info.value) == str(exc_info.value)
 
     @patch("urllib.request.urlopen")
     def test_make_request_http_500(self, mock_urlopen, controller):

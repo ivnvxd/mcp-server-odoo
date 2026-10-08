@@ -1313,6 +1313,8 @@ class OdooConnection:
     def _drop_invalid_lang(self, kwargs: Dict[str, Any], injected: bool) -> bool:
         """Remove the configured locale after Odoo refused it; True to retry.
 
+        Raises OdooValidationFault for a lang the caller passed.
+
         Only a lang that execute_kw injected from ODOO_LOCALE is dropped, and
         the locale is then disabled for the process. A lang the caller passed
         is not, even when it equals ODOO_LOCALE: retried without it, a write
@@ -1323,8 +1325,13 @@ class OdooConnection:
         """
         context = kwargs.get("context") or {}
         bad_lang = context.get("lang")
-        if not injected or not bad_lang:
+        if not bad_lang:
             return False
+        if not injected:
+            # Odoo says "Invalid language code" for a real code it has not installed
+            raise OdooValidationFault(
+                f"Language '{bad_lang}' is not installed in Odoo.", WARNING_FAULT_CODE
+            )
         if self.config.locale == bad_lang:
             logger.warning(
                 f"Locale '{bad_lang}' is not installed in Odoo. Falling back to default language."

@@ -230,7 +230,7 @@ class TestOdooResourceHandler:
         with pytest.raises(NotFoundError) as exc_info:
             await resource_handler._handle_record_retrieval("res.partner", "999")
 
-        assert "Record not found: res.partner with ID 999 does not exist" in str(exc_info.value)
+        assert "Record not found: res.partner with ID 999" in str(exc_info.value)
 
         # Verify calls
         mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "read")

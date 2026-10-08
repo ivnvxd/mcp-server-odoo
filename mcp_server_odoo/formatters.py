@@ -200,10 +200,11 @@ class RecordFormatter:
         Returns:
             Formatted field value
         """
+        field_type = field_meta.get("type", "unknown")
+        if field_type == "boolean":
+            return "Yes" if value else "No"
         if value is None or value is False:
             return "Not set"
-
-        field_type = field_meta.get("type", "unknown")
 
         # Text fields
         if field_type in ("char", "text", "html"):

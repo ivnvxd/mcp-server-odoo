@@ -1127,11 +1127,12 @@ class OdooToolHandler:
             model, record_id, names[:middle], context
         ) + self._find_unreadable_fields(model, record_id, names[middle:], context)
 
-    def _check_write_fields(self, model: str, names: Iterable[str]) -> None:
-        """Refuse unknown field names before a write (blocking).
+    def _check_field_names(self, model: str, names: Iterable[str]) -> None:
+        """Refuse unknown field names before a read or write (blocking).
 
         Odoo 19 and later answer an unknown field in write() with a bare
-        KeyError. fields_get also leaves out the fields the user's groups
+        KeyError, and the Odoo 20 MCP module hides every such error as
+        "Internal server error". fields_get also leaves out the fields the user's groups
         cannot see, so the message names both causes. Without field metadata
         the write goes to Odoo unchecked.
         """
@@ -1622,7 +1623,8 @@ class OdooToolHandler:
         async def list_models(ctx: Optional[Context] = None) -> ModelsResult:
             """List all models enabled for MCP access with their allowed operations.
 
-            In YOLO mode every model with records is listed, and the allowed
+            In YOLO mode every model is listed; Odoo 19 and later leave out the
+            abstract ones, earlier versions list mixins too. The allowed
             operations, the same for every model, are in yolo_mode.operations.
 
             Returns:
@@ -2030,6 +2032,8 @@ class OdooToolHandler:
                     Examples: ``["amount_total:sum"]``, ``["__count"]``.
                     ``["id:count"]`` works on Odoo 17+ only — use
                     ``__count`` for a row count on every version.
+                    Before Odoo 19, only one aggregate per field (not both
+                    ``amount_total:sum`` and ``amount_total:avg``).
                     If omitted or empty, defaults to ``["__count"]`` so each
                     group carries a count. Pass ``["__count", "amount_total:sum"]``
                     to get both.
@@ -2278,6 +2282,8 @@ class OdooToolHandler:
                 withheld_fields: Set[str] = set()
                 skipped_fields: List[str] = []
                 explicit_fields = bool(parsed_fields) and parsed_fields != ["__all__"]
+                if explicit_fields:
+                    await asyncio.to_thread(self._check_field_names, model, parsed_fields)
                 if record_ids:
                     if explicit_fields:
                         # An explicit field list keeps an AccessError
@@ -2408,6 +2414,7 @@ class OdooToolHandler:
                 else:
                     # Specific fields requested
                     logger.debug(f"Fetching specific fields for {model}: {fields}")
+                    await asyncio.to_thread(self._check_field_names, model, fields)
 
                 # Read the record without binary payloads (see read_without_binary_payloads);
                 # populated binaries are swapped for odoo:// URIs below.
@@ -3038,6 +3045,7 @@ class OdooToolHandler:
                         values.get("res_model"), "attachment would be attached to"
                     )
 
+                await asyncio.to_thread(self._check_field_names, model, values)
                 record_id = await asyncio.to_thread(
                     self.connection.create, model, values, **context_kwargs(call_context)
                 )
@@ -3130,6 +3138,9 @@ class OdooToolHandler:
                             values.get("res_model"), "attachment would be attached to"
                         )
 
+                await asyncio.to_thread(
+                    self._check_field_names, model, {k for values in records for k in values}
+                )
                 record_ids = await asyncio.to_thread(
                     self.connection.create_many, model, records, **context_kwargs(call_context)
                 )
@@ -3232,7 +3243,7 @@ class OdooToolHandler:
                 )
                 if not existing_count:
                     raise NotFoundError(f"Record not found: {model} with ID {record_id}")
-                await asyncio.to_thread(self._check_write_fields, model, values)
+                await asyncio.to_thread(self._check_field_names, model, values)
 
                 # Update the record
                 success = await asyncio.to_thread(
@@ -3357,7 +3368,7 @@ class OdooToolHandler:
                 missing_ids = [rid for rid in record_ids if rid not in existing_ids]
                 if missing_ids:
                     raise NotFoundError(f"Record(s) not found: {model} with ID(s) {missing_ids}")
-                await asyncio.to_thread(self._check_write_fields, model, values)
+                await asyncio.to_thread(self._check_field_names, model, values)
 
                 success = await asyncio.to_thread(
                     self.connection.write, model, record_ids, values, **context_kwargs(call_context)
@@ -3490,7 +3501,7 @@ class OdooToolHandler:
                 if missing_ids:
                     raise NotFoundError(f"Record(s) not found: {model} with ID(s) {missing_ids}")
                 await asyncio.to_thread(
-                    self._check_write_fields, model, {k for v in vals_list for k in v}
+                    self._check_field_names, model, {k for v in vals_list for k in v}
                 )
 
                 try:
@@ -3583,7 +3594,8 @@ class OdooToolHandler:
 
                 result = {
                     "uri": uri,
-                    "name": meta.get("name"),
+                    # A field without a backing attachment is named after the field
+                    "name": meta.get("name") or (field_match.group(3) if field_match else None),
                     "mimetype": meta.get("mimetype"),
                     "size": meta.get("size"),
                     "download_url": download_url,
@@ -3602,7 +3614,9 @@ class OdooToolHandler:
                     if extracted and extracted != mimetype.split("/")[0]:
                         return self._attachment_text_result(result, extracted, "extracted_text")
                     return self._attachment_link_result(
-                        result, "Odoo extracted no text from this file."
+                        result,
+                        "Odoo extracted no text from this file. Odoo extracts PDF and "
+                        "Office text only with its attachment_indexation module.",
                     )
                 if mimetype and is_text_mimetype(mimetype):
                     if size is not None and size > READ_TEXT_MAX_BYTES:

@@ -27,6 +27,10 @@ class AccessControlError(Exception):
     pass
 
 
+class AccessControlModelNotFoundError(AccessControlError):
+    """The MCP module does not know the model (it is not installed)."""
+
+
 class AccessControlUnavailableError(AccessControlError):
     """Permission could not be EVALUATED (infrastructure failure).
 
@@ -45,10 +49,13 @@ def access_denied_message(error: Exception) -> str:
     The MCP module's own refusals are self-labelling ("Access denied: your
     user is not authorized for MCP..."), so the unconditional prefix the
     handlers used produced "Access denied: Access denied: ...". Prefix only
-    when the message does not already open with it.
+    when the message does not already open with it. A model the module does
+    not know is not an access problem and gets no prefix.
     """
     message = str(error).strip()
-    if message.lower().startswith("access denied"):
+    if isinstance(error, AccessControlModelNotFoundError) or message.lower().startswith(
+        "access denied"
+    ):
         return message
     return f"Access denied: {message}"
 
@@ -307,7 +314,7 @@ class AccessController:
                 # means the endpoint itself is missing.
                 message = http_error_message(e)
                 if message:
-                    raise AccessControlError(message) from e
+                    raise AccessControlModelNotFoundError(message) from e
                 raise AccessControlUnavailableError(f"Endpoint not found: {endpoint}") from e
             else:
                 raise AccessControlUnavailableError(f"HTTP error {e.code}: {e.reason}") from e
@@ -592,6 +599,11 @@ def check_domain_balance(domain: List[Any], path: str = "domain") -> None:
             # Odoo prepends an implicit "&" for a flat sequence of terms.
             expected = 1
         if isinstance(token, (list, tuple)):
+            if len(token) != 3:
+                raise ValidationError(
+                    f"Invalid domain condition {list(token)!r} at {path}[{index}]: a "
+                    "condition has three parts, ['field', 'operator', value]"
+                )
             expected -= 1
         elif token == "!":
             # Unary: consumes one expression and yields one.

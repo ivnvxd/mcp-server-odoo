@@ -17,6 +17,20 @@ class TestRecordFormatter:
         """Create a RecordFormatter instance."""
         return RecordFormatter("res.partner")
 
+    def test_a_false_boolean_reads_no(self, formatter):
+        """False on a boolean field is a value, not a missing one."""
+        record = {"id": 1, "name": "Archived", "active": False, "is_company": True}
+        fields_metadata = {
+            "active": {"type": "boolean", "string": "Active"},
+            "is_company": {"type": "boolean", "string": "Is a Company"},
+        }
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert "  active: No" in result
+        assert "  is_company: Yes" in result
+        assert "Not set" not in result
+
     def test_format_simple_record(self, formatter):
         """Test formatting a simple record."""
         record = {
