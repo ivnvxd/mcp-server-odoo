@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mcp_server_odoo.config import OdooConfig, load_config
-from mcp_server_odoo.odoo_connection import OdooConnection, OdooConnectionError
+from mcp_server_odoo.odoo_connection import (
+    OdooConnection,
+    OdooConnectionError,
+    OdooValidationFault,
+)
 
 
 @pytest.fixture
@@ -240,17 +244,23 @@ class TestLocaleConfig:
 class TestInvalidLangAttribution:
     """A caller-supplied bad lang must not disable ODOO_MCP_LOCALE process-wide."""
 
-    def test_caller_lang_failure_leaves_server_locale_intact(self, config_with_locale):
+    def test_caller_lang_failure_is_not_retried(self, config_with_locale):
+        """Retried without the lang, a write would land in the default language."""
         conn = OdooConnection(config_with_locale)
         mock_proxy = _make_connected(conn)
         mock_proxy.execute_kw.side_effect = [
             xmlrpc.client.Fault(2, "Invalid language code: xx_XX"),
-            [{"id": 1}],
+            True,
         ]
 
-        result = conn.execute_kw("res.partner", "search_read", [[]], {"context": {"lang": "xx_XX"}})
-
-        assert result == [{"id": 1}]
+        with pytest.raises(OdooValidationFault, match="Invalid language code: xx_XX"):
+            conn.execute_kw(
+                "product.template",
+                "write",
+                [[1], {"name": "Chaise"}],
+                {"context": {"lang": "xx_XX"}},
+            )
+        assert mock_proxy.execute_kw.call_count == 1
         assert conn.config.locale == "es_ES", "the configured locale was not at fault"
 
     def test_configured_locale_failure_still_disables_it(self, config_with_locale):

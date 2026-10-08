@@ -1179,6 +1179,21 @@ class OdooConnection:
                 "Provide either API key or username/password credentials."
             )
 
+    def user_company_ids(self) -> Optional[List[int]]:
+        """The companies of the connected user, or None when Odoo refuses the
+        read (standard mode may not allow res.users). Blocking.
+
+        Unscoped: with a foreign id in the context, Odoo refuses the read itself.
+        """
+        try:
+            user = self.execute_kw(
+                "res.users", "read", [[self.uid], ["company_ids"]], {}, scoped=False
+            )[0]
+        except OdooValidationFault as e:
+            logger.debug(f"Could not read the user's companies: {e}")
+            return None
+        return list(user.get("company_ids") or [])
+
     def check_allowed_companies(self) -> None:
         """Make sure every ODOO_ALLOWED_COMPANIES id is a company of the user (blocking).
 
@@ -1193,14 +1208,10 @@ class OdooConnection:
         configured = self.config.allowed_companies
         if not configured:
             return
-        try:
-            user = self.execute_kw(
-                "res.users", "read", [[self.uid], ["company_ids"]], {}, scoped=False
-            )[0]
-        except OdooValidationFault as e:
-            logger.warning(f"Could not read the user's companies for ODOO_ALLOWED_COMPANIES: {e}")
+        user_companies = self.user_company_ids()
+        if user_companies is None:
+            logger.warning("Could not read the user's companies for ODOO_ALLOWED_COMPANIES")
             return
-        user_companies = user.get("company_ids") or []
         foreign = [cid for cid in configured if cid not in user_companies]
         if foreign:
             raise OdooConnectionError(
@@ -1299,7 +1310,7 @@ class OdooConnection:
             args: List of positional arguments for the method
             kwargs: Dictionary of keyword arguments for the method
             scoped: Apply ODOO_ALLOWED_COMPANIES to the context. Only the
-                startup check of those companies turns it off.
+                read of the user's own companies turns it off.
 
         Returns:
             The result from Odoo
@@ -1395,27 +1406,21 @@ class OdooConnection:
             raise OdooConnectionError(f"Operation failed: {sanitized_message}") from e
 
     def _drop_invalid_lang(self, kwargs: Dict[str, Any]) -> bool:
-        """Remove the context lang after Odoo refused it; True when there was one.
+        """Remove the configured locale after Odoo refused it; True to retry.
 
-        Only blame (and permanently disable) the CONFIGURED locale when it is
-        actually the offending value: a caller-supplied context lang used to
-        null self.config.locale on the shared config, silently turning
-        ODOO_MCP_LOCALE off for every later request in the process.
+        Only the CONFIGURED locale is dropped, and then disabled for the
+        process. A lang the caller passed is not: retried without it, a write
+        would land in the default language and replace that value, so Odoo's
+        refusal reaches the caller instead.
         """
         context = kwargs.get("context") or {}
         bad_lang = context.get("lang")
-        if not bad_lang:
+        if not bad_lang or bad_lang != self.config.locale:
             return False
-        if bad_lang == self.config.locale:
-            logger.warning(
-                f"Locale '{bad_lang}' is not installed in Odoo. Falling back to default language."
-            )
-            self.config.locale = None
-        else:
-            logger.warning(
-                f"Language '{bad_lang}' requested for this call is not installed "
-                "in Odoo; retrying without it (server locale unchanged)."
-            )
+        logger.warning(
+            f"Locale '{bad_lang}' is not installed in Odoo. Falling back to default language."
+        )
+        self.config.locale = None
         context.pop("lang", None)
         return True
 

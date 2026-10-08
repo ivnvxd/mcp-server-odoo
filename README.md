@@ -345,7 +345,9 @@ user:
 ```
 
 At startup, the server makes sure that each ID is one of the user's companies, and it does not
-start otherwise. The first ID is the active company: Odoo uses it for create defaults, and
+start otherwise. If the user cannot read their own `res.users` record (standard mode without
+`res.users` enabled), the check is skipped with a warning, and Odoo refuses a foreign company on
+each call instead. The first ID is the active company: Odoo uses it for create defaults, and
 `get_current_context` and the session instructions show it. A call can narrow the scope to some of
 the listed companies, but never widen it.
 
@@ -534,7 +536,7 @@ YOLO mode allows the MCP server to connect directly to any standard Odoo instanc
 
 #### YOLO Mode Security Notes
 
-- Connects directly to Odoo's standard XML-RPC endpoints
+- Connects directly to Odoo's standard XML-RPC endpoints, or to JSON-2 (`/json/2`) on Odoo 19 and later with an API key (see `ODOO_RPC_TRANSPORT`)
 - Bypasses all MCP access controls and model restrictions
 - No rate limiting is applied
 - All operations are logged but not restricted
@@ -876,7 +878,7 @@ The server also provides direct access to Odoo data through resource URIs:
 
 **Examples:**
 - `odoo://res.partner/record/1` — Get partner with ID 1
-- `odoo://product.product/search` — List first 10 products
+- `odoo://product.product/search` — List the first products (`ODOO_MCP_DEFAULT_LIMIT`, 25 by default)
 - `odoo://res.partner/count` — Count all partners
 - `odoo://product.product/fields` — Show all fields for products
 - `odoo://res.partner/record/1/image_128` — Get partner 1's avatar image
@@ -896,11 +898,11 @@ Binary and attachment reads are served whole, up to `ODOO_MCP_MAX_BINARY_SIZE` (
 AI Assistant (Claude, Copilot, etc.)
         ↓ MCP Protocol (stdio or HTTP)
    mcp-server-odoo
-        ↓ XML-RPC
+        ↓ XML-RPC, or JSON-2 on Odoo 19+ in YOLO mode
    Odoo Instance
 ```
 
-The server translates MCP tool calls into Odoo XML-RPC requests. It handles authentication, access control, field selection, data formatting, and error handling — presenting Odoo data in an LLM-friendly hierarchical text format.
+The server translates MCP tool calls into Odoo XML-RPC requests, or JSON-2 requests on Odoo 19 and later in YOLO mode with an API key. It handles authentication, access control, field selection, data formatting, and error handling — presenting Odoo data in an LLM-friendly hierarchical text format.
 
 ## Security
 

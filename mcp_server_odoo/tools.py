@@ -642,29 +642,13 @@ class OdooToolHandler:
             if self.config.allowed_companies:
                 limit, source = self.config.allowed_companies, "ODOO_ALLOWED_COMPANIES"
             else:
-                limit, source = self._user_company_ids(), "the user's companies"
+                limit, source = self.connection.user_company_ids(), "the user's companies"
             outside = [c for c in companies if limit is not None and c not in limit]
             if outside:
                 raise ValidationError(
                     f"Companies {outside} are outside {source} {sorted(limit or [])}."
                 )
         return dict(context)
-
-    def _user_company_ids(self) -> Optional[List[int]]:
-        """The companies of the connected user, or None when Odoo refuses the
-        read (standard mode may not allow res.users). Blocking."""
-        try:
-            user = self.connection.execute_kw(
-                "res.users",
-                "read",
-                [[self.connection.uid], ["company_ids"]],
-                {},
-                scoped=False,
-            )[0]
-        except OdooValidationFault as e:
-            logger.debug(f"Could not read the user's companies: {e}")
-            return None
-        return list(user.get("company_ids") or [])
 
     def _check_domain_operators(self, domain: List[Any]) -> None:
         """Refuse 'any' and 'not any' before Odoo 17 (blocking: reads the version).
@@ -1117,10 +1101,6 @@ class OdooToolHandler:
                 f"Invalid field {', '.join(repr(name) for name in unknown)} on {model}: "
                 "it does not exist, or this user cannot see it"
             )
-
-    def _scrub_json_fields(self, model: str, records: List[Dict[str, Any]]) -> None:
-        """Replace object reprs in the json fields of ``records`` (in place, blocking)."""
-        scrub_json_fields(self.connection, model, records)
 
     def _check_aggregate_types(self, model: str, aggregates: List[str]) -> None:
         """Refuse an aggregate whose function does not fit the field type (blocking).
@@ -2285,7 +2265,7 @@ class OdooToolHandler:
                     if binary_names:
                         for record in records:
                             self._replace_binary_values(model, record, binary_names)
-                    await asyncio.to_thread(self._scrub_json_fields, model, records)
+                    await asyncio.to_thread(scrub_json_fields, self.connection, model, records)
                     # Process datetime fields in each record
                     records = await asyncio.to_thread(
                         lambda: [self._process_record_dates(record, model) for record in records]
@@ -2416,7 +2396,7 @@ class OdooToolHandler:
                 binary_names = await asyncio.to_thread(self._binary_field_names, model)
                 if binary_names:
                     self._replace_binary_values(model, record, binary_names, record_id=record_id)
-                await asyncio.to_thread(self._scrub_json_fields, model, [record])
+                await asyncio.to_thread(scrub_json_fields, self.connection, model, [record])
 
                 # Inline preview: resolve display names for small x2many
                 # collections (ids in the record stay untouched)

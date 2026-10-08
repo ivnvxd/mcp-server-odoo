@@ -153,7 +153,7 @@ __main__.py → OdooConfig → OdooMCPServer → OdooConnection → MCPServer
 | `error_handling.py` | Centralized error types and handler |
 | `error_sanitizer.py` | Strips sensitive data from error messages |
 
-The server operates in two modes: **Standard** (requires the Odoo MCP module with `/mcp/` endpoints) and **YOLO** (connects directly to `/xmlrpc/` endpoints, no module needed).
+The server operates in two modes: **Standard** (requires the Odoo MCP module with `/mcp/` endpoints) and **YOLO** (connects directly to `/xmlrpc/` endpoints, or to `/json/2` on Odoo 19 and later with an API key; no module needed).
 
 ## License
 

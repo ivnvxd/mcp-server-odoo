@@ -5419,12 +5419,25 @@ class TestOdoo20BinaryReads:
     @pytest.mark.asyncio
     async def test_non_stored_binary_gets_uri_without_search(self, handler, mock_connection):
         mock_connection.read.return_value = [{"id": 7}]
+        mock_connection.search.return_value = [7]
 
         result = await handler._handle_get_record_tool("res.partner", 7, ["avatar_128"])
 
         assert mock_connection.read.call_args[0][2] == ["id"]
         assert result.record["avatar_128"] == "odoo://res.partner/record/7/avatar_128"
-        mock_connection.search.assert_not_called()
+        # Only the existence check, no search for populated binaries
+        mock_connection.search.assert_called_once_with(
+            "res.partner", [["id", "in", [7]]], context={"active_test": False}
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_record_with_only_binary_fields(self, handler, mock_connection):
+        """Odoo 20 echoes a missing id back for a read of only "id"."""
+        mock_connection.read.return_value = [{"id": 999}]
+        mock_connection.search.return_value = []
+
+        with pytest.raises(ValidationError, match="Record not found"):
+            await handler._handle_get_record_tool("res.partner", 999, ["image_1920"])
 
     @pytest.mark.asyncio
     async def test_search_records_flags_each_record(self, handler, mock_connection):

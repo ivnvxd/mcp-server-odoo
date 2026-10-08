@@ -224,7 +224,13 @@ class Json2Client:
         if status in _UNAVAILABLE_HTTP_STATUSES:
             raise OdooUnreachableError(f"Odoo did not answer (HTTP {status})")
         if 300 <= status < 400:
-            raise OdooConnectionError(_redirect_message(status, headers))
+            # The target can be an internal host: the log names it, the
+            # client-facing error does not
+            logger.warning(_redirect_message(status, headers))
+            raise OdooConnectionError(
+                f"Odoo redirected the request (HTTP {status}). Set ODOO_URL to the address "
+                "it redirects to, which the server log names."
+            )
         error = _error_body(data)
         if error is None:
             raise Json2RouteError(f"Operation failed: HTTP {status} without a JSON error")

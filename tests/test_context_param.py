@@ -55,6 +55,8 @@ def connection():
         return []
 
     connection.execute_kw.side_effect = execute_kw
+    # The real read of the user's companies, through the execute_kw above
+    connection.user_company_ids.side_effect = lambda: OdooConnection.user_company_ids(connection)
     return connection
 
 

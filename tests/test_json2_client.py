@@ -388,7 +388,8 @@ class TestErrors:
         with pytest.raises(OdooConnectionError, match="HTTP 404 without a JSON error"):
             client_for(server).call("res.partner", "search", {})
 
-    def test_a_redirect_names_the_target(self, server):
+    def test_a_redirect_names_the_target_only_in_the_log(self, server, caplog):
+        """The target can be an internal host; the error reaches the client."""
         server.script = [
             {
                 "status": 301,
@@ -397,8 +398,10 @@ class TestErrors:
             }
         ]
 
-        with pytest.raises(OdooConnectionError, match="https://odoo.example.com"):
+        with pytest.raises(OdooConnectionError, match=r"redirected the request \(HTTP 301\)") as e:
             client_for(server).call("res.partner", "search", {})
+        assert "odoo.example.com" not in str(e.value)
+        assert "https://odoo.example.com" in caplog.text
 
     @staticmethod
     def _assert_no_sentinel(error):

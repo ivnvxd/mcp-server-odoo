@@ -47,12 +47,12 @@ def read_without_binary_payloads(
     """
     read_context = {**(context or {}), "bin_size": True}
     if not uses_odoo_20_binaries(connection):
-        return connection.read(model, ids, fields, read_context)
+        return _read(connection, model, ids, fields, read_context, context)
     try:
         fields_info = connection.fields_get(model)
     except Exception as e:
         logger.warning(f"Could not get field metadata for {model}; reading binaries as-is: {e}")
-        return connection.read(model, ids, fields, read_context)
+        return _read(connection, model, ids, fields, read_context, context)
 
     binary_names = {
         name for name, meta in fields_info.items() if (meta or {}).get("type") in BINARY_FIELD_TYPES
@@ -60,11 +60,11 @@ def read_without_binary_payloads(
     if fields is not None:
         binary_names &= set(fields)
     if not binary_names:
-        return connection.read(model, ids, fields, read_context)
+        return _read(connection, model, ids, fields, read_context, context)
 
     requested = fields if fields is not None else list(fields_info)
     readable = [name for name in requested if name not in binary_names] or ["id"]
-    records = connection.read(model, ids, readable, read_context)
+    records = _read(connection, model, ids, readable, read_context, context)
 
     for name in binary_names:
         # Absent metadata means stored, per fields_get's own default
@@ -90,3 +90,27 @@ def read_without_binary_payloads(
                 # A field name the URI grammar rejects has no servable URI
                 logger.debug(f"No binary URI for {model}.{name}; leaving it out")
     return records
+
+
+def _read(
+    connection: Any,
+    model: str,
+    ids: List[int],
+    fields: Optional[List[str]],
+    read_context: Dict[str, Any],
+    context: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """``read``, minus the ids that do not exist when only ``id`` is read (blocking).
+
+    A read of only "id" never touches the table, so Odoo echoes a missing id
+    back instead of failing.
+    """
+    records = connection.read(model, ids, fields, read_context)
+    if fields != ["id"]:
+        return records
+    existing = set(
+        connection.search(
+            model, [["id", "in", ids]], context={**(context or {}), "active_test": False}
+        )
+    )
+    return [record for record in records if record.get("id") in existing]
