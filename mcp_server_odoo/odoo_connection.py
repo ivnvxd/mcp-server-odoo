@@ -1171,8 +1171,9 @@ class OdooConnection:
         foreign = [cid for cid in configured if cid not in user_companies]
         if foreign:
             raise OdooConnectionError(
-                f"ODOO_ALLOWED_COMPANIES names companies the user cannot access: {foreign}. "
-                f"The user's companies are {sorted(user_companies)}."
+                "ODOO_ALLOWED_COMPANIES names companies the user cannot access: "
+                f"{', '.join(map(str, foreign))}. The user's companies are "
+                f"{', '.join(map(str, sorted(user_companies)))}."
             )
 
     def _database_may_exist(self, database: str) -> bool:

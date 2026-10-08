@@ -18,8 +18,10 @@ from .config import OdooConfig, get_config
 from .error_handling import (
     ConfigurationError,
     ErrorContext,
+    MCPConnectionError,
     error_handler,
 )
+from .error_sanitizer import ErrorSanitizer
 from .logging_config import get_logger, logging_config, perf_logger
 from .odoo_connection import OdooConnection, OdooConnectionError, OdooUnreachableError
 from .performance import PerformanceManager
@@ -191,12 +193,22 @@ class OdooMCPServer:
         call_tool = app.call_tool
         read_resource = app.read_resource
 
+        async def connected():
+            # A connection failure is the request's error, not an unexpected
+            # exception: mcp 2.2 logs those with a traceback on every call
+            # while Odoo is down. The text is sanitized because it can carry
+            # the Odoo URL and port, which a remote HTTP client must not see.
+            try:
+                await self.ensure_connected()
+            except OdooConnectionError as e:
+                raise MCPConnectionError(ErrorSanitizer.sanitize_message(str(e))) from e
+
         async def guarded_call_tool(name, arguments, context=None):
-            await self.ensure_connected()
+            await connected()
             return await call_tool(name, arguments, context)
 
         async def guarded_read_resource(uri, context=None):
-            await self.ensure_connected()
+            await connected()
             return await read_resource(uri, context)
 
         # Instance attributes shadow the methods for this app only

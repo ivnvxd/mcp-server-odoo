@@ -1236,6 +1236,24 @@ class TestOdooLifecycle:
 
         assert {"search_records", "get_record"} <= {tool.name for tool in tools}
 
+    async def test_a_request_while_odoo_is_down_is_a_plain_tool_error(self, server, caplog):
+        """The text reaches the client, without a traceback logged per call."""
+        from mcp import Client
+
+        server._fake.outcome = OdooUnreachableError("Cannot reach Odoo at http://localhost:8069")
+
+        async with Client(server.app, mode="legacy") as client:
+            result = await client.call_tool("list_models", {})
+            with pytest.raises(Exception, match="Cannot reach Odoo"):
+                await client.read_resource("odoo://res.partner/count")
+
+        assert result.is_error
+        text = result.content[0].text
+        assert "Cannot reach Odoo" in text
+        # The URL and port stay out of what a (remote HTTP) client sees
+        assert "localhost:8069" not in text
+        assert "unexpected exception" not in caplog.text
+
     def test_unreachable_odoo_keeps_http_up(self, server):
         server._fake.outcome = OdooUnreachableError("Cannot reach Odoo at http://localhost:8069")
 

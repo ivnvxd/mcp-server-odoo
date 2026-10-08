@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tool step messages**: they go to the server log only. mcp 2.x deprecates log notifications to the client.
 
 ### Fixed
+- **Requests while Odoo is down**: they return the connection error as the tool or resource error, without a traceback in the log for each call. The JSON-2 messages no longer repeat "Cannot connect to Odoo", and a refused API key mentions the `rpc` scope that Odoo 20 needs.
 - **`any` and `not any` on Odoo 16**: Odoo 16 failed such a domain with "unhashable type: 'list'", shown as a connection error. `search_records` and `aggregate_records` now refuse it with a clear message that suggests a dotted path.
 - **`aggregate_records` count on Odoo 16 to 18**: a count without other aggregates sent `read_group` an empty field list. Odoo 16 then failed without a `groupby`, and aggregated every numeric field with one.
 - **Typed tool schemas**: `domain`, `fields`, `arguments` and `keyword_arguments` had an untyped or multi-type schema, which Gemini, VS Code and other strict clients reject. They now have a typed schema, and the tools still accept the same input, strings included. `groupby` and `aggregates` also take a bare string, and `post_message` takes `subtype` and `message_type` in any letter case.

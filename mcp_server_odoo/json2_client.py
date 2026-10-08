@@ -201,7 +201,13 @@ class Json2Client:
     def _network_message(error: BaseException) -> str:
         if isinstance(error, socket.gaierror):
             return "Cannot connect to Odoo: the host name does not resolve"
-        return f"Cannot connect to Odoo: {ErrorSanitizer.sanitize_message(str(error) or type(error).__name__)}"
+        detail = ErrorSanitizer.sanitize_message(str(error) or type(error).__name__)
+        # The sanitizer already words a refused connection as "Cannot connect to Odoo server"
+        return (
+            detail
+            if detail.startswith("Cannot connect to Odoo")
+            else f"Cannot connect to Odoo: {detail}"
+        )
 
     def _raise_for_status(
         self, status: int, headers: http.client.HTTPMessage, data: bytes
@@ -218,7 +224,9 @@ class Json2Client:
         short_name = name.rsplit(".", 1)[-1]
         if status == 401:
             raise OdooConnectionError(
-                f"Authentication failed: Odoo refused the API key ({ErrorSanitizer.sanitize_message(message)})"
+                f"Authentication failed: Odoo refused the API key "
+                f"({ErrorSanitizer.sanitize_message(message)}). On Odoo 20 and later the key "
+                "needs the rpc scope."
             )
         if short_name == "AccessDenied":
             code, fault_string = _FAULT_ACCESS_DENIED, message

@@ -771,7 +771,9 @@ class TestCheckAllowedCompanies:
         conn.config.allowed_companies = [1, 9]
         conn._object_proxy.execute_kw.return_value = [{"id": 2, "company_ids": [2, 1]}]
 
-        with pytest.raises(OdooConnectionError, match=r"cannot access: \[9\].*\[1, 2\]"):
+        with pytest.raises(
+            OdooConnectionError, match=r"cannot access: 9\. The user.s companies are 1, 2\."
+        ):
             conn.check_allowed_companies()
 
     def test_a_refused_read_skips_the_check(self, connected_connection, caplog):

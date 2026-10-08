@@ -224,8 +224,9 @@ class TestRetry:
             port = probe.getsockname()[1]
         client = Json2Client(f"http://127.0.0.1:{port}", "key", "odoo", 1.0)
 
-        with pytest.raises(OdooUnreachableError, match="Cannot connect to Odoo"):
+        with pytest.raises(OdooUnreachableError, match="Cannot connect to Odoo") as caught:
             client.call("res.partner", "search", {})
+        assert str(caught.value).count("Cannot connect to Odoo") == 1
 
 
 # (status, Odoo error body, exception, message part, fault code), from Odoo 20
@@ -337,6 +338,7 @@ class TestErrors:
         with pytest.raises(OdooConnectionError, match="refused the API key") as caught:
             client_for(server).call("res.partner", "search", {})
         assert not isinstance(caught.value, OdooValidationFault)
+        assert "needs the rpc scope" in str(caught.value)
         self._assert_no_sentinel(caught.value)
 
     def test_access_denied_stays_connection_flavored(self, server):
