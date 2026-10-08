@@ -647,11 +647,11 @@ class TestFaultCodeClassification:
         [(2, "RPC_FAULT_CODE_WARNING"), (4, "RPC_FAULT_CODE_ACCESS_ERROR")],
     )
     def test_business_codes_surface_without_connection_prefix(self, code, label):
-        from mcp_server_odoo.odoo_connection import _raise_for_fault
+        from mcp_server_odoo.odoo_errors import raise_for_fault
 
         fault = xmlrpc.client.Fault(code, "You cannot create recursive Partner hierarchies.")
         with pytest.raises(OdooValidationFault) as exc:
-            _raise_for_fault(fault)
+            raise_for_fault(fault)
 
         message = str(exc.value)
         assert message == "You cannot create recursive Partner hierarchies."
@@ -672,10 +672,10 @@ class TestFaultCodeClassification:
     )
     def test_mcp_module_codes_keep_the_module_text(self, code, text):
         """The MCP module's proxy sends 400/403/429 with an explanation for the user."""
-        from mcp_server_odoo.odoo_connection import _raise_for_fault
+        from mcp_server_odoo.odoo_errors import raise_for_fault
 
         with pytest.raises(OdooValidationFault) as exc:
-            _raise_for_fault(xmlrpc.client.Fault(code, text))
+            raise_for_fault(xmlrpc.client.Fault(code, text))
 
         assert str(exc.value) == text
 
@@ -694,38 +694,38 @@ class TestFaultCodeClassification:
     )
     def test_business_fault_keeps_its_code(self, fault):
         """The read path tells an AccessError (4) apart by the code."""
-        from mcp_server_odoo.odoo_connection import _raise_for_fault
+        from mcp_server_odoo.odoo_errors import raise_for_fault
 
         with pytest.raises(OdooValidationFault) as exc:
-            _raise_for_fault(fault)
+            raise_for_fault(fault)
 
         assert exc.value.fault_code == fault.faultCode
 
     def test_access_denied_code_stays_connection_flavored(self):
         """faultCode 3 is a rejected login — auth setup, not a record rule."""
-        from mcp_server_odoo.odoo_connection import _raise_for_fault
+        from mcp_server_odoo.odoo_errors import raise_for_fault
 
         fault = xmlrpc.client.Fault(3, "Access Denied")
         with pytest.raises(OdooConnectionError) as exc:
-            _raise_for_fault(fault)
+            raise_for_fault(fault)
         assert not isinstance(exc.value, OdooValidationFault)
         assert "Operation failed" in str(exc.value)
 
     def test_application_error_code_stays_connection_flavored(self):
-        from mcp_server_odoo.odoo_connection import _raise_for_fault
+        from mcp_server_odoo.odoo_errors import raise_for_fault
 
         fault = xmlrpc.client.Fault(1, "Traceback (most recent call last):\nValueError: boom")
         with pytest.raises(OdooConnectionError) as exc:
-            _raise_for_fault(fault)
+            raise_for_fault(fault)
         assert not isinstance(exc.value, OdooValidationFault)
 
     def test_non_integer_fault_code_falls_back_to_string_routing(self):
         """Legacy /xmlrpc/1 sends string fault codes — must not crash."""
-        from mcp_server_odoo.odoo_connection import _raise_for_fault
+        from mcp_server_odoo.odoo_errors import raise_for_fault
 
         fault = xmlrpc.client.Fault("warning -- MissingError", "gone")
         with pytest.raises(OdooConnectionError):
-            _raise_for_fault(fault)
+            raise_for_fault(fault)
 
 
 class TestLogRedactionUsesCentralDetector:

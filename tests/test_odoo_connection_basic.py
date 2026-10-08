@@ -18,9 +18,9 @@ from mcp_server_odoo.odoo_connection import (
     OdooConnection,
     OdooConnectionError,
     OdooUnreachableError,
-    _is_unreachable,
     create_connection,
 )
+from mcp_server_odoo.odoo_errors import is_unreachable
 
 
 @pytest.fixture
@@ -507,7 +507,7 @@ class TestUnreachableClassification:
         ],
     )
     def test_network_and_gateway_errors_are_unreachable(self, error):
-        assert _is_unreachable(error) is True
+        assert is_unreachable(error) is True
 
     @pytest.mark.parametrize(
         "error",
@@ -519,7 +519,7 @@ class TestUnreachableClassification:
         ],
     )
     def test_refusals_are_not_unreachable(self, error):
-        assert _is_unreachable(error) is False
+        assert is_unreachable(error) is False
 
     def test_connect_raises_unreachable_when_odoo_does_not_answer(self):
         config = OdooConfig(url="http://odoo.test:8069", api_key="k", database="db")

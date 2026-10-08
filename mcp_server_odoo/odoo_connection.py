@@ -4,7 +4,6 @@ This module provides the OdooConnection class for managing connections
 to Odoo via XML-RPC using MCP-specific endpoints.
 """
 
-import http.client
 import json
 import logging
 import socket
@@ -13,17 +12,41 @@ import urllib.error
 import urllib.request
 import xmlrpc.client
 from contextlib import contextmanager, suppress
-from typing import TYPE_CHECKING, Any, Dict, List, NoReturn, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
-from .access_control import _http_error_message
 from .config import OdooConfig
 from .error_sanitizer import ErrorSanitizer
 from .field_security import is_sensitive_field_name
-from .performance import PerformanceManager
+from .json2_client import (
+    Json2AuthError,
+    Json2Client,
+    Json2RouteError,
+    Json2UnavailableError,
+    json2_arguments,
+)
 
-if TYPE_CHECKING:
-    from .json2_client import Json2Client
+# The errors live in odoo_errors; re-exported here for existing importers
+from .odoo_errors import (
+    ACCESS_DENIED_FAULT_CODE as ACCESS_DENIED_FAULT_CODE,
+)
+from .odoo_errors import (
+    ACCESS_ERROR_FAULT_CODE as ACCESS_ERROR_FAULT_CODE,
+)
+from .odoo_errors import (
+    MCP_MODULE_REFUSAL_FAULT_CODES,
+    WARNING_FAULT_CODE,
+    OdooConnectionError,
+    OdooUnreachableError,
+    OdooValidationFault,
+    http_error_message,
+    is_unreachable,
+    raise_for_fault,
+)
+from .odoo_errors import (
+    OdooRequestFault as OdooRequestFault,
+)
+from .performance import PerformanceManager
 
 logger = logging.getLogger(__name__)
 
@@ -98,122 +121,6 @@ def _describe_args(args: Any) -> Any:
         return value
 
     return summarize(redacted)
-
-
-class OdooConnectionError(Exception):
-    """Base exception for Odoo connection errors."""
-
-    pass
-
-
-class OdooUnreachableError(OdooConnectionError):
-    """Odoo did not answer: a network failure, a timeout or a gateway error.
-
-    Unlike a refused login or a configuration problem, this can pass on its
-    own, so the server keeps running and connects on a later request.
-    """
-
-    pass
-
-
-# Gateway answers that mean "Odoo behind me is not answering"
-_UNAVAILABLE_HTTP_STATUSES = frozenset({502, 503, 504})
-
-
-def _is_unreachable(exc: BaseException) -> bool:
-    """True when ``exc`` means Odoo did not answer, not that it refused."""
-    if isinstance(exc, urllib.error.HTTPError):
-        return exc.code in _UNAVAILABLE_HTTP_STATUSES
-    if isinstance(exc, xmlrpc.client.ProtocolError):
-        return exc.errcode in _UNAVAILABLE_HTTP_STATUSES
-    # OSError covers refused connections, timeouts, DNS failures and URLError
-    return isinstance(exc, (OSError, http.client.HTTPException))
-
-
-class OdooRequestFault(OdooConnectionError):  # noqa: N818 — "Fault" mirrors xmlrpc.client.Fault
-    """Odoo answered the request with an error that is not a business error.
-
-    For example a ValueError for a bad domain operator, or a KeyError for an
-    unknown field. Odoo did answer, so handlers show the message without a
-    connection-error prefix, as they do for ``OdooValidationFault``. It stays
-    a sibling of that class so the startup checks that tolerate business
-    errors still stop on this one.
-    """
-
-
-class OdooValidationFault(OdooConnectionError):  # noqa: N818 — "Fault" mirrors xmlrpc.client.Fault
-    """An XML-RPC fault carrying a user-facing business error.
-
-    Raised when the fault string identifies a validation-class Odoo
-    exception (UserError, ValidationError, MissingError, a leading
-    AccessError, ...) rather than a transport problem. Subclasses
-    OdooConnectionError so every existing ``except OdooConnectionError``
-    ladder keeps working unchanged; handlers list it first to surface the
-    message without a connection-error prefix.
-
-    ``fault_code`` is the XML-RPC fault code, when there was one. The read
-    path uses it to tell an AccessError (``ACCESS_ERROR_FAULT_CODE``) apart.
-    """
-
-    def __init__(self, message: str, fault_code: Optional[int] = None):
-        super().__init__(message)
-        self.fault_code = fault_code
-
-
-# Odoo's ``/xmlrpc/2/*`` endpoint classifies exceptions for us in the fault
-# CODE, and sends the author-written message bare — no class prefix, no
-# traceback (see odoo/addons/rpc/controllers/xmlrpc.py:
-# xmlrpc_handle_exception_int). Routing on the code is therefore the only
-# reliable classification for YOLO mode; the string heuristics below cannot
-# see a class name that is never sent.
-#   2 = RPC_FAULT_CODE_WARNING          -> UserError / ValidationError
-#   4 = RPC_FAULT_CODE_ACCESS_ERROR     -> AccessError (record rules / ACLs)
-# 3 (ACCESS_DENIED) is deliberately absent: a rejected login is auth setup,
-# not a business rule, and must keep reading as a connection problem.
-# Standard mode goes through the MCP module's own proxy. Its 20.0 line (and
-# later backports) sends the same codes as core for Odoo user errors, so the
-# code route works there too. Older module versions re-wrap every exception
-# as faultCode 500 ("Internal Server Error in MCPObjectController: ..."); that
-# envelope carries no exception class, so business errors keep reading as
-# connection failures against them.
-_ODOO_BUSINESS_FAULT_CODES = frozenset({2, 4})
-ACCESS_ERROR_FAULT_CODE = 4
-ACCESS_DENIED_FAULT_CODE = 3
-WARNING_FAULT_CODE = 2
-
-# HTTP-style codes the MCP module's proxy uses for its own refusals, each with
-# a message meant for the user: 400 (a call for another database than the
-# request's), 403 (not in the MCP User group, model not enabled), 429 (rate
-# limit). Shown as-is instead of as a transport failure.
-_MCP_MODULE_REFUSAL_FAULT_CODES = frozenset({400, 403, 429})
-
-
-def _raise_for_fault(fault: xmlrpc.client.Fault) -> NoReturn:
-    """Wrap an application-level XML-RPC fault, classifying validation-class
-    business errors so they don't read as connection problems.
-
-    Classification is code-first (``_ODOO_BUSINESS_FAULT_CODES``) because
-    that is what Odoo actually sends; the message-shape heuristics remain as
-    the fallback for proxies that do not preserve Odoo's codes. Everything
-    unclassified raises ``OdooRequestFault``: Odoo answered, so it is not a
-    connection error either.
-    """
-    if fault.faultCode in _ODOO_BUSINESS_FAULT_CODES | _MCP_MODULE_REFUSAL_FAULT_CODES:
-        # Transport says business: keep the message's prose and line
-        # structure instead of running the traceback-shaped reduction.
-        raise OdooValidationFault(
-            ErrorSanitizer.sanitize_business_fault(fault.faultString), fault.faultCode
-        ) from fault
-
-    sanitized_message = ErrorSanitizer.sanitize_xmlrpc_fault(fault.faultString)
-    # Older MCP modules wrap every exception as "Internal Server Error in <message>"
-    sanitized_message = sanitized_message.removeprefix("Internal Server Error in ")
-    if ErrorSanitizer.is_business_fault(fault.faultString):
-        raise OdooValidationFault(sanitized_message, fault.faultCode) from fault
-    if fault.faultCode == ACCESS_DENIED_FAULT_CODE:
-        # A rejected login is auth setup, still a connection problem
-        raise OdooConnectionError(f"Operation failed: {sanitized_message}") from fault
-    raise OdooRequestFault(f"Odoo error: {sanitized_message}") from fault
 
 
 def context_kwargs(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -373,9 +280,6 @@ class OdooConnection:
             return
 
         if self._wants_json2():
-            # Imported here: json2_client imports this module
-            from .json2_client import Json2UnavailableError
-
             try:
                 self._connect_json2()
                 return
@@ -485,8 +389,6 @@ class OdooConnection:
         The database is chosen in ``authenticate()``, which sets it on the
         client's ``X-Odoo-Database`` header.
         """
-        # Imported here: json2_client imports this module
-        from .json2_client import Json2Client, Json2UnavailableError
 
         self._json2 = Json2Client(self.config.url, self.config.api_key or "", None, self.timeout)
         try:
@@ -527,7 +429,7 @@ class OdooConnection:
             self._server_version = version.get("server_version", "") if version else None
             logger.debug(f"Server version: {version}")
         except Exception as e:
-            if _is_unreachable(e):
+            if is_unreachable(e):
                 raise OdooUnreachableError(
                     f"Cannot reach Odoo at {self._url_components['base_url']}: {e}"
                 ) from e
@@ -697,7 +599,7 @@ class OdooConnection:
             if self._json2 is not None:
                 # No XML-RPC on the JSON-2 path, so no /xmlrpc/db fallback
                 logger.error(f"Failed to list databases: {e}")
-                if _is_unreachable(e):
+                if is_unreachable(e):
                     raise OdooUnreachableError(
                         f"Cannot reach Odoo at {self._url_components['base_url']}: {e}"
                     ) from e
@@ -705,7 +607,7 @@ class OdooConnection:
             # Route blocked by a proxy, listing disabled (list_db = False), or
             # an unexpected body: /xmlrpc/db still answers on Odoo 19 and older.
             logger.debug(f"/web/database/list failed ({e}); falling back to /xmlrpc/db")
-            web_unreachable = _is_unreachable(e)
+            web_unreachable = is_unreachable(e)
 
         try:
             # Call list_db method on database proxy
@@ -728,7 +630,7 @@ class OdooConnection:
             raise OdooConnectionError(DATABASE_LISTING_FAILED) from e
         except Exception as e:
             logger.error(f"Failed to list databases: {e}")
-            if web_unreachable and _is_unreachable(e):
+            if web_unreachable and is_unreachable(e):
                 raise OdooUnreachableError(
                     f"Cannot reach Odoo at {self._url_components['base_url']}: {e}"
                 ) from e
@@ -918,7 +820,7 @@ class OdooConnection:
                 logger.warning(f"YOLO mode: Authentication error: {e.faultString}")
             return False
         except Exception as e:
-            if _is_unreachable(e):
+            if is_unreachable(e):
                 raise OdooUnreachableError(f"Failed to authenticate: {e}") from e
             logger.error(f"YOLO mode: Unexpected authentication error: {e}")
             return False
@@ -974,13 +876,13 @@ class OdooConnection:
                 # A valid key whose user is refused, e.g. not in the MCP User
                 # group: the module says why, and a password fallback would
                 # hit the same gate.
-                reason = _http_error_message(e)
+                reason = http_error_message(e)
                 reason = ErrorSanitizer.sanitize_business_fault(reason) if reason else "HTTP 403"
                 logger.error(f"MCP API key refused: {reason}")
                 raise OdooConnectionError(f"Failed to validate API key: {reason}") from e
             else:
                 logger.error(f"HTTP error during MCP API key validation: {e}")
-                error_class = OdooUnreachableError if _is_unreachable(e) else OdooConnectionError
+                error_class = OdooUnreachableError if is_unreachable(e) else OdooConnectionError
                 raise error_class(f"Failed to validate API key: HTTP {e.code}") from e
         except urllib.error.URLError as e:
             logger.error(f"Network error during MCP API key validation: {e}")
@@ -1047,7 +949,7 @@ class OdooConnection:
                 return False
 
         except xmlrpc.client.Fault as e:
-            if e.faultCode in _MCP_MODULE_REFUSAL_FAULT_CODES:
+            if e.faultCode in MCP_MODULE_REFUSAL_FAULT_CODES:
                 # The MCP module refused a verified login (e.g. not in the MCP
                 # User group) and says why
                 reason = ErrorSanitizer.sanitize_business_fault(e.faultString)
@@ -1057,7 +959,7 @@ class OdooConnection:
             return False
         except Exception as e:
             logger.error(f"Error during password authentication: {e}")
-            error_class = OdooUnreachableError if _is_unreachable(e) else OdooConnectionError
+            error_class = OdooUnreachableError if is_unreachable(e) else OdooConnectionError
             raise error_class(f"Failed to authenticate: {e}") from e
 
     def authenticate(self, database: Optional[str] = None) -> None:
@@ -1082,9 +984,6 @@ class OdooConnection:
             db_name = self.auto_select_database()
 
         if self._json2 is not None:
-            # Imported here: json2_client imports this module
-            from .json2_client import Json2AuthError, Json2RouteError
-
             try:
                 self._authenticate_json2(db_name)
                 return
@@ -1401,7 +1300,7 @@ class OdooConnection:
             logger.error(f"XML-RPC fault during {method} on {model}: {e}")
             # Sanitize and classify: business errors raise OdooValidationFault,
             # everything else OdooRequestFault
-            _raise_for_fault(e)
+            raise_for_fault(e)
         except socket.timeout:
             logger.error(f"Timeout during {method} on {model}")
             raise OdooConnectionError(f"Operation timeout after {self.timeout} seconds") from None
@@ -1448,7 +1347,6 @@ class OdooConnection:
         The result has XML-RPC's shape: JSON-2 returns a created record as a
         one-item id list, and XML-RPC returns the id when one dict was given.
         """
-        from .json2_client import json2_arguments
 
         assert self._json2 is not None
         if logger.isEnabledFor(logging.DEBUG):

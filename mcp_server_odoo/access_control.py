@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .config import OdooConfig
 from .error_handling import ValidationError
+from .odoo_errors import http_error_message
 
 logger = logging.getLogger(__name__)
 
@@ -50,27 +51,6 @@ def access_denied_message(error: Exception) -> str:
     if message.lower().startswith("access denied"):
         return message
     return f"Access denied: {message}"
-
-
-def _http_error_message(error: urllib.error.HTTPError) -> Optional[str]:
-    """Extract the MCP module's own error message from an HTTPError body.
-
-    The module answers failures with
-    ``{"success": false, "error": {"message": ..., "code": ...}}``. Reading
-    that message keeps its diagnosis ("Model 'x' is not enabled for MCP
-    access.") instead of replacing it with a generic one.
-
-    Returns None when the body is missing, unreadable, not that shape, or
-    carries a blank message — the caller then falls back to its own wording.
-    The body can only be consumed once, so this is called at most once per
-    error.
-    """
-    try:
-        payload = json.loads(error.read().decode("utf-8"))
-        message = payload.get("error", {}).get("message")
-    except Exception:
-        return None
-    return message.strip() if isinstance(message, str) and message.strip() else None
 
 
 @dataclass
@@ -319,13 +299,13 @@ class AccessController:
                 # not enabled for MCP access."); a generic message here sends
                 # users hunting a credential problem that does not exist.
                 raise AccessControlError(
-                    _http_error_message(e) or "Access denied to MCP endpoints"
+                    http_error_message(e) or "Access denied to MCP endpoints"
                 ) from e
             elif e.code == 404:
                 # The module answers an unknown model with its own 404 message
                 # ("Model 'x' not found in Odoo instance."). A 404 without it
                 # means the endpoint itself is missing.
-                message = _http_error_message(e)
+                message = http_error_message(e)
                 if message:
                     raise AccessControlError(message) from e
                 raise AccessControlUnavailableError(f"Endpoint not found: {endpoint}") from e

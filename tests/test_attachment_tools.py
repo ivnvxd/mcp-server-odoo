@@ -346,6 +346,50 @@ class TestReadAttachment:
         assert image.mime_type == "image/png"
         assert base64.b64decode(image.data) == self.PNG
 
+    async def test_an_image_type_a_model_api_refuses_is_only_linked(self, handler, connection):
+        """The Claude API takes PNG, JPEG, GIF and WebP image blocks only."""
+        meta = {"name": "a.bmp", "mimetype": "image/bmp", "file_size": 90, "type": "binary"}
+        self._serve(handler, connection, meta)
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "link"
+        assert "image/bmp images are returned as a link" in result.structured_content["note"]
+        handler.app.read_resource.assert_not_awaited()
+
+    async def test_the_image_type_comes_from_the_bytes(self, handler, connection):
+        """Odoo takes the mimetype from the file name: a JPEG named a.png."""
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 16
+        meta = {"name": "a.png", "mimetype": "image/png", "file_size": len(jpeg), "type": "binary"}
+        self._serve(handler, connection, meta, jpeg, "image/png")
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.content[1].mime_type == "image/jpeg"
+        assert result.structured_content["mimetype"] == "image/jpeg"
+
+    async def test_webp_is_inlined(self, handler, connection):
+        webp = b"RIFF\x10\x00\x00\x00WEBPVP8 " + b"\x00" * 8
+        meta = {
+            "name": "a.webp",
+            "mimetype": "image/webp",
+            "file_size": len(webp),
+            "type": "binary",
+        }
+        self._serve(handler, connection, meta, webp, "image/webp")
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.content[1].mime_type == "image/webp"
+
+    async def test_bytes_of_an_unknown_image_type_are_only_linked(self, handler, connection):
+        meta = {"name": "a.png", "mimetype": "image/png", "file_size": 20, "type": "binary"}
+        self._serve(handler, connection, meta, b"II*\x00" + b"\x00" * 16, "image/png")
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "link"
+
     async def test_large_image_is_only_linked(self, handler, connection):
         meta = {"name": "big.png", "mimetype": "image/png", "file_size": 900_000, "type": "binary"}
         self._serve(handler, connection, meta)

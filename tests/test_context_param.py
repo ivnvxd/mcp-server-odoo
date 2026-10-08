@@ -213,11 +213,14 @@ class TestLang:
         connection.write.assert_not_called()
 
     async def test_an_installed_lang_passes(self, handler, connection):
+        connection.search_read.return_value = [{"code": "en_US"}, {"code": "fr_FR"}]
+
         await handler._handle_update_record_tool(
-            "x.model", 7, {"name": "Chair"}, context={"lang": "en_US"}
+            "x.model", 7, {"name": "Chaise"}, context={"lang": "fr_FR"}
         )
 
         assert connection.write.called
+        assert connection.search_read.call_count == 1
 
     async def test_a_lang_installed_since_the_cache_passes(self, handler, connection):
         handler._active_langs = {"en_US"}

@@ -49,6 +49,7 @@ from .error_handling import (
 )
 from .error_sanitizer import ErrorSanitizer
 from .field_security import is_sensitive_field_name, strip_sensitive_fields, withheld_note
+from .file_types import inline_image_type, is_inline_image_type, is_text_mimetype
 from .formatters import MAX_RELATED_ITEMS
 from .json_values import scrub_json_fields
 from .logging_config import get_logger, perf_logger
@@ -61,7 +62,6 @@ from .odoo_connection import (
     OdooValidationFault,
     context_kwargs,
 )
-from .resources import _is_text_mimetype
 from .schemas import (
     AggregateResult,
     AttachmentListResult,
@@ -1908,7 +1908,7 @@ class OdooToolHandler:
             - text files up to 1 MB: their text, cut at 100,000 characters
             - PDF and Office files: the text Odoo extracted from them (only
               with Odoo's attachment_indexation module), else a download link
-            - images up to 256 KB: the image itself
+            - PNG, JPEG, GIF and WebP images up to 256 KB: the image itself
             - anything else: a download link for a person logged in to Odoo
 
             Args:
@@ -3608,10 +3608,14 @@ class OdooToolHandler:
                     return self._attachment_link_result(
                         result, "Odoo extracted no text from this file."
                     )
-                if mimetype and _is_text_mimetype(mimetype):
+                if mimetype and is_text_mimetype(mimetype):
                     if size is not None and size > READ_TEXT_MAX_BYTES:
                         return self._attachment_link_result(result, _TEXT_TOO_LARGE)
                 elif mimetype.startswith("image/"):
+                    if not is_inline_image_type(mimetype):
+                        return self._attachment_link_result(
+                            result, f"{mimetype} images are returned as a link."
+                        )
                     if size is not None and size > READ_IMAGE_MAX_BYTES:
                         return self._attachment_link_result(result, _IMAGE_TOO_LARGE)
                 elif mimetype:
@@ -3627,18 +3631,22 @@ class OdooToolHandler:
                 if isinstance(content, str):
                     return self._attachment_text_result(result, content, "text")
                 result["size"] = len(content)
-                if mimetype.startswith("image/") and len(content) <= READ_IMAGE_MAX_BYTES:
+                # The type of an image block comes from its bytes: a model API
+                # refuses a request whose image type is wrong or unsupported
+                image_type = inline_image_type(content)
+                if image_type and len(content) <= READ_IMAGE_MAX_BYTES:
                     payload = base64.b64encode(content).decode("ascii")
                     return self._attachment_result(
-                        {**result, "kind": "image"},
-                        ImageContent(type="image", data=payload, mime_type=mimetype),
+                        {**result, "mimetype": image_type, "kind": "image"},
+                        ImageContent(type="image", data=payload, mime_type=image_type),
                     )
-                return self._attachment_link_result(
-                    result,
-                    _IMAGE_TOO_LARGE
-                    if mimetype.startswith("image/")
-                    else f"{mimetype} files are returned as a link.",
-                )
+                if image_type:
+                    why = _IMAGE_TOO_LARGE
+                elif mimetype.startswith("image/"):
+                    why = f"{mimetype} images are returned as a link."
+                else:
+                    why = f"{mimetype} files are returned as a link."
+                return self._attachment_link_result(result, why)
 
         except ValidationError:
             raise

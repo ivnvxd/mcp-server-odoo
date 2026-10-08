@@ -4,7 +4,7 @@ JSON-2 takes a bearer API key, the database in ``X-Odoo-Database``, and a JSON
 object of named arguments (``ids``, ``context`` and the method's parameters).
 An error comes back as ``{name, message, arguments, context, debug}`` with an
 HTTP status. The client maps it onto the XML-RPC fault codes and reuses
-``_raise_for_fault``, so callers see the same exceptions and messages on both
+``raise_for_fault``, so callers see the same exceptions and messages on both
 transports. ``debug`` holds the server traceback and never reaches an
 exception: only ``message`` does, through the sanitizer.
 """
@@ -21,16 +21,16 @@ from typing import Any, Dict, List, NoReturn, Optional, Tuple
 from urllib.parse import quote, urlparse
 
 from .error_sanitizer import ErrorSanitizer
-from .odoo_connection import (
-    _UNAVAILABLE_HTTP_STATUSES,
+from .odoo_errors import (
     ACCESS_DENIED_FAULT_CODE,
     ACCESS_ERROR_FAULT_CODE,
+    UNAVAILABLE_HTTP_STATUSES,
     WARNING_FAULT_CODE,
     OdooConnectionError,
     OdooRequestFault,
     OdooUnreachableError,
     OdooValidationFault,
-    _raise_for_fault,
+    raise_for_fault,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,7 +137,7 @@ class Json2Client:
                 info = None
             if isinstance(info, dict) and isinstance(info.get("version"), str):
                 return info
-        if status in _UNAVAILABLE_HTTP_STATUSES:
+        if status in UNAVAILABLE_HTTP_STATUSES:
             raise OdooUnreachableError(f"Odoo did not answer (HTTP {status})")
         if 300 <= status < 400:
             raise OdooConnectionError(_redirect_message(status, headers))
@@ -221,7 +221,7 @@ class Json2Client:
         self, status: int, headers: http.client.HTTPMessage, data: bytes
     ) -> NoReturn:
         """Raise the exception XML-RPC would raise for the same Odoo error."""
-        if status in _UNAVAILABLE_HTTP_STATUSES:
+        if status in UNAVAILABLE_HTTP_STATUSES:
             raise OdooUnreachableError(f"Odoo did not answer (HTTP {status})")
         if 300 <= status < 400:
             # The target can be an internal host: the log names it, the
@@ -256,7 +256,7 @@ class Json2Client:
             # Like an XML-RPC fault 1: the exception class leads the message,
             # and the sanitizer decides whether it is a business error
             code, fault_string = _FAULT_APPLICATION, f"{short_name}: {message}"
-        _raise_for_fault(xmlrpc.client.Fault(code, fault_string))
+        raise_for_fault(xmlrpc.client.Fault(code, fault_string))
 
 
 def _redirect_message(status: int, headers: http.client.HTTPMessage) -> str:

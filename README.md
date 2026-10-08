@@ -717,7 +717,7 @@ Read a file: an attachment or a binary field such as an image. Pass exactly one 
 
 - text files: their text, up to 100,000 characters
 - PDF and Office files: the text Odoo extracted from them (Odoo extracts PDF text only with the `attachment_indexation` module)
-- images up to 256 KB: the image itself
+- PNG, JPEG, GIF and WebP images up to 256 KB: the image itself
 - anything else: a download link for a person logged in to Odoo
 
 ```json
@@ -848,7 +848,7 @@ If Odoo refuses a field to the connected user, for example an accounting total o
 | Key | Effect |
 |---|---|
 | `allowed_company_ids` | The companies of the call. The first one is the active company, so company-dependent fields such as `standard_price` read and write its value. |
-| `lang` | The language of labels and translated values. |
+| `lang` | The language of labels and translated values. A language that Odoo has not installed is refused. On Odoo 16 and 17 the server checks this itself; in standard mode that needs `res.partner` or `res.lang` enabled for MCP, otherwise only `en_US` is accepted. |
 | `tz` | The timezone of the call. |
 | `active_test` | `false` includes archived records in searches. |
 
@@ -884,7 +884,7 @@ The server also provides direct access to Odoo data through resource URIs:
 - `odoo://res.partner/record/1/image_128` — Get partner 1's avatar image
 - `odoo://attachment/42` — Download attachment 42
 
-Populated binary fields in `get_record`/`search_records` results are returned as these resource URIs instead of inline base64 — read the URI to retrieve the actual bytes. The bytes come from `resources/read`, or from the `read_attachment` tool, which returns text and images up to 256 KB inline for clients that do not read resources.
+Populated binary fields in `get_record`/`search_records` results are returned as these resource URIs instead of inline base64 — read the URI to retrieve the actual bytes. The bytes come from `resources/read`, or from the `read_attachment` tool, which returns text files (up to 1 MB) and PNG, JPEG, GIF and WebP images (up to 256 KB) inline for clients that do not read resources.
 
 Record and search resource reads withhold credential-like fields the same way the tools' bulk reads do — to read such a field, request it explicitly by name via the tools' `fields` parameter.
 

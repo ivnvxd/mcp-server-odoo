@@ -20,11 +20,10 @@ from mcp_server_odoo.error_handling import (
     NotFoundError,
     ValidationError,
 )
+from mcp_server_odoo.file_types import guess_mimetype, is_text_mimetype
 from mcp_server_odoo.odoo_connection import OdooConnection, OdooConnectionError
 from mcp_server_odoo.resources import (
     OdooResourceHandler,
-    _guess_mimetype,
-    _is_text_mimetype,
     _parse_and_validate_id,
     register_resources,
 )
@@ -1034,11 +1033,11 @@ class TestMimetypeHelpers:
     """Direct coverage of the mimetype sniffing/classification helpers."""
 
     def test_guess_mimetype_known_signatures(self):
-        assert _guess_mimetype(PNG_BYTES) == "image/png"
-        assert _guess_mimetype(PDF_BYTES) == "application/pdf"
+        assert guess_mimetype(PNG_BYTES) == "image/png"
+        assert guess_mimetype(PDF_BYTES) == "application/pdf"
 
     def test_guess_mimetype_unknown_bytes_fall_back_to_octet_stream(self):
-        assert _guess_mimetype(b"no magic bytes here") == "application/octet-stream"
+        assert guess_mimetype(b"no magic bytes here") == "application/octet-stream"
 
     @pytest.mark.parametrize(
         "raw",
@@ -1055,7 +1054,7 @@ class TestMimetypeHelpers:
     def test_guess_mimetype_detects_svg(self, raw):
         """Odoo renders every default avatar as SVG, so this is the most common
         binary field served over MCP — it must not degrade to octet-stream."""
-        assert _guess_mimetype(raw) == "image/svg+xml"
+        assert guess_mimetype(raw) == "image/svg+xml"
 
     @pytest.mark.parametrize(
         "raw",
@@ -1079,23 +1078,23 @@ class TestMimetypeHelpers:
     def test_guess_mimetype_does_not_mistake_other_markup_for_svg(self, raw):
         """An inline <svg> inside an HTML page (or the word in prose) is not an
         SVG document — only <svg> as the root element counts."""
-        assert _guess_mimetype(raw) != "image/svg+xml"
+        assert guess_mimetype(raw) != "image/svg+xml"
 
     def test_guess_mimetype_svg_scan_is_bounded_to_the_head(self):
         """A huge XML file whose <svg> appears past the sniff window is not
         scanned end-to-end (and is not claimed to be SVG)."""
         raw = b"<?xml version='1.0'?><wrapper>" + b" " * 5000 + b"<svg/></wrapper>"
 
-        assert _guess_mimetype(raw) == "application/octet-stream"
+        assert guess_mimetype(raw) == "application/octet-stream"
 
     def test_guess_mimetype_binary_signature_wins_over_svg_scan(self):
         """Magic bytes are checked first: a PNG is never re-sniffed as markup."""
-        assert _guess_mimetype(PNG_BYTES) == "image/png"
+        assert guess_mimetype(PNG_BYTES) == "image/png"
 
     def test_svg_is_served_inline_as_text(self):
         """image/svg+xml ends in +xml, so it rides the textual path rather than
         being base64-blobbed — keeping avatars readable to the client."""
-        assert _is_text_mimetype(_guess_mimetype(b"<svg/>"))
+        assert is_text_mimetype(guess_mimetype(b"<svg/>"))
 
     @pytest.mark.parametrize(
         "mimetype",
@@ -1108,7 +1107,7 @@ class TestMimetypeHelpers:
         ],
     )
     def test_is_text_mimetype_accepts(self, mimetype):
-        assert _is_text_mimetype(mimetype) is True
+        assert is_text_mimetype(mimetype) is True
 
     @pytest.mark.parametrize(
         "mimetype",
@@ -1121,7 +1120,7 @@ class TestMimetypeHelpers:
         ],
     )
     def test_is_text_mimetype_rejects(self, mimetype):
-        assert _is_text_mimetype(mimetype) is False
+        assert is_text_mimetype(mimetype) is False
 
 
 class TestParseAndValidateId:
