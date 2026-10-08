@@ -49,7 +49,7 @@ _STALE_CONNECTION_ERRNOS = frozenset(
     {errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE, errno.EPROTOTYPE}
 )
 
-# Odoo's application-error fault code; the others come from odoo_connection
+# Odoo's application-error fault code; the others come from odoo_errors
 _FAULT_APPLICATION = 1
 
 

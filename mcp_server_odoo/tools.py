@@ -612,10 +612,7 @@ class OdooToolHandler:
         major = self.connection.get_major_version()
         if not isinstance(major, int) or major >= 18 or lang == "en_US":
             return
-        fresh = self._active_langs is None
-        if fresh:
-            self._active_langs = self._installed_langs()
-        if self._active_langs is not None and lang not in self._active_langs and not fresh:
+        if self._active_langs is None or lang not in self._active_langs:
             self._active_langs = self._installed_langs()
         if self._active_langs is None:
             raise ValidationError(
@@ -3146,16 +3143,16 @@ class OdooToolHandler:
                     **context_kwargs(call_context),
                 )
                 by_id = {row["id"]: row for row in rows}
-                created = []
-                for record_id in record_ids:
-                    row = await asyncio.to_thread(
-                        self._process_record_dates,
-                        by_id.get(record_id, {"id": record_id}),
-                        model,
-                    )
-                    created.append(
-                        {**row, "url": self.connection.build_record_url(model, record_id)}
-                    )
+                processed = await asyncio.to_thread(
+                    lambda: [
+                        self._process_record_dates(by_id.get(rid, {"id": rid}), model)
+                        for rid in record_ids
+                    ]
+                )
+                created = [
+                    {**row, "url": self.connection.build_record_url(model, record_id)}
+                    for record_id, row in zip(record_ids, processed, strict=True)
+                ]
 
                 return {
                     "success": True,
@@ -3379,10 +3376,9 @@ class OdooToolHandler:
                         f"Failed to read updated records: {model} with IDs {record_ids}"
                     )
 
-                records = [
-                    await asyncio.to_thread(self._process_record_dates, rec, model)
-                    for rec in records
-                ]
+                records = await asyncio.to_thread(
+                    lambda: [self._process_record_dates(rec, model) for rec in records]
+                )
 
                 return {
                     "success": success,
@@ -3513,9 +3509,9 @@ class OdooToolHandler:
                             "record_ids with values for shared values."
                         ) from e
                     raise
-                records = [
-                    await asyncio.to_thread(self._process_record_dates, row, model) for row in rows
-                ]
+                records = await asyncio.to_thread(
+                    lambda: [self._process_record_dates(row, model) for row in rows]
+                )
 
                 return {
                     "success": True,
@@ -3642,6 +3638,11 @@ class OdooToolHandler:
                     )
                 if image_type:
                     why = _IMAGE_TOO_LARGE
+                elif is_inline_image_type(mimetype):
+                    why = (
+                        f"The file is declared {mimetype}, but its content is not a PNG, JPEG, "
+                        "GIF or WebP image."
+                    )
                 elif mimetype.startswith("image/"):
                     why = f"{mimetype} images are returned as a link."
                 else:
@@ -3817,9 +3818,11 @@ class OdooToolHandler:
                     limit=self.config.max_limit,
                     order="create_date desc, id desc",
                 )
+                rows = await asyncio.to_thread(
+                    lambda: [self._process_record_dates(row, "ir.attachment") for row in rows]
+                )
                 attachments = []
                 for row in rows:
-                    row = await asyncio.to_thread(self._process_record_dates, row, "ir.attachment")
                     attachments.append(
                         {
                             "id": row["id"],

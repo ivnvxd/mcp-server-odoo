@@ -536,7 +536,7 @@ class ErrorSanitizer:
         Odoo's ``/xmlrpc/2/*`` endpoint reports UserError/ValidationError and
         AccessError through ``faultCode`` (2 / 4) and sends the author-written
         message BARE — no exception-class prefix, no traceback. String-shape
-        routing therefore cannot recognize these, so ``_raise_for_fault``
+        routing therefore cannot recognize these, so ``odoo_errors.raise_for_fault``
         classifies them by code and calls this instead of
         ``sanitize_xmlrpc_fault``: the message is scrubbed of leak vectors but
         keeps its prose, its length and — critically — its line structure, so

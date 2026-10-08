@@ -389,6 +389,7 @@ class TestReadAttachment:
         result = await handler._handle_read_attachment_tool(None, 9)
 
         assert result.structured_content["kind"] == "link"
+        assert "declared image/png, but its content is not" in result.structured_content["note"]
 
     async def test_large_image_is_only_linked(self, handler, connection):
         meta = {"name": "big.png", "mimetype": "image/png", "file_size": 900_000, "type": "binary"}

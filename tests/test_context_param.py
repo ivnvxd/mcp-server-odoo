@@ -259,6 +259,23 @@ class TestLang:
 
         assert connection.write.called
 
+    async def test_res_lang_is_read_when_res_partner_is_refused(self, handler, connection):
+        """Standard mode with res.lang enabled but res.partner not."""
+
+        def execute_kw(model, method, args, kwargs, scoped=True):
+            if (model, method) == ("res.partner", "fields_get"):
+                raise OdooValidationFault("Access denied by MCP for model 'res.partner'", 403)
+            return []
+
+        connection.execute_kw.side_effect = execute_kw
+        connection.search_read.return_value = [{"code": "en_US"}, {"code": "fr_FR"}]
+
+        await handler._handle_update_record_tool(
+            "x.model", 7, {"name": "Chaise"}, context={"lang": "fr_FR"}
+        )
+
+        assert connection.write.called
+
     async def test_en_us_is_always_accepted(self, handler, connection):
         """Odoo 18 and later take en_US even when it is not active."""
         connection.search_read.return_value = [{"code": "de_DE"}]
