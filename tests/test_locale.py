@@ -271,7 +271,41 @@ class TestInvalidLangAttribution:
             [{"id": 1}],
         ]
 
-        result = conn.execute_kw("res.partner", "search_read", [[]], {"context": {"lang": "es_ES"}})
+        result = conn.execute_kw("res.partner", "search_read", [[]], {})
 
         assert result == [{"id": 1}]
         assert conn.config.locale is None
+
+    def test_caller_lang_equal_to_the_locale_is_not_retried(self, config_with_locale):
+        """The caller asked for es_ES; a retry would write the default language."""
+        conn = OdooConnection(config_with_locale)
+        mock_proxy = _make_connected(conn)
+        mock_proxy.execute_kw.side_effect = [xmlrpc.client.Fault(2, "Invalid language code: es_ES")]
+
+        with pytest.raises(OdooValidationFault, match="Invalid language code: es_ES"):
+            conn.execute_kw(
+                "res.partner", "write", [[1], {"name": "x"}], {"context": {"lang": "es_ES"}}
+            )
+        assert mock_proxy.execute_kw.call_count == 1
+
+    def test_injected_locale_is_retried_after_another_call_disabled_it(self, config_with_locale):
+        """Two calls in flight both injected es_ES; the first to fail disables it."""
+        conn = OdooConnection(config_with_locale)
+        mock_proxy = _make_connected(conn)
+
+        def first_call(*args, **kwargs):
+            conn.config.locale = None  # the other call got there first
+            raise xmlrpc.client.Fault(2, "Invalid language code: es_ES")
+
+        calls = []
+
+        def proxy_call(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                return first_call()
+            return [{"id": 1}]
+
+        mock_proxy.execute_kw.side_effect = proxy_call
+
+        assert conn.execute_kw("res.partner", "search_read", [[]], {}) == [{"id": 1}]
+        assert len(calls) == 2

@@ -40,8 +40,9 @@ def main(argv: Optional[list[str]] = None) -> int:
   ODOO_DB            Odoo database name (auto-detected if not set)
   ODOO_YOLO          YOLO mode: off, read, or true (default: off)
                        off  — standard mode (requires Odoo MCP module)
-                       read — read-only via vanilla XML-RPC (no module needed)
-                       true — full read/write via vanilla XML-RPC
+                       read — read-only via vanilla XML-RPC, or JSON-2 on
+                              Odoo 19+ with an API key (no module needed)
+                       true — full read/write, same transports as read
   ODOO_LOCALE        Locale for formatting (e.g. en_US, de_DE)
   ODOO_ALLOWED_COMPANIES  Company IDs to scope every call to (e.g. 1,3)
   ODOO_RPC_TRANSPORT RPC protocol in YOLO mode: auto, xmlrpc or json2 (default: auto)

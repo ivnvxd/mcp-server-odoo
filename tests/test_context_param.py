@@ -197,6 +197,57 @@ class TestCompanyLimit:
         assert result["skipped_fields"] is None
 
 
+class TestLang:
+    """Odoo 16 and 17 ignore a lang they have not installed; the tool refuses it."""
+
+    @pytest.fixture(autouse=True)
+    def odoo_17(self, connection):
+        connection.get_major_version.return_value = 17
+        connection.search_read.return_value = [{"code": "en_US"}]
+
+    async def test_an_uninstalled_lang_is_refused_before_the_write(self, handler, connection):
+        with pytest.raises(ValidationError, match="Language 'fr_FR' is not installed"):
+            await handler._handle_update_record_tool(
+                "x.model", 7, {"name": "Chaise"}, context={"lang": "fr_FR"}
+            )
+        connection.write.assert_not_called()
+
+    async def test_an_installed_lang_passes(self, handler, connection):
+        await handler._handle_update_record_tool(
+            "x.model", 7, {"name": "Chair"}, context={"lang": "en_US"}
+        )
+
+        assert connection.write.called
+
+    async def test_a_lang_installed_since_the_cache_passes(self, handler, connection):
+        handler._active_langs = {"en_US"}
+        connection.search_read.return_value = [{"code": "en_US"}, {"code": "fr_FR"}]
+
+        await handler._handle_update_record_tool(
+            "x.model", 7, {"name": "Chaise"}, context={"lang": "fr_FR"}
+        )
+
+        assert connection.write.called
+
+    async def test_an_unreadable_language_list_leaves_it_to_odoo(self, handler, connection):
+        connection.search_read.side_effect = OdooValidationFault("res.lang not enabled", 403)
+
+        await handler._handle_update_record_tool(
+            "x.model", 7, {"name": "Chaise"}, context={"lang": "fr_FR"}
+        )
+
+        assert connection.write.called
+
+    async def test_odoo_18_refuses_it_itself(self, handler, connection):
+        connection.get_major_version.return_value = 18
+
+        await handler._handle_update_record_tool(
+            "x.model", 7, {"name": "Chaise"}, context={"lang": "fr_FR"}
+        )
+
+        connection.search_read.assert_not_called()
+
+
 class TestReads:
     async def test_get_record_read_and_related_names_take_the_context(self, handler, connection):
         await handler._handle_get_record_tool("x.model", 7, ["name", "tag_ids"], context=COMPANY_5)

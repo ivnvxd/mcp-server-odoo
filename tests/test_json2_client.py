@@ -670,6 +670,17 @@ def connected_json2(server, **config):
 
 
 class TestJson2ResultsAndFallbacks:
+    def test_check_health_over_json2(self, server):
+        """There is no XML-RPC proxy on a JSON-2 connection."""
+        server.script = [{"json": VERSION_20}, {"json": VERSION_20}]
+        connection = connected_json2(server)
+
+        healthy, message = connection.check_health()
+
+        assert healthy, message
+        assert message.startswith("Connected to Odoo 20")
+        assert connection.test_connection()
+
     def test_create_with_one_dict_returns_the_id(self, server):
         server.script = [{"json": [41]}, {"json": [42, 43]}]
         connection = connected_json2(server)

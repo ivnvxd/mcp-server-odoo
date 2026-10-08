@@ -601,14 +601,45 @@ class OdooToolHandler:
         self._unreadable_fields: Dict[
             Tuple[str, Tuple[str, ...], Tuple[int, ...]], Tuple[float, List[str]]
         ] = {}
+        # Codes of the active languages, read on Odoo 16 and 17 (see _check_lang)
+        self._active_langs: Optional[Set[str]] = None
 
         # Register tools
         self._register_tools()
         self._install_argument_check()
 
+    def _check_lang(self, lang: str) -> None:
+        """Refuse a context lang that Odoo has not installed (blocking).
+
+        Odoo 18 and later refuse it themselves. Odoo 16 and 17 ignore it, so a
+        write would land in the default language and replace that value. The
+        active codes are cached and read again once for an unknown code. When
+        Odoo refuses the read of res.lang (standard mode without it), the
+        check is left out.
+        """
+        major = self.connection.get_major_version()
+        if not isinstance(major, int) or major >= 18:
+            return
+        for attempt in (0, 1):
+            if self._active_langs is None or attempt:
+                try:
+                    rows = self.connection.search_read(
+                        "res.lang", [["active", "=", True]], ["code"]
+                    )
+                except OdooValidationFault as e:
+                    logger.debug(f"Could not read the active languages: {e}")
+                    return
+                self._active_langs = {row["code"] for row in rows}
+            if lang in self._active_langs:
+                return
+        raise ValidationError(
+            f"Language '{lang}' is not installed in Odoo. Installed: "
+            f"{', '.join(sorted(self._active_langs or []))}."
+        )
+
     def _call_context(self, context: Any) -> Optional[Dict[str, Any]]:
         """Validate a tool's ``context`` argument (blocking: it may read the
-        user's companies). Returns None when there is none."""
+        user's companies and the active languages). Returns None when there is none."""
         if context is None or context == {}:
             return None
         if not isinstance(context, dict):
@@ -629,6 +660,8 @@ class OdooToolHandler:
                 raise ValidationError(f"context.{key} must be a non-empty string.")
         if "active_test" in context and not isinstance(context["active_test"], bool):
             raise ValidationError("context.active_test must be true or false.")
+        if "lang" in context:
+            self._check_lang(context["lang"])
         if "allowed_company_ids" in context:
             companies = context["allowed_company_ids"]
             if (
@@ -651,7 +684,7 @@ class OdooToolHandler:
         return dict(context)
 
     def _check_domain_operators(self, domain: List[Any]) -> None:
-        """Refuse 'any' and 'not any' before Odoo 17 (blocking: reads the version).
+        """Refuse 'any' and 'not any' before Odoo 17 (the version is cached).
 
         Odoo 16 has no such operator and fails with "unhashable type: 'list'",
         which reads as a connection error. A dotted path does the same there.
@@ -2113,7 +2146,7 @@ class OdooToolHandler:
 
                 call_context = await asyncio.to_thread(self._call_context, context)
                 parsed_domain = self._parse_domain_input(domain)
-                await asyncio.to_thread(self._check_domain_operators, parsed_domain)
+                self._check_domain_operators(parsed_domain)
                 if model == "ir.attachment":
                     # Scope to accessible res_models — an attachment row
                     # carries url and index_content (the extracted document
@@ -4286,7 +4319,7 @@ class OdooToolHandler:
                 groupby = list(groupby) if groupby else []
 
                 parsed_domain = self._parse_domain_input(domain)
-                await asyncio.to_thread(self._check_domain_operators, parsed_domain)
+                self._check_domain_operators(parsed_domain)
                 if model == "ir.attachment":
                     scope = await asyncio.to_thread(
                         attachment_scope_domain, self.config, self.access_controller

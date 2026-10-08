@@ -588,6 +588,8 @@ class OdooConnection:
 
         try:
             # Try to get server version as health check
+            if self._json2 is not None:
+                return True, f"Connected to Odoo {self._json2.version().get('version', 'unknown')}"
             with self._common_proxy_lock:
                 version = self._common_proxy.version()
             return True, f"Connected to Odoo {version.get('server_version', 'unknown')}"
@@ -1329,7 +1331,9 @@ class OdooConnection:
             self.config.api_key if self._auth_method == "api_key" else self.config.password
         )
 
-        # Inject locale into context as default (caller-provided lang takes precedence)
+        # Inject locale into context as default (caller-provided lang takes precedence).
+        # Only an injected lang may be dropped when Odoo refuses it; a caller's never.
+        injected_lang = bool(self.config.locale) and "lang" not in (kwargs.get("context") or {})
         if self.config.locale:
             if "context" not in kwargs:
                 kwargs["context"] = {}
@@ -1355,7 +1359,7 @@ class OdooConnection:
                 kwargs["context"]["allowed_company_ids"] = limit
 
         if self._json2 is not None:
-            return self._execute_json2(model, method, args, kwargs)
+            return self._execute_json2(model, method, args, kwargs, injected_lang)
 
         try:
             # Log the operation (values redacted — write payloads can carry
@@ -1382,7 +1386,9 @@ class OdooConnection:
 
         except xmlrpc.client.Fault as e:
             # Handle an invalid lang — drop it and retry
-            if "Invalid language code" in e.faultString and self._drop_invalid_lang(kwargs):
+            if "Invalid language code" in e.faultString and self._drop_invalid_lang(
+                kwargs, injected_lang
+            ):
                 return self.execute_kw(model, method, args, kwargs)
 
             # Odoo's XML-RPC marshaller (allow_none=False) faults on void
@@ -1405,27 +1411,36 @@ class OdooConnection:
             sanitized_message = ErrorSanitizer.sanitize_message(str(e))
             raise OdooConnectionError(f"Operation failed: {sanitized_message}") from e
 
-    def _drop_invalid_lang(self, kwargs: Dict[str, Any]) -> bool:
+    def _drop_invalid_lang(self, kwargs: Dict[str, Any], injected: bool) -> bool:
         """Remove the configured locale after Odoo refused it; True to retry.
 
-        Only the CONFIGURED locale is dropped, and then disabled for the
-        process. A lang the caller passed is not: retried without it, a write
+        Only a lang that execute_kw injected from ODOO_LOCALE is dropped, and
+        the locale is then disabled for the process. A lang the caller passed
+        is not, even when it equals ODOO_LOCALE: retried without it, a write
         would land in the default language and replace that value, so Odoo's
-        refusal reaches the caller instead.
+        refusal reaches the caller instead. Deciding by ``injected`` rather
+        than by value also keeps a concurrent call, which injected the same
+        locale before another call disabled it, retrying as it should.
         """
         context = kwargs.get("context") or {}
         bad_lang = context.get("lang")
-        if not bad_lang or bad_lang != self.config.locale:
+        if not injected or not bad_lang:
             return False
-        logger.warning(
-            f"Locale '{bad_lang}' is not installed in Odoo. Falling back to default language."
-        )
-        self.config.locale = None
+        if self.config.locale == bad_lang:
+            logger.warning(
+                f"Locale '{bad_lang}' is not installed in Odoo. Falling back to default language."
+            )
+            self.config.locale = None
         context.pop("lang", None)
         return True
 
     def _execute_json2(
-        self, model: str, method: str, args: List[Any], kwargs: Dict[str, Any]
+        self,
+        model: str,
+        method: str,
+        args: List[Any],
+        kwargs: Dict[str, Any],
+        injected_lang: bool = False,
     ) -> Any:
         """``execute_kw`` over JSON-2: the same call with named arguments.
 
@@ -1451,7 +1466,7 @@ class OdooConnection:
             if (
                 e.fault_code == WARNING_FAULT_CODE
                 and str(e).startswith("Invalid language code")
-                and self._drop_invalid_lang(kwargs)
+                and self._drop_invalid_lang(kwargs, injected_lang)
             ):
                 return self.execute_kw(model, method, args, kwargs)
             raise
