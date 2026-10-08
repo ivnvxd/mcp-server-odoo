@@ -253,7 +253,7 @@ class OdooResourceHandler:
             """
             return await self._handle_record_retrieval(model, record_id, ctx)
 
-        # Register search resource (no parameters due to FastMCP limitations)
+        # Register search resource (no parameters: filtering goes through search_records)
         @self.app.resource(
             "odoo://{model}/search",
             title="Odoo Search",
@@ -275,10 +275,11 @@ class OdooResourceHandler:
             )
             return await self._handle_search(model, None, None, None, None, None)
 
-        # No browse resource: FastMCP URI templates cannot carry query parameters —
-        # use the search resource or search_records tool.
+        # No browse resource. mcp 2.2 can route RFC 6570 query variables, but
+        # these templates take none by choice: filtering, paging and field
+        # selection belong to the search_records tool.
 
-        # Register count resource (no parameters due to FastMCP limitations)
+        # Register count resource (no parameters: filtering goes through search_records)
         @self.app.resource(
             "odoo://{model}/count",
             title="Odoo Record Count",
@@ -362,8 +363,8 @@ class OdooResourceHandler:
         are registered as templates and won't show in list_resources().
         This is expected behavior - use list_resource_templates() to see them.
         """
-        # The template resources registered with decorators are sufficient
-        # FastMCP will handle them properly as templates
+        # The template resources registered with decorators are sufficient;
+        # MCPServer lists them as templates
         pass
 
     def _install_binary_read_override(self):
@@ -1476,10 +1477,10 @@ class OdooResourceHandler:
         has_next = offset + limit < total_count
         has_prev = offset > 0
 
-        # Build pagination hints. Resource URIs cannot carry query
-        # parameters (FastMCP routes only the bare odoo://{model}/search
-        # template), so point clients at the search_records tool instead
-        # of emitting unroutable URIs.
+        # Build pagination hints. The search template takes no query
+        # parameters (only the bare odoo://{model}/search is registered), so
+        # point clients at the search_records tool instead of emitting
+        # unroutable URIs.
         next_hint = None
         prev_hint = None
         domain_str = json.dumps(domain) if domain else None

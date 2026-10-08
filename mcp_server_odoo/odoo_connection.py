@@ -179,6 +179,7 @@ class OdooValidationFault(OdooConnectionError):  # noqa: N818 — "Fault" mirror
 _ODOO_BUSINESS_FAULT_CODES = frozenset({2, 4})
 ACCESS_ERROR_FAULT_CODE = 4
 ACCESS_DENIED_FAULT_CODE = 3
+WARNING_FAULT_CODE = 2
 
 # HTTP-style codes the MCP module's proxy uses for its own refusals, each with
 # a message meant for the user: 400 (a call for another database than the
@@ -1079,11 +1080,23 @@ class OdooConnection:
 
         if self._json2 is not None:
             # Imported here: json2_client imports this module
-            from .json2_client import Json2RouteError
+            from .json2_client import Json2AuthError, Json2RouteError
 
             try:
                 self._authenticate_json2(db_name)
                 return
+            except Json2AuthError as e:
+                # As over XML-RPC: a refused key falls back to the password
+                if self.config.rpc_transport != "auto" or not self.config.uses_credentials:
+                    raise
+                logger.warning(
+                    f"{e} Falling back to username/password authentication over XML-RPC. "
+                    "Verify or rotate the API key."
+                )
+                self._json2.close()
+                self._json2 = None
+                self._connected = False
+                self._fall_back_to_xmlrpc("Odoo refused the API key")
             except Json2RouteError as e:
                 # A proxy can pass /web/version and still block /json/2. Odoo
                 # answers an unknown database with the same page, so look the
@@ -1428,7 +1441,7 @@ class OdooConnection:
         except OdooValidationFault as e:
             # A UserError "Invalid language code: xx_XX"
             if (
-                e.fault_code == 2
+                e.fault_code == WARNING_FAULT_CODE
                 and str(e).startswith("Invalid language code")
                 and self._drop_invalid_lang(kwargs)
             ):
@@ -1573,8 +1586,7 @@ class OdooConnection:
         Returns:
             Number of records matching the domain
         """
-        # Copy: execute_kw mutates the context dict (locale injection)
-        kwargs = {"context": dict(context)} if context else {}
+        kwargs = _context_kwargs(context)
         return self.execute_kw(model, "search_count", [domain], kwargs)
 
     def create(

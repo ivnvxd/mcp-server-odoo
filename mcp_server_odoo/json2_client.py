@@ -23,6 +23,9 @@ from urllib.parse import quote, urlparse
 from .error_sanitizer import ErrorSanitizer
 from .odoo_connection import (
     _UNAVAILABLE_HTTP_STATUSES,
+    ACCESS_DENIED_FAULT_CODE,
+    ACCESS_ERROR_FAULT_CODE,
+    WARNING_FAULT_CODE,
     OdooConnectionError,
     OdooRequestFault,
     OdooUnreachableError,
@@ -46,10 +49,7 @@ _STALE_CONNECTION_ERRNOS = frozenset(
     {errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE, errno.EPROTOTYPE}
 )
 
-# XML-RPC fault codes of Odoo's /xmlrpc/2 endpoint (see _raise_for_fault)
-_FAULT_ACCESS_DENIED = 3
-_FAULT_ACCESS_ERROR = 4
-_FAULT_WARNING = 2
+# Odoo's application-error fault code; the others come from odoo_connection
 _FAULT_APPLICATION = 1
 
 
@@ -61,6 +61,11 @@ class Json2UnavailableError(OdooConnectionError):
 class Json2RouteError(OdooConnectionError):
     """A ``/json/2`` answer without a JSON-2 error body: a page from a proxy that
     blocks the route, or from Odoo for an unknown database."""
+
+
+class Json2AuthError(OdooConnectionError):
+    """Odoo refused the API key (HTTP 401). ``ODOO_RPC_TRANSPORT=auto`` with
+    ODOO_USER and ODOO_PASSWORD then tries them over XML-RPC."""
 
 
 class Json2Client:
@@ -168,7 +173,9 @@ class Json2Client:
                 except TimeoutError:
                     self._close()
                     if attempt or not reused or not retry_safe:
-                        raise OdooConnectionError(
+                        # Unreachable, as XML-RPC classifies a timeout at connect:
+                        # the server keeps running and retries with a backoff
+                        raise OdooUnreachableError(
                             f"Operation timeout after {self.timeout} seconds"
                         ) from None
                 except (OSError, http.client.HTTPException) as e:
@@ -224,17 +231,17 @@ class Json2Client:
         name, message = error
         short_name = name.rsplit(".", 1)[-1]
         if status == 401:
-            raise OdooConnectionError(
+            raise Json2AuthError(
                 f"Authentication failed: Odoo refused the API key "
                 f"({ErrorSanitizer.sanitize_message(message)}). On Odoo 20 and later the key "
                 "needs the rpc scope."
             )
         if short_name == "AccessDenied":
-            code, fault_string = _FAULT_ACCESS_DENIED, message
+            code, fault_string = ACCESS_DENIED_FAULT_CODE, message
         elif short_name == "AccessError":
-            code, fault_string = _FAULT_ACCESS_ERROR, message
+            code, fault_string = ACCESS_ERROR_FAULT_CODE, message
         elif status in (404, 409, 422):
-            code, fault_string = _FAULT_WARNING, message
+            code, fault_string = WARNING_FAULT_CODE, message
         elif status == 400:
             raise OdooRequestFault(
                 f"Odoo refused the request: {ErrorSanitizer.sanitize_message(message)}"

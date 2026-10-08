@@ -308,6 +308,8 @@ class TestUnreadableFieldsInBulkReads:
 
         connection.read.side_effect = read
 
-        assert handler._find_unreadable_fields("res.partner", 7, names) == ["total_due"]
+        assert handler._find_unreadable_fields("res.partner", 7, names, {"bin_size": True}) == [
+            "total_due"
+        ]
         # one refused field among 65: 2 reads per halving plus the first, not 65
         assert connection.read.call_count == 2 * 7 + 1

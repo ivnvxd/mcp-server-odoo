@@ -1073,7 +1073,7 @@ class OdooToolHandler:
         model: str,
         record_id: int,
         names: List[str],
-        context: Optional[Dict[str, Any]] = None,
+        context: Dict[str, Any],
     ) -> List[str]:
         """The names whose read of one record fails with an AccessError (blocking).
 
@@ -1084,7 +1084,7 @@ class OdooToolHandler:
         if not names:
             return []
         try:
-            self.connection.read(model, [record_id], names, context or {"bin_size": True})
+            self.connection.read(model, [record_id], names, context)
             return []
         except OdooValidationFault as e:
             if e.fault_code != ACCESS_ERROR_FAULT_CODE:

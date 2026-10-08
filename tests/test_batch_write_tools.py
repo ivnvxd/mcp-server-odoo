@@ -167,6 +167,24 @@ class TestUpdateRecordsPerRecordValues:
         assert result["updated_count"] == 2
         assert result["records"][1] == {"id": 6, "display_name": "Beta"}
 
+    async def test_unknown_field_in_a_later_update_is_refused(self, handler, connection):
+        """Every entry's keys are checked, not only the first one's."""
+        connection.fields_get.return_value = {"phone": {"type": "char"}}
+        updates = [{"id": 5, "values": {"phone": "1"}}, {"id": 6, "values": {"nope": "2"}}]
+
+        with pytest.raises(ValidationError, match="Invalid field 'nope' on res.partner"):
+            await handler._handle_update_records_each_tool("res.partner", updates)
+        connection.web_save_multi.assert_not_called()
+
+    async def test_unknown_field_in_shared_values_is_refused(self, handler, connection):
+        connection.fields_get.return_value = {"phone": {"type": "char"}}
+
+        with pytest.raises(ValidationError, match="Invalid field 'nope' on res.partner"):
+            await handler._handle_update_records_tool(
+                "res.partner", [5, 6], {"phone": "1", "nope": "2"}
+            )
+        connection.write.assert_not_called()
+
     @pytest.mark.parametrize("major", [16, 17, 18])
     async def test_refused_before_odoo_19(self, handler, connection, major):
         connection.get_major_version.return_value = major

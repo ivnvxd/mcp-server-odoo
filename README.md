@@ -370,7 +370,7 @@ restrict the user's allowed companies in Odoo itself.
 | `ODOO_MCP_PORT` | `8000` | Port to bind for HTTP transport |
 | `ODOO_MCP_ALLOWED_HOSTS` | — | Comma-separated `Host` headers to accept for HTTP transport (DNS-rebinding protection). Set when running `streamable-http` behind a reverse proxy that forwards an external host, e.g. `odoo.example.com,localhost`. IPv6 literals may be bracketed or bare (`[::1]:8000`, `::1`). **Unset, protection is only auto-enabled for a loopback bind** — binding any other host (e.g. `0.0.0.0`) runs with no `Host`/`Origin` validation at all. |
 | `ODOO_MCP_SESSION_IDLE_TIMEOUT` | — | Seconds of inactivity before a `streamable-http` session is closed and its server-side state freed, e.g. `600`. Unset means sessions never expire. |
-| `ODOO_MCP_MAX_BINARY_SIZE` | `52428800` | Maximum bytes returned by a single binary/attachment `resources/read`. Checked before the payload is fetched (for record fields, a `bin_size` probe on Odoo 19 and older, and the size of the backing attachment or a `field.size` count on Odoo 20; for attachments, the stored `file_size`), so an oversized read is refused with a clean error instead of being pulled into memory and re-encoded to base64 for the wire. |
+| `ODOO_MCP_MAX_BINARY_SIZE` | `52428800` | Maximum bytes returned by a single binary/attachment `resources/read`. Checked before the payload is fetched (for record fields, a `bin_size` probe on Odoo 19 and older, and the size of the backing attachment or a `field.size` count on Odoo 20; for attachments, the stored `file_size`), so an oversized read is refused with a clean error instead of being pulled into memory and re-encoded to base64 for the wire. On Odoo 20 a non-stored binary field (such as `avatar_128`), or a stored one whose attachment the user cannot read, is checked only after the fetch. |
 
 ### Transport Options
 
@@ -886,7 +886,7 @@ Populated binary fields in `get_record`/`search_records` results are returned as
 
 Record and search resource reads withhold credential-like fields the same way the tools' bulk reads do — to read such a field, request it explicitly by name via the tools' `fields` parameter.
 
-Binary and attachment reads are served whole, up to `ODOO_MCP_MAX_BINARY_SIZE` (default 50 MB). The size is checked before the payload is fetched, so an oversized field or attachment is refused with a clean error rather than buffered into a correspondingly large response.
+Binary and attachment reads are served whole, up to `ODOO_MCP_MAX_BINARY_SIZE` (default 50 MB). The size is checked before the payload is fetched, so an oversized field or attachment is refused with a clean error rather than buffered into a correspondingly large response. On Odoo 20 a non-stored binary field, or a stored one whose attachment the user cannot read, is checked only after the fetch.
 
 > **Note:** Resource URIs don't support query parameters (like `?domain=...`). For filtering, pagination, and field selection, use the `search_records` tool instead.
 

@@ -379,7 +379,7 @@ class OdooMCPServer:
         """Build DNS-rebinding-protection settings from ODOO_MCP_ALLOWED_HOSTS.
 
         Returns None when no hosts are configured, which hands the decision to
-        the SDK. Note what that actually means (mcp.server.fastmcp.server):
+        the SDK. Note what that actually means (mcp.server.mcpserver.server):
         the SDK auto-enables protection ONLY when the bind host is loopback
         (``127.0.0.1``/``localhost``/``::1``); for any other bind — notably
         ``0.0.0.0``, the usual Docker setting — it leaves protection DISABLED

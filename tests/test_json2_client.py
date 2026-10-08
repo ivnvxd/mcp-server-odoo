@@ -207,7 +207,8 @@ class TestRetry:
     def test_timeout_on_a_fresh_connection_is_not_retried(self, server):
         server.script = [{"json": [1], "delay": 0.6}]
 
-        with pytest.raises(OdooConnectionError, match="Operation timeout"):
+        # Unreachable, so the server keeps running and retries with a backoff
+        with pytest.raises(OdooUnreachableError, match="Operation timeout"):
             client_for(server, timeout=0.3).call("res.partner", "search", {}, retry_safe=True)
         assert len(server.requests) == 1
 
@@ -319,6 +320,20 @@ class TestErrors:
         assert message in str(caught.value)
         assert caught.value.fault_code == code
         self._assert_no_sentinel(caught.value)
+
+    def test_a_400_is_an_odoo_error(self, server):
+        server.script = [
+            {
+                "status": 400,
+                "json": odoo_error("werkzeug.exceptions.BadRequest", "bad arguments", 400),
+            }
+        ]
+
+        with pytest.raises(
+            OdooRequestFault, match="Odoo refused the request: Bad arguments"
+        ) as caught:
+            client_for(server).call("res.partner", "write", {})
+        assert not isinstance(caught.value, OdooValidationFault)
 
     def test_a_500_that_is_not_business_is_an_odoo_error(self, server):
         server.script = [{"status": 500, "json": odoo_error("builtins.KeyError", "nope")}]
@@ -814,6 +829,39 @@ class TestAutoSelection:
             },
         ]
         connection = auto_connection(server, database="odoo", username="admin")
+        connection.connect()
+
+        with pytest.raises(OdooConnectionError, match="refused the API key"):
+            connection.authenticate()
+
+    def test_a_refused_key_falls_back_to_the_password(self, server, monkeypatch):
+        """As over XML-RPC: with ODOO_USER and ODOO_PASSWORD a refused key is not fatal."""
+        server.script = [
+            {"json": VERSION_20},
+            {
+                "status": 401,
+                "json": odoo_error("werkzeug.exceptions.Unauthorized", "Invalid apikey", 401),
+            },
+        ]
+        connection = auto_connection(server, database="odoo", username="admin", password="admin")
+        proxy = xmlrpc_proxies(monkeypatch, connection, version="20.0")
+        proxy.authenticate.side_effect = [False, 2]  # the key as password, then the password
+        connection.connect()
+
+        connection.authenticate()
+
+        assert connection.rpc_transport == "xmlrpc"
+        assert connection.is_authenticated
+
+    def test_forced_json2_never_falls_back_on_a_refused_key(self, server):
+        server.script = [
+            {"json": VERSION_20},
+            {
+                "status": 401,
+                "json": odoo_error("werkzeug.exceptions.Unauthorized", "Invalid apikey", 401),
+            },
+        ]
+        connection = json2_connection(server, database="odoo", username="admin", password="admin")
         connection.connect()
 
         with pytest.raises(OdooConnectionError, match="refused the API key"):
