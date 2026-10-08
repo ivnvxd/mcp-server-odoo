@@ -900,7 +900,7 @@ class TestCallModelMethodIntegration:
     @pytest.mark.yolo
     @pytest.mark.asyncio
     async def test_nonexistent_method_returns_validation_error(self, real_tool_handler):
-        """Unknown public method on a real model surfaces as a Connection error → ValidationError."""
+        """Unknown public method on a real model surfaces Odoo's text, not a connection error."""
         from mcp_server_odoo.error_handling import ValidationError
 
         handler = real_tool_handler
@@ -908,10 +908,9 @@ class TestCallModelMethodIntegration:
             await handler._handle_call_model_method_tool(
                 "res.partner", "definitely_does_not_exist", [[1]], None
             )
-        # Either the OdooConnectionError → "Connection error" path or the
-        # generic sanitized "Failed to call model method" — accept both.
         msg = str(exc_info.value)
-        assert "Connection error" in msg or "Failed to call model method" in msg
+        assert "res.partner.definitely_does_not_exist' does not exist" in msg
+        assert "Connection error" not in msg
 
 
 class TestPostMessageMCPIntegration:
