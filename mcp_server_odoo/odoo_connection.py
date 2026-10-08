@@ -296,8 +296,9 @@ class OdooConnection:
         self._server_version: Optional[str] = None
         # Set by connect() when the calls go over JSON-2 instead of XML-RPC
         self._json2: Optional["Json2Client"] = None
-        # ODOO_RPC_TRANSPORT=auto found no JSON-2 and uses XML-RPC from then on
-        self._json2_unavailable = False
+        # ODOO_RPC_TRANSPORT=auto left JSON-2, because the server has none or
+        # refused the API key, and uses XML-RPC from then on
+        self._fell_back_to_xmlrpc = False
 
         mode_info = f" (YOLO mode: {config.yolo_mode})" if config.is_yolo_enabled else ""
         logger.info(f"Initialized OdooConnection for {self._url_components['host']}{mode_info}")
@@ -453,7 +454,7 @@ class OdooConnection:
 
         Standard mode stays on XML-RPC: it goes through the MCP module's
         ``/mcp/xmlrpc`` endpoints. ``auto`` falls back to XML-RPC when the
-        server has no JSON-2 (see ``_fall_back_to_xmlrpc``).
+        server has no JSON-2 (see ``_fall_back_to_xmlrpc``) or refuses the key.
         """
         if self.config.rpc_transport == "json2":
             return True
@@ -461,7 +462,7 @@ class OdooConnection:
             self.config.rpc_transport == "auto"
             and self.config.is_yolo_enabled
             and bool(self.config.api_key)
-            and not self._json2_unavailable
+            and not self._fell_back_to_xmlrpc
         )
 
     def _fall_back_to_xmlrpc(self, reason: str) -> None:
@@ -470,7 +471,7 @@ class OdooConnection:
         Raises:
             OdooConnectionError: XML-RPC needs ODOO_USER with the API key
         """
-        self._json2_unavailable = True
+        self._fell_back_to_xmlrpc = True
         logger.info(f"JSON-2 is not available ({reason}); using XML-RPC")
         if not self.config.uses_credentials and not self.config.username:
             raise OdooConnectionError(
@@ -1096,7 +1097,9 @@ class OdooConnection:
                 self._json2.close()
                 self._json2 = None
                 self._connected = False
-                self._fall_back_to_xmlrpc("Odoo refused the API key")
+                # Not _fall_back_to_xmlrpc(): the server has JSON-2, and the
+                # credentials it checks for are set
+                self._fell_back_to_xmlrpc = True
             except Json2RouteError as e:
                 # A proxy can pass /web/version and still block /json/2. Odoo
                 # answers an unknown database with the same page, so look the

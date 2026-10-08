@@ -834,8 +834,9 @@ class TestAutoSelection:
         with pytest.raises(OdooConnectionError, match="refused the API key"):
             connection.authenticate()
 
-    def test_a_refused_key_falls_back_to_the_password(self, server, monkeypatch):
+    def test_a_refused_key_falls_back_to_the_password(self, server, monkeypatch, caplog):
         """As over XML-RPC: with ODOO_USER and ODOO_PASSWORD a refused key is not fatal."""
+        caplog.set_level("INFO", logger="mcp_server_odoo.odoo_connection")
         server.script = [
             {"json": VERSION_20},
             {
@@ -852,6 +853,8 @@ class TestAutoSelection:
 
         assert connection.rpc_transport == "xmlrpc"
         assert connection.is_authenticated
+        # The server has JSON-2: the log blames the key, not a missing route
+        assert "JSON-2 is not available" not in caplog.text
 
     def test_forced_json2_never_falls_back_on_a_refused_key(self, server):
         server.script = [

@@ -173,8 +173,8 @@ class Json2Client:
                 except TimeoutError:
                     self._close()
                     if attempt or not reused or not retry_safe:
-                        # Unreachable, as XML-RPC classifies a timeout at connect:
-                        # the server keeps running and retries with a backoff
+                        # Unreachable: at connect, as over XML-RPC, the server keeps
+                        # running and retries with a backoff. A later call is not retried.
                         raise OdooUnreachableError(
                             f"Operation timeout after {self.timeout} seconds"
                         ) from None
