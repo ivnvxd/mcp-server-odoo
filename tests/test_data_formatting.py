@@ -489,7 +489,7 @@ class TestDatasetFormatter:
         assert "Search criteria: is_company = True" in result
         assert "Showing records 1-2 of 50" in result
         assert "Fields: name, email" in result
-        assert "[1] Company A" in result
+        assert "[1] ID 1: Company A" in result
         assert "email: a@example.com" in result
 
     def test_format_empty_search_results(self, formatter):
@@ -518,8 +518,8 @@ class TestDatasetFormatter:
 
         assert "Page 2 of 3" in result
         assert "Showing records 11-20 of 30" in result
-        assert "[11] Record 11" in result
-        assert "[20] Record 20" in result
+        assert "[11] ID 11: Record 11" in result
+        assert "[20] ID 20: Record 20" in result
         assert "← Previous page: use the search_records tool with offset=0, limit=10" in result
         assert "→ Next page: use the search_records tool with offset=20, limit=10" in result
 
@@ -552,7 +552,7 @@ class TestDatasetFormatter:
 
         result = formatter.format_search_results(records, fields=["email", "phone", "is_company"])
 
-        assert "[1] Test Company" in result
+        assert "[1] ID 1: Test Company" in result
         assert "    email: test@example.com" in result
         assert "    phone: 123-456-7890" in result
         assert "    is_company: Yes" in result

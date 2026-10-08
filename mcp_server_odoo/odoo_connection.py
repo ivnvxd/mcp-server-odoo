@@ -130,6 +130,17 @@ def _is_unreachable(exc: BaseException) -> bool:
     return isinstance(exc, (OSError, http.client.HTTPException))
 
 
+class OdooRequestFault(OdooConnectionError):  # noqa: N818 — "Fault" mirrors xmlrpc.client.Fault
+    """Odoo answered the request with an error that is not a business error.
+
+    For example a ValueError for a bad domain operator, or a KeyError for an
+    unknown field. Odoo did answer, so handlers show the message without a
+    connection-error prefix, as they do for ``OdooValidationFault``. It stays
+    a sibling of that class so the startup checks that tolerate business
+    errors still stop on this one.
+    """
+
+
 class OdooValidationFault(OdooConnectionError):  # noqa: N818 — "Fault" mirrors xmlrpc.client.Fault
     """An XML-RPC fault carrying a user-facing business error.
 
@@ -167,6 +178,7 @@ class OdooValidationFault(OdooConnectionError):  # noqa: N818 — "Fault" mirror
 # connection failures against them.
 _ODOO_BUSINESS_FAULT_CODES = frozenset({2, 4})
 ACCESS_ERROR_FAULT_CODE = 4
+ACCESS_DENIED_FAULT_CODE = 3
 
 # HTTP-style codes the MCP module's proxy uses for its own refusals, each with
 # a message meant for the user: 400 (a call for another database than the
@@ -182,8 +194,8 @@ def _raise_for_fault(fault: xmlrpc.client.Fault) -> NoReturn:
     Classification is code-first (``_ODOO_BUSINESS_FAULT_CODES``) because
     that is what Odoo actually sends; the message-shape heuristics remain as
     the fallback for proxies that do not preserve Odoo's codes. Everything
-    unclassified keeps the historical connection-flavored "Operation failed"
-    wrapping.
+    unclassified raises ``OdooRequestFault``: Odoo answered, so it is not a
+    connection error either.
     """
     if fault.faultCode in _ODOO_BUSINESS_FAULT_CODES | _MCP_MODULE_REFUSAL_FAULT_CODES:
         # Transport says business: keep the message's prose and line
@@ -193,9 +205,14 @@ def _raise_for_fault(fault: xmlrpc.client.Fault) -> NoReturn:
         ) from fault
 
     sanitized_message = ErrorSanitizer.sanitize_xmlrpc_fault(fault.faultString)
+    # Older MCP modules wrap every exception as "Internal Server Error in <message>"
+    sanitized_message = sanitized_message.removeprefix("Internal Server Error in ")
     if ErrorSanitizer.is_business_fault(fault.faultString):
         raise OdooValidationFault(sanitized_message, fault.faultCode) from fault
-    raise OdooConnectionError(f"Operation failed: {sanitized_message}") from fault
+    if fault.faultCode == ACCESS_DENIED_FAULT_CODE:
+        # A rejected login is auth setup, still a connection problem
+        raise OdooConnectionError(f"Operation failed: {sanitized_message}") from fault
+    raise OdooRequestFault(f"Odoo error: {sanitized_message}") from fault
 
 
 def _context_kwargs(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1350,7 +1367,7 @@ class OdooConnection:
 
             logger.error(f"XML-RPC fault during {method} on {model}: {e}")
             # Sanitize and classify: business errors raise OdooValidationFault,
-            # everything else stays connection-flavored
+            # everything else OdooRequestFault
             _raise_for_fault(e)
         except socket.timeout:
             logger.error(f"Timeout during {method} on {model}")

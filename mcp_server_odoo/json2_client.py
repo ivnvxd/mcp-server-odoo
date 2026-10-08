@@ -24,6 +24,7 @@ from .error_sanitizer import ErrorSanitizer
 from .odoo_connection import (
     _UNAVAILABLE_HTTP_STATUSES,
     OdooConnectionError,
+    OdooRequestFault,
     OdooUnreachableError,
     OdooValidationFault,
     _raise_for_fault,
@@ -235,8 +236,8 @@ class Json2Client:
         elif status in (404, 409, 422):
             code, fault_string = _FAULT_WARNING, message
         elif status == 400:
-            raise OdooConnectionError(
-                f"Operation failed: Odoo refused the request ({ErrorSanitizer.sanitize_message(message)})"
+            raise OdooRequestFault(
+                f"Odoo refused the request: {ErrorSanitizer.sanitize_message(message)}"
             )
         else:
             # Like an XML-RPC fault 1: the exception class leads the message,

@@ -20,8 +20,10 @@ from mcp_server_odoo.error_handling import (
 from mcp_server_odoo.odoo_connection import (
     OdooConnection,
     OdooConnectionError,
+    OdooRequestFault,
     OdooValidationFault,
 )
+from mcp_server_odoo.resources import OdooResourceHandler
 from mcp_server_odoo.tools import (
     _BLOCKED_METHOD_CALLS,
     CURATED_FIELD_ATTRIBUTES,
@@ -544,6 +546,39 @@ class TestOdooToolHandler:
         message = str(exc_info.value)
         assert "Connection error" not in message
         assert "Invalid field 'bogus' in request" in message
+
+    @pytest.mark.asyncio
+    async def test_search_records_odoo_error_not_labeled_connection_error(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """An error Odoo answered with (a ValueError for a bad operator) is not
+        a connection error either."""
+        mock_connection.search.side_effect = OdooRequestFault(
+            "Odoo error: ValueError: Invalid operator in condition ('name', 'like2', 'x')"
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            await mock_app._tools["search_records"](model="res.partner")
+
+        message = str(exc_info.value)
+        assert "Connection error" not in message
+        assert message.startswith("Odoo error: ValueError: Invalid operator")
+
+    @pytest.mark.asyncio
+    async def test_search_records_explicit_field_odoo_error(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """An Odoo error from the read of an explicit field list keeps Odoo's text."""
+        mock_connection.search.return_value = [1]
+        mock_connection.search_count.return_value = 1
+        mock_connection.read.side_effect = OdooRequestFault(
+            "Odoo error: ValueError: Invalid field 'nope'"
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            await mock_app._tools["search_records"](model="res.partner", fields=["nope"])
+
+        assert str(exc_info.value) == "Odoo error: ValueError: Invalid field 'nope'"
 
     @pytest.mark.asyncio
     async def test_search_records_access_error_fault_surfaces_without_prefix(
@@ -1101,11 +1136,11 @@ class TestOdooToolHandler:
         result = await search_records(model="res.partner", limit=valid_config.max_limit)
         assert result.limit == valid_config.max_limit
 
-        # Test with negative limit
-        result = await search_records(model="res.partner", limit=-1)
-
-        # Should use default limit
+        # 0 uses the default limit; a negative limit is refused
+        result = await search_records(model="res.partner", limit=0)
         assert result.limit == valid_config.default_limit
+        with pytest.raises(ValidationError, match="limit must be 0 or more, got -1"):
+            await search_records(model="res.partner", limit=-1)
 
     @pytest.mark.asyncio
     async def test_search_records_calls_context_info(
@@ -1376,6 +1411,19 @@ class TestGetFieldsTool:
     @pytest.fixture
     def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
         return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+
+    @pytest.mark.asyncio
+    async def test_unknown_field_and_attribute_names_are_noted(self, handler, mock_connection):
+        """Odoo drops unknown names silently; the note names them."""
+        mock_connection.fields_get.return_value = {"name": {"type": "char"}}
+
+        result = await handler._handle_get_fields_tool(
+            "res.partner", ["name", "nope"], ["type", "bogus"]
+        )
+
+        assert [f.name for f in result.fields] == ["name"]
+        assert "res.partner has no field named nope." in result.note
+        assert "No field has the attribute bogus." in result.note
 
     @pytest.mark.asyncio
     async def test_curated_default_attributes(
@@ -2365,6 +2413,50 @@ class TestAggregateRecordsReadGroupFallback:
         assert passed_kwargs["lazy"] is False
 
     @pytest.mark.asyncio
+    async def test_odoo16_orders_by_the_bare_aggregate_field(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Odoo 16 refuses 'field:op' in orderby and takes the bare field name."""
+        mock_connection.get_major_version.return_value = 16
+        mock_connection.execute_kw.return_value = []
+
+        await mock_app._tools["aggregate_records"](
+            model="sale.order",
+            groupby=["partner_id"],
+            aggregates=["amount_total:sum"],
+            order="amount_total:sum desc, partner_id",
+        )
+
+        passed_kwargs = mock_connection.execute_kw.call_args.args[3]
+        assert passed_kwargs["orderby"] == "amount_total desc, partner_id"
+
+    @pytest.mark.asyncio
+    async def test_odoo16_empty_total_row(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Odoo 16 cannot marshal an empty ungrouped total; the connection returns None."""
+        mock_connection.get_major_version.return_value = 16
+        mock_connection.execute_kw.return_value = None
+
+        result = await mock_app._tools["aggregate_records"](
+            model="res.partner", aggregates=["color:sum"], domain=[["id", "=", 0]]
+        )
+
+        assert result.groups == [{"__count": 0, "__extra_domain": [], "color:sum": False}]
+
+    @pytest.mark.asyncio
+    async def test_odoo16_refuses_ordering_by_count(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        mock_connection.get_major_version.return_value = 16
+
+        with pytest.raises(ValidationError, match="Odoo 16 cannot order groups by __count"):
+            await mock_app._tools["aggregate_records"](
+                model="sale.order", groupby=["partner_id"], order="__count desc"
+            )
+        mock_connection.execute_kw.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_fallback_peeks_limit_plus_one_and_sets_has_more(
         self, handler, mock_connection, mock_access_controller, mock_app
     ):
@@ -3038,6 +3130,21 @@ class TestUpdateRecordTool:
         )
 
     @pytest.mark.asyncio
+    async def test_update_record_unknown_field(self, handler, mock_connection, mock_app):
+        """Odoo 19+ answer an unknown field in write() with a bare KeyError."""
+        mock_connection.search_count.return_value = 1
+        mock_connection.fields_get.return_value = {"name": {"type": "char"}}
+
+        with pytest.raises(
+            ValidationError,
+            match="Invalid field 'nope' on res.partner: it does not exist, or this user cannot see",
+        ):
+            await mock_app._tools["update_record"](
+                model="res.partner", record_id=10, values={"name": "x", "nope": 1}
+            )
+        mock_connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_update_record_not_found(self, handler, mock_connection, mock_app):
         """Test update_record when record doesn't exist."""
         mock_connection.search_count.return_value = 0  # existence check fails
@@ -3553,6 +3660,8 @@ class TestPostMessageTool:
     ):
         """When provided, partner_ids and attachment_ids appear in kwargs."""
         mock_connection.execute_kw.return_value = 1
+        mock_connection.search_count.return_value = 1
+        mock_connection.search.return_value = [10]
 
         post_message = mock_app._tools["post_message"]
         await post_message(
@@ -3566,6 +3675,38 @@ class TestPostMessageTool:
         sent_kwargs = mock_connection.execute_kw.call_args[0][3]
         assert sent_kwargs["partner_ids"] == [5, 6]
         assert sent_kwargs["attachment_ids"] == [10]
+
+    @pytest.mark.asyncio
+    async def test_post_message_missing_record(self, handler, mock_connection, mock_app):
+        mock_connection.search_count.return_value = 0
+
+        with pytest.raises(ValidationError, match="Record not found: res.partner with ID 9"):
+            await mock_app._tools["post_message"](model="res.partner", record_id=9, body="Hi")
+        mock_connection.execute_kw.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_post_message_missing_attachment(self, handler, mock_connection, mock_app):
+        mock_connection.search_count.return_value = 1
+        mock_connection.search.return_value = [10]
+
+        with pytest.raises(ValidationError, match="Attachment not found: 11"):
+            await mock_app._tools["post_message"](
+                model="res.partner", record_id=1, body="Hi", attachment_ids=[10, 11]
+            )
+        mock_connection.execute_kw.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_post_message_escapes_plain_text_on_odoo_16(
+        self, handler, mock_connection, mock_app
+    ):
+        """Odoo 16 stores a str body as HTML; 17 and later escape it themselves."""
+        mock_connection.execute_kw.return_value = 1
+        mock_connection.search_count.return_value = 1
+        mock_connection.get_major_version.return_value = 16
+
+        await mock_app._tools["post_message"](model="res.partner", record_id=1, body="a <b> c")
+
+        assert mock_connection.execute_kw.call_args[0][3]["body"] == "a &lt;b&gt; c"
 
     @pytest.mark.asyncio
     async def test_post_message_no_mail_thread_has_no_attribute_branch(
@@ -3905,6 +4046,17 @@ class TestToolEdgeCases:
             await search_records(model="res.partner", fields='"name"', limit=10)
 
         assert "Fields must be a list, got str" in str(exc_info.value)
+        assert "JSON-encoded twice" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_search_records_double_encoded_domain(
+        self, handler, mock_access_controller, mock_app
+    ):
+        """A domain JSON-encoded twice is refused with a hint, not a bare type name."""
+        search_records = mock_app._tools["search_records"]
+
+        with pytest.raises(ValidationError, match="JSON-encoded twice"):
+            await search_records(model="res.partner", domain='"[[\\"id\\", \\"=\\", 1]]"')
 
     @pytest.mark.asyncio
     async def test_create_record_generic_exception(self, handler, mock_connection, mock_app):
@@ -6194,6 +6346,24 @@ class TestJsonObjectReprScrub:
 
         assert result.record["options"]["validator"] == self.REPR
 
+    @pytest.fixture
+    def resource_handler(self, connection):
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+        return OdooResourceHandler(
+            MagicMock(spec=MCPServer), connection, MagicMock(spec=AccessController), config
+        )
+
+    async def test_record_resource(self, resource_handler):
+        text = await resource_handler._handle_record_retrieval("x.model", "3")
+
+        assert "0x7f3a2b1c9d40" not in text
+        assert "kept" in text
+
+    async def test_search_resource(self, resource_handler):
+        text = await resource_handler._handle_search("x.model", None, "name,options", 10, 0, None)
+
+        assert "0x7f3a2b1c9d40" not in text
+
 
 class TestTypedParameters:
     """Typed schemas for strict clients; the handlers still take the loose input."""
@@ -6267,6 +6437,7 @@ class TestTypedParameters:
 
     async def test_upper_case_subtype_and_message_type(self, app, connection):
         connection.execute_kw.return_value = 42
+        connection.search_count.return_value = 1
 
         await self._call(
             app,

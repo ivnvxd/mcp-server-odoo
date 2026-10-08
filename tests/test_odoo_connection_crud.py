@@ -15,6 +15,7 @@ from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.odoo_connection import (
     OdooConnection,
     OdooConnectionError,
+    OdooRequestFault,
     OdooValidationFault,
 )
 
@@ -158,7 +159,7 @@ class TestCreate:
             1, "Access denied on res.partner"
         )
 
-        with pytest.raises(OdooConnectionError, match="Operation failed"):
+        with pytest.raises(OdooConnectionError, match="Odoo error"):
             conn.create("res.partner", {"name": "Fail"})
 
 
@@ -301,7 +302,7 @@ class TestSearchRead:
             1, "Access denied on res.partner"
         )
 
-        with pytest.raises(OdooConnectionError, match="Operation failed"):
+        with pytest.raises(OdooConnectionError, match="Odoo error"):
             conn.search_read("res.partner", [])
 
 
@@ -579,15 +580,27 @@ class TestExecuteKwErrorHandling:
         assert not isinstance(exc_info.value, OdooValidationFault)
         assert "timeout" in str(exc_info.value)
 
-    def test_generic_fault_stays_connection_error(self, connected_connection):
-        """A fault without business-error markers keeps the historical
-        connection-flavored 'Operation failed' wrapping."""
+    def test_module_wrapper_text_is_dropped(self, connected_connection):
+        """Older MCP modules wrap every exception as 'Internal Server Error in ...'."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            500, "Internal Server Error in Invalid leaf ('name', 'like2', 'x')"
+        )
+
+        with pytest.raises(OdooRequestFault) as exc_info:
+            conn.execute_kw("res.partner", "search", [[]], {})
+
+        assert str(exc_info.value) == "Odoo error: Invalid leaf ('name', 'like2', 'x')"
+
+    def test_generic_fault_is_an_odoo_error(self, connected_connection):
+        """A fault without business-error markers is an Odoo error, not a
+        connection error: Odoo answered."""
         conn = connected_connection
         conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
             1, "RuntimeError: something unexpected broke"
         )
 
-        with pytest.raises(OdooConnectionError, match="Operation failed") as exc_info:
+        with pytest.raises(OdooRequestFault, match="Odoo error: RuntimeError") as exc_info:
             conn.execute_kw("res.partner", "search", [[]], {})
 
         assert not isinstance(exc_info.value, OdooValidationFault)

@@ -322,6 +322,12 @@ class AccessController:
                     _http_error_message(e) or "Access denied to MCP endpoints"
                 ) from e
             elif e.code == 404:
+                # The module answers an unknown model with its own 404 message
+                # ("Model 'x' not found in Odoo instance."). A 404 without it
+                # means the endpoint itself is missing.
+                message = _http_error_message(e)
+                if message:
+                    raise AccessControlError(message) from e
                 raise AccessControlUnavailableError(f"Endpoint not found: {endpoint}") from e
             else:
                 raise AccessControlUnavailableError(f"HTTP error {e.code}: {e.reason}") from e

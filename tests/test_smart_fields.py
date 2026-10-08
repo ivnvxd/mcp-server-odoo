@@ -113,6 +113,21 @@ class TestSmartFieldSelection:
         assert "stored_field" in result
         assert "amount_total" not in result
 
+    def test_get_smart_default_fields_keeps_the_hierarchy_parent(self, tool_handler):
+        """parent_id is kept even when the cap leaves no room for a many2one."""
+        tool_handler.connection.fields_get.return_value = {
+            "id": {"type": "integer"},
+            "name": {"type": "char", "required": True},
+            "ref": {"type": "char"},
+            "parent_id": {"type": "many2one", "relation": "res.partner"},
+        }
+        tool_handler.config.max_smart_fields = 2
+
+        result = tool_handler._get_smart_default_fields("res.partner")
+
+        assert "parent_id" in result
+        assert "ref" not in result
+
     def test_get_smart_default_fields_related_non_stored_makes_the_cut(self, tool_handler):
         """A related non-stored business field outranks a weaker stored field.
 

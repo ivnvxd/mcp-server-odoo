@@ -182,11 +182,11 @@ class TestLocaleInvalidFallback:
         mock_proxy = _make_connected(conn)
 
         # faultCode 1 = application error; codes 2/4 are Odoo's business
-        # classes and now surface without the "Operation failed" wrapping.
+        # classes and surface without the "Odoo error" label.
         fault = xmlrpc.client.Fault(1, "Some unrelated failure")
         mock_proxy.execute_kw.side_effect = fault
 
-        with pytest.raises(OdooConnectionError, match="Operation failed"):
+        with pytest.raises(OdooConnectionError, match="Odoo error"):
             conn.execute_kw("res.partner", "search", [[]], {})
 
         # Locale should NOT be disabled for unrelated faults

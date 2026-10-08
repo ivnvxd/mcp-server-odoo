@@ -19,6 +19,7 @@ from mcp_server_odoo.odoo_connection import (
     DATABASE_LISTING_FAILED,
     OdooConnection,
     OdooConnectionError,
+    OdooRequestFault,
     OdooUnreachableError,
     OdooValidationFault,
 )
@@ -319,10 +320,10 @@ class TestErrors:
         assert caught.value.fault_code == code
         self._assert_no_sentinel(caught.value)
 
-    def test_a_500_that_is_not_business_is_an_operation_failure(self, server):
+    def test_a_500_that_is_not_business_is_an_odoo_error(self, server):
         server.script = [{"status": 500, "json": odoo_error("builtins.KeyError", "nope")}]
 
-        with pytest.raises(OdooConnectionError, match="Operation failed: KeyError: nope") as caught:
+        with pytest.raises(OdooRequestFault, match="Odoo error: KeyError: nope") as caught:
             client_for(server).call("res.partner", "write", {})
         assert not isinstance(caught.value, OdooValidationFault)
         self._assert_no_sentinel(caught.value)

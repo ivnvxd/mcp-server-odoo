@@ -50,7 +50,7 @@ _USAGE_LINES = (
         ("create_records", "update_records"),
         "- Writes: to create or update many records, use create_records or update_records in "
         "one atomic call, not a loop of single calls. update_records takes shared values "
-        "(record_ids + values) or per-record values (updates).",
+        "(record_ids + values) or, on Odoo 19 and later, per-record values (updates).",
     ),
     (
         ("call_model_method",),

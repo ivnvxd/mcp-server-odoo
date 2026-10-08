@@ -110,7 +110,7 @@ class TestYoloModeTools:
         assert yolo_meta["enabled"] is True
         assert yolo_meta["level"] == "read"
         assert "READ-ONLY" in yolo_meta["description"]
-        assert "🚨" in yolo_meta["warning"]
+        assert "without MCP security" in yolo_meta["warning"]
         assert yolo_meta["operations"]["read"] is True
         assert yolo_meta["operations"]["write"] is False
         assert yolo_meta["operations"]["create"] is False
@@ -165,7 +165,7 @@ class TestYoloModeTools:
         assert yolo_meta["enabled"] is True
         assert yolo_meta["level"] == "true"
         assert "FULL ACCESS" in yolo_meta["description"]
-        assert "🚨" in yolo_meta["warning"]
+        assert "without MCP security" in yolo_meta["warning"]
         assert yolo_meta["operations"]["read"] is True
         assert yolo_meta["operations"]["write"] is True
         assert yolo_meta["operations"]["create"] is True
@@ -391,6 +391,8 @@ class TestYoloModeTools:
                     return actual.startswith(value.rstrip("%"))
                 if op == "in":
                     return actual in value
+                if op == "not in":
+                    return actual not in value
                 raise AssertionError(f"unexpected operator {op}")
 
             def consume(i):
@@ -422,6 +424,25 @@ class TestYoloModeTools:
         assert evaluate(domain, {"model": "repair.order", "transient": False})
         assert evaluate(domain, {"model": "properties.base.definition", "transient": False})
         assert not evaluate(domain, {"model": "res.partner", "transient": True})
+        # The abstract roots hold no records
+        assert not evaluate(domain, {"model": "base", "transient": False})
+        assert not evaluate(domain, {"model": "_unknown", "transient": False})
+
+    @pytest.mark.asyncio
+    async def test_list_models_yolo_hides_abstract_models_when_odoo_flags_them(
+        self, config_yolo_read, mock_connection, mock_access_controller, mock_app
+    ):
+        """Odoo 19 and later flag abstract models on ir.model; they are left out."""
+        mock_connection.search_read.return_value = []
+        mock_connection.fields_get.return_value = {"abstract": {"type": "boolean"}}
+        handler = OdooToolHandler(
+            mock_app, mock_connection, mock_access_controller, config_yolo_read
+        )
+
+        await handler._handle_list_models_tool()
+
+        domain = mock_connection.search_read.call_args[0][1]
+        assert domain[:2] == ["&", ("abstract", "=", False)]
 
     @pytest.mark.asyncio
     async def test_yolo_mode_logging(

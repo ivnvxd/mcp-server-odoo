@@ -216,8 +216,9 @@ class TestUpdateRecordsPerRecordValues:
             "Access denied by MCP for model 'res.partner' method 'web_save_multi'."
         )
 
-        with pytest.raises(ValidationError, match="method 'web_save_multi'"):
+        with pytest.raises(ValidationError, match="method 'web_save_multi'") as exc_info:
             await handler._handle_update_records_each_tool("res.partner", self.UPDATES)
+        assert "does not allow per-record values" in str(exc_info.value)
 
     async def test_refuses_an_attachment_on_an_inaccessible_model(self, handler, connection):
         connection.search_read.return_value = [{"id": 5, "res_model": "hr.payslip"}]

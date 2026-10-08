@@ -282,6 +282,7 @@ class TestReadAttachment:
 
         assert result.structured_content["truncated"] is True
         assert len(result.structured_content["text"]) == READ_TEXT_MAX_CHARS
+        assert f"{READ_TEXT_MAX_CHARS + 5:,} characters" in result.structured_content["note"]
 
     async def test_large_text_file_is_only_linked(self, handler, connection):
         meta = {"name": "a.log", "mimetype": "text/plain", "file_size": 5_000_000, "type": "binary"}
@@ -290,6 +291,7 @@ class TestReadAttachment:
         result = await handler._handle_read_attachment_tool(None, 9)
 
         assert result.structured_content["kind"] == "link"
+        assert "over 1 MB" in result.structured_content["note"]
         handler.app.read_resource.assert_not_awaited()
 
     async def test_pdf_returns_the_extracted_text(self, handler, connection):
@@ -311,6 +313,16 @@ class TestReadAttachment:
     async def test_pdf_without_extracted_text_is_only_linked(self, handler, connection):
         meta = {"name": "scan.pdf", "mimetype": "application/pdf", "file_size": 9, "type": "binary"}
         self._serve(handler, connection, {**meta, "index_content": False})
+
+        result = await handler._handle_read_attachment_tool(None, 9)
+
+        assert result.structured_content["kind"] == "link"
+        assert "no text" in result.structured_content["note"]
+
+    async def test_pdf_with_only_the_type_placeholder_is_only_linked(self, handler, connection):
+        # Odoo 16-18 without attachment_indexation index a PDF as "application"
+        meta = {"name": "a.pdf", "mimetype": "application/pdf", "file_size": 9, "type": "binary"}
+        self._serve(handler, connection, {**meta, "index_content": "application"})
 
         result = await handler._handle_read_attachment_tool(None, 9)
 

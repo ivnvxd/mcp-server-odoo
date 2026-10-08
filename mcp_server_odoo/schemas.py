@@ -116,7 +116,10 @@ class FieldsResult(BaseModel):
     omitted: Optional[int] = Field(
         default=None, description="Number of fields left out of the default view"
     )
-    note: Optional[str] = Field(default=None, description="How to get the fields left out")
+    note: Optional[str] = Field(
+        default=None,
+        description="How to get the fields left out, and any unknown field or attribute names",
+    )
 
 
 # --- Get Current Context ---
@@ -299,7 +302,9 @@ class ReadAttachmentResult(BaseModel):
     download_url: str = Field(
         description="Odoo download link for a person logged in to Odoo (not for the model)"
     )
-    note: Optional[str] = Field(default=None, description="Why only a link was returned")
+    note: Optional[str] = Field(
+        default=None, description="Why only a link was returned, or how much text was cut off"
+    )
 
 
 # --- Upload Attachment ---

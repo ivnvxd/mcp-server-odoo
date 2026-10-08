@@ -544,7 +544,11 @@ class DatasetFormatter:
             for idx, record in enumerate(records, 1):
                 if offset:
                     idx = offset + idx
-                lines.append(f"[{idx}] {self.record_formatter._get_record_summary(record)}")
+                # The position is not the record ID; name the ID next to it
+                summary = self.record_formatter._get_record_summary(record)
+                if "id" in record and not summary.startswith("ID:"):
+                    summary = f"ID {record['id']}: {summary}"
+                lines.append(f"[{idx}] {summary}")
 
                 # Add selected field values if specific fields were requested
                 if fields and len(fields) <= 5:  # Only show inline for small field sets

@@ -45,11 +45,13 @@ from .error_handling import (
 from .error_sanitizer import ErrorSanitizer
 from .field_security import is_sensitive_field_name, strip_sensitive_fields, withheld_note
 from .formatters import DatasetFormatter, RecordFormatter
+from .json_values import scrub_json_fields
 from .logging_config import get_logger, perf_logger
 from .odoo_connection import (
     XMLRPC_MAX_INT,
     OdooConnection,
     OdooConnectionError,
+    OdooRequestFault,
     OdooValidationFault,
 )
 from .uri_schema import (
@@ -848,7 +850,7 @@ class OdooResourceHandler:
 
         except (NotFoundError, MCPPermissionError, ValidationError):
             raise
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             logger.error(f"Connection error reading {model}/{record_id}/{field}: {e}")
@@ -978,7 +980,7 @@ class OdooResourceHandler:
 
         except (NotFoundError, MCPPermissionError, ValidationError):
             raise
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             logger.error(f"Connection error reading attachment {attachment_id}: {e}")
@@ -1068,6 +1070,7 @@ class OdooResourceHandler:
                 records = await asyncio.to_thread(
                     read_without_binary_payloads, self.connection, model, record_ids, safe_fields
                 )
+                await asyncio.to_thread(scrub_json_fields, self.connection, model, records)
 
                 if not records:
                     raise NotFoundError(
@@ -1096,7 +1099,7 @@ class OdooResourceHandler:
         except (NotFoundError, MCPPermissionError, ValidationError):
             # Re-raise our custom exceptions
             raise
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             logger.error(f"Connection error retrieving {model}/{record_id}: {e}")
@@ -1206,6 +1209,7 @@ class OdooResourceHandler:
                     record_ids,
                     fields_to_read,
                 )
+                await asyncio.to_thread(scrub_json_fields, self.connection, model, records)
                 if fields_list is None and fields_to_read is None:
                     # Metadata unavailable, so ALL fields came back: apply the
                     # same post-read name-based credential strip the tools use
@@ -1251,7 +1255,7 @@ class OdooResourceHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise MCPPermissionError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             logger.error(f"Connection error searching {model}: {e}")
@@ -1567,7 +1571,7 @@ class OdooResourceHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise MCPPermissionError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             logger.error(f"Connection error counting {model}: {e}")
@@ -1618,7 +1622,7 @@ class OdooResourceHandler:
         except (MCPPermissionError, ValidationError):
             # Re-raise our custom exceptions
             raise
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             logger.error(f"Connection error getting fields for {model}: {e}")
