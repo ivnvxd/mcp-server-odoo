@@ -59,6 +59,7 @@ from .odoo_connection import (
     OdooConnectionError,
     OdooRequestFault,
     OdooValidationFault,
+    context_kwargs,
 )
 from .resources import _is_text_mimetype
 from .schemas import (
@@ -466,15 +467,6 @@ def _with_context(call_context: Optional[Dict[str, Any]], **fixed: Any) -> Dict[
     return {**(call_context or {}), **fixed}
 
 
-def _context_kwarg(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """``context=`` for a connection call, left out when there is none.
-
-    A copy per call: execute_kw adds keys to the context it is given (lang,
-    allowed_company_ids), and the next call of the tool must not see them.
-    """
-    return {"context": dict(context)} if context else {}
-
-
 def _validate_record_id(record_id: int, label: str = "record ID") -> None:
     """Reject ids outside the XML-RPC 32-bit range before any RPC call.
 
@@ -611,31 +603,56 @@ class OdooToolHandler:
     def _check_lang(self, lang: str) -> None:
         """Refuse a context lang that Odoo has not installed (blocking).
 
-        Odoo 18 and later refuse it themselves. Odoo 16 and 17 ignore it, so a
-        write would land in the default language and replace that value. The
-        active codes are cached and read again once for an unknown code. When
-        Odoo refuses the read of res.lang (standard mode without it), the
-        check is left out.
+        Odoo 18 and later refuse it themselves, and take en_US always. Odoo 16
+        and 17 ignore it, so a write would land in the default language and
+        replace that value. The installed codes are cached and read again once
+        for an unknown code. When they cannot be read at all, the lang is
+        refused: Odoo would not refuse it.
         """
         major = self.connection.get_major_version()
-        if not isinstance(major, int) or major >= 18:
+        if not isinstance(major, int) or major >= 18 or lang == "en_US":
             return
-        for attempt in (0, 1):
-            if self._active_langs is None or attempt:
-                try:
-                    rows = self.connection.search_read(
-                        "res.lang", [["active", "=", True]], ["code"]
-                    )
-                except OdooValidationFault as e:
-                    logger.debug(f"Could not read the active languages: {e}")
-                    return
-                self._active_langs = {row["code"] for row in rows}
-            if lang in self._active_langs:
-                return
-        raise ValidationError(
-            f"Language '{lang}' is not installed in Odoo. Installed: "
-            f"{', '.join(sorted(self._active_langs or []))}."
-        )
+        fresh = self._active_langs is None
+        if fresh:
+            self._active_langs = self._installed_langs()
+        if self._active_langs is not None and lang not in self._active_langs and not fresh:
+            self._active_langs = self._installed_langs()
+        if self._active_langs is None:
+            raise ValidationError(
+                f"Cannot check that language '{lang}' is installed: this user cannot read "
+                "res.partner or res.lang. Odoo 16 and 17 would write the default language "
+                "instead, so leave context.lang out or enable one of these models for MCP."
+            )
+        if lang not in self._active_langs:
+            raise ValidationError(
+                f"Language '{lang}' is not installed in Odoo. Installed: "
+                f"{', '.join(sorted(self._active_langs))}."
+            )
+
+    def _installed_langs(self) -> Optional[Set[str]]:
+        """Codes of the installed languages, or None when Odoo refuses both reads (blocking).
+
+        The selection of res.partner.lang lists exactly the installed
+        languages, and fields_get works where the MCP module does not enable
+        res.lang itself. Not the cached fields_get: a language installed since
+        must show.
+        """
+        try:
+            fields = self.connection.execute_kw(
+                "res.partner", "fields_get", [["lang"]], {"attributes": ["selection"]}
+            )
+            lang_field = fields.get("lang") if isinstance(fields, dict) else None
+            selection = (lang_field or {}).get("selection")
+            if selection:
+                return {code for code, _ in selection}
+        except OdooValidationFault as e:
+            logger.debug(f"Could not read the languages from res.partner: {e}")
+        try:
+            rows = self.connection.search_read("res.lang", [["active", "=", True]], ["code"])
+        except OdooValidationFault as e:
+            logger.debug(f"Could not read the active languages: {e}")
+            return None
+        return {row["code"] for row in rows}
 
     def _call_context(self, context: Any) -> Optional[Dict[str, Any]]:
         """Validate a tool's ``context`` argument (blocking: it may read the
@@ -1298,7 +1315,7 @@ class OdooToolHandler:
             try:
                 self.access_controller.validate_model_access(relation, "read")
                 related = self.connection.read(
-                    relation, ids, ["display_name"], **_context_kwarg(context)
+                    relation, ids, ["display_name"], **context_kwargs(context)
                 )
             except Exception as e:
                 logger.debug(f"Skipping related summary for {model}.{name}: {e}")
@@ -2215,7 +2232,7 @@ class OdooToolHandler:
                     limit=limit,
                     offset=offset,
                     order=order,
-                    **_context_kwarg(call_context),
+                    **context_kwargs(call_context),
                 )
 
                 # Always count. Inferring "a short page holds every match"
@@ -2229,7 +2246,7 @@ class OdooToolHandler:
                     self.connection.search_count,
                     model,
                     parsed_domain,
-                    **_context_kwarg(call_context),
+                    **context_kwargs(call_context),
                 )
                 # No progress notifications — see CLAUDE.md "MCP context conventions".
                 await self._ctx_info(ctx, f"Found {total_count} records")
@@ -3025,7 +3042,7 @@ class OdooToolHandler:
                     )
 
                 record_id = await asyncio.to_thread(
-                    self.connection.create, model, values, **_context_kwarg(call_context)
+                    self.connection.create, model, values, **context_kwargs(call_context)
                 )
 
                 # display_name only — universal and cheap; get_record for more.
@@ -3037,7 +3054,7 @@ class OdooToolHandler:
                     model,
                     [record_id],
                     essential_fields,
-                    **_context_kwarg(call_context),
+                    **context_kwargs(call_context),
                 )
                 if not records:
                     raise ValidationError(
@@ -3117,7 +3134,7 @@ class OdooToolHandler:
                         )
 
                 record_ids = await asyncio.to_thread(
-                    self.connection.create_many, model, records, **_context_kwarg(call_context)
+                    self.connection.create_many, model, records, **context_kwargs(call_context)
                 )
 
                 # display_name only — universal and cheap; get_record for more.
@@ -3126,7 +3143,7 @@ class OdooToolHandler:
                     model,
                     record_ids,
                     ["id", "display_name"],
-                    **_context_kwarg(call_context),
+                    **context_kwargs(call_context),
                 )
                 by_id = {row["id"]: row for row in rows}
                 created = []
@@ -3226,7 +3243,7 @@ class OdooToolHandler:
                     model,
                     [record_id],
                     values,
-                    **_context_kwarg(call_context),
+                    **context_kwargs(call_context),
                 )
 
                 # display_name only — universal and cheap; get_record for more.
@@ -3238,7 +3255,7 @@ class OdooToolHandler:
                     model,
                     [record_id],
                     essential_fields,
-                    **_context_kwarg(call_context),
+                    **context_kwargs(call_context),
                 )
                 if not records:
                     raise ValidationError(
@@ -3346,7 +3363,7 @@ class OdooToolHandler:
                 await asyncio.to_thread(self._check_write_fields, model, values)
 
                 success = await asyncio.to_thread(
-                    self.connection.write, model, record_ids, values, **_context_kwarg(call_context)
+                    self.connection.write, model, record_ids, values, **context_kwargs(call_context)
                 )
 
                 essential_fields = ["id", "display_name"]
@@ -3355,7 +3372,7 @@ class OdooToolHandler:
                     model,
                     record_ids,
                     essential_fields,
-                    **_context_kwarg(call_context),
+                    **context_kwargs(call_context),
                 )
                 if not records:
                     raise ValidationError(
@@ -3486,7 +3503,7 @@ class OdooToolHandler:
                         model,
                         ids,
                         vals_list,
-                        **_context_kwarg(call_context),
+                        **context_kwargs(call_context),
                     )
                 except OdooValidationFault as e:
                     if not self.config.is_yolo_enabled and "web_save_multi" in str(e):
@@ -4252,7 +4269,7 @@ class OdooToolHandler:
                 order = _odoo16_group_order(order, fields_kwarg)
             kwargs["orderby"] = order
 
-        kwargs.update(_context_kwarg(context))
+        kwargs.update(context_kwargs(context))
         groups = self.connection.execute_kw(model, "read_group", [domain], kwargs)
         if groups is None:
             # Odoo 16 cannot marshal the None in the total row of an empty
@@ -4398,7 +4415,7 @@ class OdooToolHandler:
                     }
                     if order is not None:
                         kwargs["order"] = order
-                    kwargs.update(_context_kwarg(call_context))
+                    kwargs.update(context_kwargs(call_context))
                     groups = await asyncio.to_thread(
                         self.connection.execute_kw,
                         model,

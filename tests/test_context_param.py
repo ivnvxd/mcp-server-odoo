@@ -229,14 +229,50 @@ class TestLang:
 
         assert connection.write.called
 
-    async def test_an_unreadable_language_list_leaves_it_to_odoo(self, handler, connection):
+    async def test_an_unreadable_language_list_refuses_the_lang(self, handler, connection):
+        """Odoo 16 and 17 would not refuse it, so the tool must."""
         connection.search_read.side_effect = OdooValidationFault("res.lang not enabled", 403)
+
+        with pytest.raises(ValidationError, match="Cannot check that language 'fr_FR'"):
+            await handler._handle_update_record_tool(
+                "x.model", 7, {"name": "Chaise"}, context={"lang": "fr_FR"}
+            )
+        connection.write.assert_not_called()
+
+    async def test_the_languages_come_from_the_partner_lang_selection(self, handler, connection):
+        """Standard mode: res.lang is often not enabled, res.partner's fields_get is."""
+        connection.search_read.side_effect = OdooValidationFault("res.lang not enabled", 403)
+
+        def execute_kw(model, method, args, kwargs, scoped=True):
+            if (model, method) == ("res.partner", "fields_get"):
+                return {"lang": {"selection": [["en_US", "English"], ["fr_FR", "French"]]}}
+            return []
+
+        connection.execute_kw.side_effect = execute_kw
 
         await handler._handle_update_record_tool(
             "x.model", 7, {"name": "Chaise"}, context={"lang": "fr_FR"}
         )
 
         assert connection.write.called
+
+    async def test_en_us_is_always_accepted(self, handler, connection):
+        """Odoo 18 and later take en_US even when it is not active."""
+        connection.search_read.return_value = [{"code": "de_DE"}]
+
+        await handler._handle_update_record_tool(
+            "x.model", 7, {"name": "Chair"}, context={"lang": "en_US"}
+        )
+
+        assert connection.write.called
+        connection.search_read.assert_not_called()
+
+    async def test_an_uninstalled_lang_reads_the_languages_once(self, handler, connection):
+        with pytest.raises(ValidationError, match="not installed"):
+            await handler._handle_update_record_tool(
+                "x.model", 7, {"name": "Chaise"}, context={"lang": "fr_FR"}
+            )
+        assert connection.search_read.call_count == 1
 
     async def test_odoo_18_refuses_it_itself(self, handler, connection):
         connection.get_major_version.return_value = 18

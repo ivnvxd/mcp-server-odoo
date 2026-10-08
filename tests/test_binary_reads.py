@@ -23,3 +23,18 @@ def test_an_id_only_read_drops_missing_records(major):
     connection.search.assert_called_once_with(
         "res.partner", [["id", "in", [3, 999]]], context={"active_test": False}
     )
+
+
+def test_odoo_20_without_field_metadata_keeps_payloads_out():
+    """Odoo 20 ignores bin_size: a read without fields_get returns the payloads."""
+    connection = MagicMock(spec=OdooConnection)
+    connection.get_major_version.return_value = 20
+    connection.fields_get.side_effect = Exception("fields_get timed out")
+    payload = {"content": "iVBORw0KGgo=", "size": 8, "filename": "a.png"}
+    connection.read.return_value = [{"id": 3, "name": "A", "image_1920": payload}]
+
+    records = read_without_binary_payloads(connection, "res.partner", [3], None)
+
+    assert records == [
+        {"id": 3, "name": "A", "image_1920": "odoo://res.partner/record/3/image_1920"}
+    ]

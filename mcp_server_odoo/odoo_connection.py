@@ -216,7 +216,7 @@ def _raise_for_fault(fault: xmlrpc.client.Fault) -> NoReturn:
     raise OdooRequestFault(f"Odoo error: {sanitized_message}") from fault
 
 
-def _context_kwargs(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def context_kwargs(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """execute_kw kwargs carrying ``context``, copied: execute_kw adds keys to it."""
     return {"context": dict(context)} if context else {}
 
@@ -1359,7 +1359,7 @@ class OdooConnection:
                 kwargs["context"]["allowed_company_ids"] = limit
 
         if self._json2 is not None:
-            return self._execute_json2(model, method, args, kwargs, injected_lang)
+            return self._execute_json2(model, method, args, kwargs, injected_lang, scoped)
 
         try:
             # Log the operation (values redacted — write payloads can carry
@@ -1389,7 +1389,7 @@ class OdooConnection:
             if "Invalid language code" in e.faultString and self._drop_invalid_lang(
                 kwargs, injected_lang
             ):
-                return self.execute_kw(model, method, args, kwargs)
+                return self.execute_kw(model, method, args, kwargs, scoped=scoped)
 
             # Odoo's XML-RPC marshaller (allow_none=False) faults on void
             # returns, but the method already ran. Match the full dump_nil
@@ -1441,6 +1441,7 @@ class OdooConnection:
         args: List[Any],
         kwargs: Dict[str, Any],
         injected_lang: bool = False,
+        scoped: bool = True,
     ) -> Any:
         """``execute_kw`` over JSON-2: the same call with named arguments.
 
@@ -1468,7 +1469,7 @@ class OdooConnection:
                 and str(e).startswith("Invalid language code")
                 and self._drop_invalid_lang(kwargs, injected_lang)
             ):
-                return self.execute_kw(model, method, args, kwargs)
+                return self.execute_kw(model, method, args, kwargs, scoped=scoped)
             raise
         if method == "create" and args and isinstance(args[0], dict) and isinstance(result, list):
             return result[0] if result else result
@@ -1609,7 +1610,7 @@ class OdooConnection:
         Returns:
             Number of records matching the domain
         """
-        kwargs = _context_kwargs(context)
+        kwargs = context_kwargs(context)
         return self.execute_kw(model, "search_count", [domain], kwargs)
 
     def create(
@@ -1630,7 +1631,7 @@ class OdooConnection:
         """
         try:
             with self._performance_manager.monitor.track_operation(f"create_{model}"):
-                record_id = self.execute_kw(model, "create", [values], _context_kwargs(context))
+                record_id = self.execute_kw(model, "create", [values], context_kwargs(context))
                 logger.info(f"Created {model} record with ID {record_id}")
                 return record_id
         except Exception as e:
@@ -1652,7 +1653,7 @@ class OdooConnection:
         """
         try:
             with self._performance_manager.monitor.track_operation(f"create_{model}"):
-                record_ids = self.execute_kw(model, "create", [vals_list], _context_kwargs(context))
+                record_ids = self.execute_kw(model, "create", [vals_list], context_kwargs(context))
                 logger.info(f"Created {len(record_ids)} {model} record(s)")
                 return record_ids
         except Exception as e:
@@ -1680,7 +1681,7 @@ class OdooConnection:
                     model,
                     "web_save_multi",
                     [ids, vals_list, {"display_name": {}}],
-                    _context_kwargs(context),
+                    context_kwargs(context),
                 )
                 logger.info(f"Updated {len(ids)} {model} record(s) with per-record values")
                 return rows
@@ -1711,7 +1712,7 @@ class OdooConnection:
         """
         try:
             with self._performance_manager.monitor.track_operation(f"write_{model}"):
-                result = self.execute_kw(model, "write", [ids, values], _context_kwargs(context))
+                result = self.execute_kw(model, "write", [ids, values], context_kwargs(context))
                 logger.info(f"Updated {len(ids)} {model} record(s)")
                 return result
         except Exception as e:

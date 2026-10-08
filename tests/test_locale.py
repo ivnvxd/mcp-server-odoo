@@ -309,3 +309,18 @@ class TestInvalidLangAttribution:
 
         assert conn.execute_kw("res.partner", "search_read", [[]], {}) == [{"id": 1}]
         assert len(calls) == 2
+
+    def test_the_retry_keeps_the_call_unscoped(self, config_with_locale):
+        """The read of the user's companies must stay unscoped after the locale retry."""
+        config_with_locale.allowed_companies = [1, 9]
+        conn = OdooConnection(config_with_locale)
+        mock_proxy = _make_connected(conn)
+        mock_proxy.execute_kw.side_effect = [
+            xmlrpc.client.Fault(2, "Invalid language code: es_ES"),
+            [{"id": 1, "company_ids": [1]}],
+        ]
+
+        conn.execute_kw("res.users", "read", [[1], ["company_ids"]], {}, scoped=False)
+
+        retry_kwargs = mock_proxy.execute_kw.call_args_list[1].args[-1]
+        assert "allowed_company_ids" not in retry_kwargs.get("context", {})

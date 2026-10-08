@@ -884,7 +884,7 @@ The server also provides direct access to Odoo data through resource URIs:
 - `odoo://res.partner/record/1/image_128` — Get partner 1's avatar image
 - `odoo://attachment/42` — Download attachment 42
 
-Populated binary fields in `get_record`/`search_records` results are returned as these resource URIs instead of inline base64 — read the URI to retrieve the actual bytes. Binary content is served exclusively via MCP resources: tool results carry URIs, never inline base64, so your MCP client must support `resources/read` to fetch it.
+Populated binary fields in `get_record`/`search_records` results are returned as these resource URIs instead of inline base64 — read the URI to retrieve the actual bytes. The bytes come from `resources/read`, or from the `read_attachment` tool, which returns text and images up to 256 KB inline for clients that do not read resources.
 
 Record and search resource reads withhold credential-like fields the same way the tools' bulk reads do — to read such a field, request it explicitly by name via the tools' `fields` parameter.
 

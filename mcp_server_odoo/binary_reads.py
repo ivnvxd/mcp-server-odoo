@@ -10,7 +10,12 @@ neither pulls a payload into a record read.
 import logging
 from typing import Any, Dict, List, Optional
 
-from .uri_schema import BINARY_FIELD_TYPES, URIValidationError, build_binary_uri
+from .uri_schema import (
+    BINARY_FIELD_TYPES,
+    URIValidationError,
+    build_binary_uri,
+    is_binary_payload_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +56,17 @@ def read_without_binary_payloads(
     try:
         fields_info = connection.fields_get(model)
     except Exception as e:
-        logger.warning(f"Could not get field metadata for {model}; reading binaries as-is: {e}")
-        return _read(connection, model, ids, fields, read_context, context)
+        # Odoo 20 then returns every populated binary inline; swap each for its URI
+        logger.warning(f"Could not get field metadata for {model}; replacing payloads read: {e}")
+        records = _read(connection, model, ids, fields, read_context, context)
+        for record in records:
+            for name, value in record.items():
+                if is_binary_payload_dict(value):
+                    try:
+                        record[name] = build_binary_uri(model, record["id"], name)
+                    except URIValidationError:
+                        record[name] = False
+        return records
 
     binary_names = {
         name for name, meta in fields_info.items() if (meta or {}).get("type") in BINARY_FIELD_TYPES
