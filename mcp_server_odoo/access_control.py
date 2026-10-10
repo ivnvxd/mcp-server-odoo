@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .config import OdooConfig
 from .error_handling import ValidationError
@@ -750,3 +750,113 @@ def document_owners(
         else {}
     )
     return [(row["id"], owners.get(message_ids.get(row["id"]))) for row in rows]
+
+
+def check_related_paths(
+    connection: Any,
+    access_controller: "AccessController",
+    config: OdooConfig,
+    model: str,
+    domain: Optional[Sequence[Any]] = None,
+    groupby: Optional[Sequence[str]] = None,
+    order: Optional[str] = None,
+) -> None:
+    """Refuse a read that reaches a model MCP refuses through a relation (blocking).
+
+    A condition such as ``user_ids.groups_id.name`` filters on res.groups, and
+    an ``any`` sub-domain or a condition on an x2many by name does the same,
+    while the allowlist was only asked about the model searched. A client that
+    cannot read res.groups could still test its values one guess at a time.
+    Grouping by an x2many lists the names of the related records, which record
+    reads withhold for a model that is not readable. Every relation a path
+    passes through must allow reads. A many2one at the end of a path stays
+    allowed: record reads show its name too. Unknown fields are left to Odoo,
+    which refuses them.
+    """
+    if config.is_yolo_enabled:
+        return
+    walker = _PathWalker(connection, access_controller)
+    if domain:
+        walker.domain(model, domain)
+    for spec in groupby or ():
+        if isinstance(spec, str):
+            name = spec.split(":")[0].strip()
+            end = walker.walk(model, name, "grouping by")
+            if end and end.get("type") in ("one2many", "many2many"):
+                walker.require(end.get("relation"), name, "grouping by")
+    for term in (order or "").split(","):
+        words = term.split()
+        name = words[0].split(":")[0] if words else ""
+        if name and not name.startswith("__"):
+            walker.walk(model, name, "ordering by")
+
+
+class _PathWalker:
+    def __init__(self, connection: Any, access_controller: "AccessController"):
+        self.connection = connection
+        self.access_controller = access_controller
+
+    def domain(self, model: str, domain: Sequence[Any]) -> None:
+        for leaf in domain:
+            if not (isinstance(leaf, (list, tuple)) and len(leaf) == 3):
+                continue
+            path, operator, value = leaf
+            if not isinstance(path, str):
+                continue
+            end = self.walk(model, path, "the condition on")
+            if not end:
+                continue
+            relation = end.get("relation")
+            if end.get("type") not in ("many2one", "one2many", "many2many") or not relation:
+                continue
+            if operator in ("any", "not any"):
+                self.require(relation, path, "the condition on")
+                if isinstance(value, (list, tuple)):
+                    self.domain(relation, value)
+            elif end.get("type") != "many2one" and not _ids_only(value):
+                # A name on an x2many runs a name search on the related model
+                self.require(relation, path, "the condition on")
+
+    def walk(self, model: str, path: str, usage: str) -> Optional[Dict[str, Any]]:
+        """Check each relation a dotted path passes through; return the last field."""
+        current = model
+        segments = path.split(".")
+        for index, segment in enumerate(segments):
+            try:
+                fields = self.connection.fields_get(current)
+            except Exception:
+                return None  # Odoo answers the condition itself
+            meta = fields.get(segment) if isinstance(fields, dict) else None
+            if not isinstance(meta, dict):
+                return None
+            if index == len(segments) - 1:
+                return meta
+            relation = meta.get("relation")
+            if not relation:
+                return None  # A path into a properties or json field
+            self.require(relation, path, usage)
+            current = relation
+        return None
+
+    def require(self, relation: Optional[str], path: str, usage: str) -> None:
+        if not relation:
+            return
+        try:
+            self.access_controller.validate_model_access(relation, "read")
+        except AccessControlUnavailableError:
+            raise
+        except AccessControlError as e:
+            raise ValidationError(
+                f"Access denied: {usage} '{path}' reads {relation}, which is not accessible via MCP"
+            ) from e
+
+
+def _ids_only(value: Any) -> bool:
+    """Whether a condition value names records by id only (no name search)."""
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, int):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(isinstance(v, int) and not isinstance(v, bool) for v in value)
+    return False

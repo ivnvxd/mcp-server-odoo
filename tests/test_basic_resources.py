@@ -2110,6 +2110,31 @@ class TestAttachmentMetadataGatingInResources:
         mock_connection.read.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_count_resource_checks_related_paths(
+        self, handler, mock_connection, mock_access_controller
+    ):
+        """No template passes a domain today; the handler checks one anyway."""
+        mock_connection.fields_get = Mock(
+            side_effect=lambda model, *a, **k: {
+                "res.partner": {"user_ids": {"type": "one2many", "relation": "res.users"}},
+                "res.users": {"groups_id": {"type": "many2many", "relation": "res.groups"}},
+            }.get(model, {})
+        )
+
+        def gate(model, operation):
+            if model == "res.groups":
+                raise AccessControlError("not enabled")
+
+        mock_access_controller.validate_model_access.side_effect = gate
+
+        with pytest.raises(ValidationError, match="reads res.groups"):
+            await handler._handle_count(
+                "res.partner", '[["user_ids.groups_id.name", "=", "Settings"]]'
+            )
+
+        mock_connection.search_count.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_search_resource_scopes_messages(self, handler, mock_connection):
         mock_connection.search.return_value = []
         mock_connection.search_count.return_value = 0

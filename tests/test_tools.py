@@ -6998,6 +6998,83 @@ class TestMany2oneValues:
         connection.write.assert_not_called()
 
 
+class TestNestedDocumentOwners:
+    """[1, id, {...}] and [2, id] act on the row with that id wherever it
+    belongs, so a nested command on a partner's message_ids could change a
+    message of a model MCP refuses. The owner must allow writes.
+    """
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.fields_get.return_value = {
+            "name": {"type": "char"},
+            "message_ids": {"type": "one2many", "relation": "mail.message"},
+        }
+        connection.search_count.return_value = 1
+        connection.search.return_value = [1]
+        connection.read.return_value = [{"id": 1, "display_name": "Azure"}]
+        connection.write.return_value = True
+        connection.search_read.return_value = [{"id": 5, "model": "res.groups"}]
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+
+        def gate(model, operation):
+            if model == "res.groups":
+                raise AccessControlError(f"Model '{model}' is not enabled for MCP access")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "commands",
+        [
+            [[1, 5, {"body": "x"}]],
+            [[2, 5]],
+            [[4, 5]],
+            [[6, 0, [5]]],
+            [5],
+            [[0, 0, {"body": "x", "model": "res.groups", "res_id": 1}]],
+        ],
+    )
+    async def test_a_message_of_a_refused_owner_is_refused(self, handler, connection, commands):
+        with pytest.raises(ValidationError, match="res.groups"):
+            await handler._handle_update_record_tool("res.partner", 1, {"message_ids": commands})
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_names_the_field_and_the_message(self, handler):
+        with pytest.raises(ValidationError) as exc:
+            await handler._handle_update_record_tool(
+                "res.partner", 1, {"message_ids": [[1, 5, {"body": "x"}]]}
+            )
+
+        assert str(exc.value) == (
+            "Access denied: values.message_ids: message 5 belongs to 'res.groups', "
+            "which MCP does not allow to be changed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_message_of_an_allowed_owner_goes_through(self, handler, connection):
+        connection.search_read.return_value = [{"id": 5, "model": "res.partner"}]
+
+        result = await handler._handle_update_record_tool(
+            "res.partner", 1, {"message_ids": [[1, 5, {"body": "x"}]]}
+        )
+
+        assert result["success"] is True
+
+
 class TestSmartDefaultsEmptySelection:
     """Odoo's check_field_access_rights replaces a FALSY field list with every
     readable field, so `read(ids, [])` is an all-fields read. It has to take

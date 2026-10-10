@@ -33,6 +33,7 @@ from .access_control import (
     AccessControlUnavailableError,
     access_denied_message,
     check_domain_balance,
+    check_related_paths,
     document_owners,
     document_scope_domain,
 )
@@ -1084,6 +1085,19 @@ class OdooResourceHandler:
             limit_value = self._parse_limit(limit)
             offset_value = self._parse_offset(offset, limit_value)
             order_value = self._parse_order(order)
+            # The template passes no domain or order today; checked anyway, so
+            # that a caller of this handler cannot reach a refused model
+            # through a relation (see access_control.check_related_paths)
+            await asyncio.to_thread(
+                check_related_paths,
+                self.connection,
+                self.access_controller,
+                self.config,
+                model,
+                requested_domain,
+                None,
+                order_value,
+            )
 
             # Perform search
             record_ids = await asyncio.to_thread(
@@ -1459,6 +1473,14 @@ class OdooResourceHandler:
             # only the caller's own domain is echoed back.
             requested_domain = self._parse_domain(domain)
             parsed_domain = requested_domain
+            await asyncio.to_thread(
+                check_related_paths,
+                self.connection,
+                self.access_controller,
+                self.config,
+                model,
+                requested_domain,
+            )
             if model in DOCUMENT_LINKS:
                 # Metadata is sensitive too — see access_control.document_scope_domain.
                 scope = await asyncio.to_thread(
