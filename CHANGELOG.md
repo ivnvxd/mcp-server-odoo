@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-10
+
 ### Added
 - **JSON-2 transport**: in YOLO mode with an API key, the server talks to Odoo 19 and later through the JSON-2 API (`/json/2`) instead of the deprecated XML-RPC, and falls back to XML-RPC when JSON-2 is not available. `ODOO_RPC_TRANSPORT` (`auto`, `xmlrpc`, `json2`) overrides the choice, and `/health` shows it. `ODOO_USER` is not needed over JSON-2. If Odoo refuses the API key and `ODOO_USER` and `ODOO_PASSWORD` are set, `auto` falls back to them over XML-RPC, as the XML-RPC path does. A JSON-2 timeout counts as Odoo being unreachable, so the server keeps running.
 - **Per-call `context`**: the read and write tools take a `context` with `allowed_company_ids`, `lang`, `tz` and `active_test`, so company-dependent fields such as `standard_price` can be read and written per company. Other keys are refused by name, and a `lang` that Odoo has not installed is refused instead of dropped. On Odoo 16 and 17 in standard mode, that check needs `res.partner` or `res.lang` enabled for MCP; without either, only `en_US` is accepted (#129, @lucianosanchez-ui).
