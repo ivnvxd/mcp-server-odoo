@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tool step messages**: they go to the server log only. mcp 2.x deprecates log notifications to the client.
 
 ### Fixed
+- **`--help`**: lists `ODOO_MCP_LOG_FORMAT` and `ODOO_MCP_SLOW_OPERATION_THRESHOLD_MS`, as README and `.env.example` do.
 - **Nested writes in standard mode**: x2many commands in `values` are checked against the allowlist of the related model. A write on an allowed model can no longer create, change or delete records of a refused one, nor an attachment or message that belongs to one.
 - **Attachment writes in standard mode**: creating, changing, moving or deleting an attachment needs write access on the model that it belongs to, as `upload_attachment` already did.
 - **Reads through relations in standard mode**: a condition, `any` sub-domain, `order` or grouping that passes through a relation needs read access on the related model. A filter on `user_ids.groups_id.name` could test the values of a model that is not enabled.
