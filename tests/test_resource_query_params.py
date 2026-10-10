@@ -232,7 +232,7 @@ class TestResourceQueryParameterHandling:
 
 
 class TestResourceDomainBalance:
-    """The resource handlers append attachment_scope_domain()'s prefix-notation
+    """The resource handlers append document_scope_domain()'s prefix-notation
     result to the caller's domain exactly as the tool handlers do, so they need
     the same precondition: an unbalanced caller domain would take the scope's
     OR-subtree as its own operand and OR the allowlist away.

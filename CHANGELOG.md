@@ -22,9 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CI on pull requests to any branch**: the trigger matched only branch names without a `/`, so pull requests against `release/*` ran no CI.
 
 ### Changed
+- **Permission cache documented**: in standard mode a permission granted in Odoo can take up to 5 minutes to reach the server. README and `.env.example` say so.
 - **JSON-2 by default on Odoo 19 and later**: YOLO setups with an API key switch from XML-RPC to JSON-2. There `call_model_method` takes only the record IDs in `arguments`; pass every other argument in `keyword_arguments`. `ODOO_RPC_TRANSPORT=xmlrpc` keeps XML-RPC.
 - **Default search limit is 25**: `search_records`, `aggregate_records` and the search resource return 25 records by default instead of 10. Set `ODOO_MCP_DEFAULT_LIMIT=10` to keep the old behavior.
-- **Stricter tool input**: a tool refuses arguments it does not take, and names them. Before, a misspelled argument such as `limt` was dropped and the call ran with the defaults. A record ID of `true` or `false` is refused instead of read as 1 or 0.
+- **Stricter tool input**: a tool refuses arguments it does not take, and names them. Before, a misspelled argument such as `limt` was dropped and the call ran with the defaults. A record ID of `true` or `false` is refused instead of read as 1 or 0. A many2one value must be a record id or `false`: the `[id, name]` pair that a read returns is refused with a hint, where Odoo 16 to 18 failed with a database error and Odoo 19 emptied the field.
 - **Smart default fields**: a read without `fields` always includes `parent_id` when the model has one, so the contacts of a company can be told apart, and price fields such as `list_price` rank higher.
 - **`get_fields` default view**: without `field_names`, it returns the 60 most relevant value fields, many2one included, plus every one2many, many2many, file and HTML field, with selection lists cut at 20 values. Pass `["__all__"]` for every field.
 - **mcp 2.x**: the server runs on `mcp>=2.2,<3` and no longer depends on `pydantic-settings`. `serverInfo.version` reports the package version instead of the SDK version. Over HTTP, the SDK refuses request bodies over 4 MiB with 413, and holds at most 10,000 open sessions.
@@ -32,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tool step messages**: they go to the server log only. mcp 2.x deprecates log notifications to the client.
 
 ### Fixed
+- **Nested writes in standard mode**: x2many commands in `values` are checked against the allowlist of the related model. A write on an allowed model can no longer create, change or delete records of a refused one.
+- **Attachment writes in standard mode**: creating, changing, moving or deleting an attachment needs write access on the model that it belongs to, as `upload_attachment` already did.
+- **Reads through relations in standard mode**: a condition, `any` sub-domain, `order` or grouping that passes through a relation needs read access on the related model. A filter on `user_ids.groups_id.name` could test the values of a model that is not enabled.
+- **A model that is not installed**: the error no longer starts with "Access denied".
+- **Messages in standard mode**: `mail.message`, `mail.mail`, `mail.followers`, `mail.activity`, `mail.tracking.value` and `mail.notification` are limited to enabled models, as attachments are, in the tools and the resources.
 - **Requests while Odoo is down**: they return the connection error as the tool or resource error, without a traceback in the log for each call. The JSON-2 messages no longer repeat "Cannot connect to Odoo", and a refused API key mentions the `rpc` scope that Odoo 20 needs.
 - **`any` and `not any` on Odoo 16**: Odoo 16 failed such a domain with "unhashable type: 'list'", shown as a connection error. `search_records` and `aggregate_records` now refuse it with a clear message that suggests a dotted path.
 - **Empty total on Odoo 16**: `aggregate_records` without a `groupby` on a domain that matched nothing failed with "'NoneType' object is not iterable". It returns a row with `__count` 0.

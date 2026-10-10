@@ -26,12 +26,15 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import Annotations
 
 from .access_control import (
+    DOCUMENT_LINKS,
+    DOCUMENT_NOUNS,
     AccessControlError,
     AccessController,
     AccessControlUnavailableError,
     access_denied_message,
-    attachment_scope_domain,
     check_domain_balance,
+    document_owners,
+    document_scope_domain,
 )
 from .binary_reads import read_without_binary_payloads, uses_odoo_20_binaries
 from .config import OdooConfig, max_offset_for
@@ -561,7 +564,11 @@ class OdooResourceHandler:
             )
 
     async def _assert_attachment_model_allowed(
-        self, res_model: Optional[Any], attachment_id: Any, context: ErrorContext
+        self,
+        res_model: Optional[Any],
+        attachment_id: Any,
+        context: ErrorContext,
+        noun: str = "attachment",
     ) -> None:
         """Gate an attachment on the model it is attached to.
 
@@ -583,34 +590,29 @@ class OdooResourceHandler:
         except AccessControlError as e:
             logger.warning(f"Access denied for attachment {attachment_id} on {res_model}: {e}")
             raise MCPPermissionError(
-                f"Access denied: attachment {attachment_id} belongs to "
+                f"Access denied: {noun} {attachment_id} belongs to "
                 f"'{res_model}', which is not accessible via MCP",
                 context=context,
             ) from e
 
-    async def _gate_attachment_row(self, record_id_int: int, context) -> None:
-        """Apply the attached-to-model gate to an ir.attachment row by id.
+    async def _gate_document_row(self, model: str, record_id_int: int, context) -> None:
+        """Apply the owner gate to a row of a DOCUMENT_LINKS model by id.
 
-        Used by every ir.attachment path that does not go through
-        ``_handle_attachment_read`` (which gates on metadata it already
-        fetched): the record resource, and the generic binary-field reader.
-        ``datas``, ``raw`` and ``db_datas`` are all delegated to the
-        attachment handler; ``thumbnail`` is a binary field on ir.attachment
-        too and still reaches the generic path, which validates ir.attachment
-        alone. It must not become the hole the payload gate closes — that one
-        field is what keeps this helper load-bearing.
+        Used by every path that does not go through ``_handle_attachment_read``
+        (which gates on metadata it already fetched): the record resource, and
+        the generic binary-field reader. ``datas``, ``raw`` and ``db_datas``
+        are all delegated to the attachment handler; ``thumbnail`` is a binary
+        field on ir.attachment too and still reaches the generic path, which
+        validates ir.attachment alone. It must not become the hole the payload
+        gate closes — that one field is what keeps this helper load-bearing.
+        A message's body is gated the same way.
         """
-        rows = await asyncio.to_thread(
-            self.connection.search_read,
-            "ir.attachment",
-            [["id", "=", record_id_int]],
-            ["res_model"],
-            context={"active_test": False},
-        )
-        if rows:
-            await self._assert_attachment_model_allowed(
-                rows[0].get("res_model"), record_id_int, context
-            )
+        if model not in DOCUMENT_LINKS:
+            return
+        owners = await asyncio.to_thread(document_owners, self.connection, model, [record_id_int])
+        noun = DOCUMENT_NOUNS.get(model, model)
+        for record_id, owner in owners:
+            await self._assert_attachment_model_allowed(owner, record_id, context, noun)
 
     async def _handle_binary_field_read(
         self, model: str, record_id: str, field: str, ctx=None
@@ -669,8 +671,7 @@ class OdooResourceHandler:
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo", context=context)
 
-                if model == "ir.attachment":
-                    await self._gate_attachment_row(record_id_int, context)
+                await self._gate_document_row(model, record_id_int, context)
 
                 fields_info = await asyncio.to_thread(self.connection.fields_get, model)
                 field_info = fields_info.get(field)
@@ -953,9 +954,8 @@ class OdooResourceHandler:
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo", context=context)
 
-                # Metadata is sensitive too — see AccessController.attachment_scope_domain.
-                if model == "ir.attachment":
-                    await self._gate_attachment_row(record_id_int, context)
+                # Metadata is sensitive too — see access_control.document_scope_domain.
+                await self._gate_document_row(model, record_id_int, context)
 
                 # Search for the record to check if it exists.
                 # active_test=False: search honors Odoo's active_test even
@@ -1073,10 +1073,10 @@ class OdooResourceHandler:
             # invite the caller to pass back a domain the server re-applies.
             requested_domain = self._parse_domain(domain)
             parsed_domain = requested_domain
-            if model == "ir.attachment":
-                # Metadata is sensitive too — see AccessController.attachment_scope_domain.
+            if model in DOCUMENT_LINKS:
+                # Metadata is sensitive too — see access_control.document_scope_domain.
                 scope = await asyncio.to_thread(
-                    attachment_scope_domain, self.config, self.access_controller
+                    document_scope_domain, model, self.config, self.access_controller
                 )
                 if scope:
                     parsed_domain = list(requested_domain) + scope
@@ -1164,7 +1164,7 @@ class OdooResourceHandler:
             # Re-raise our custom exceptions
             raise
         except AccessControlUnavailableError as e:
-            # attachment_scope_domain fails closed — an allowlist it cannot
+            # document_scope_domain fails closed — an allowlist it cannot
             # read must surface as retryable, never as an unscoped result.
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
@@ -1205,7 +1205,7 @@ class OdooResourceHandler:
                 raise ValueError("Domain must be a list")
 
             # Same invariant the tool paths enforce: _handle_search and
-            # _handle_count append attachment_scope_domain()'s prefix-notation
+            # _handle_count append document_scope_domain()'s prefix-notation
             # result to this, and a dangling "|" would take the scope's
             # OR-subtree as its own operand and OR the allowlist away. Raised
             # rather than swallowed like the decode errors above — a domain
@@ -1459,10 +1459,10 @@ class OdooResourceHandler:
             # only the caller's own domain is echoed back.
             requested_domain = self._parse_domain(domain)
             parsed_domain = requested_domain
-            if model == "ir.attachment":
-                # Metadata is sensitive too — see AccessController.attachment_scope_domain.
+            if model in DOCUMENT_LINKS:
+                # Metadata is sensitive too — see access_control.document_scope_domain.
                 scope = await asyncio.to_thread(
-                    attachment_scope_domain, self.config, self.access_controller
+                    document_scope_domain, model, self.config, self.access_controller
                 )
                 if scope:
                     parsed_domain = list(requested_domain) + scope
@@ -1480,7 +1480,7 @@ class OdooResourceHandler:
             # Re-raise our custom exceptions
             raise
         except AccessControlUnavailableError as e:
-            # attachment_scope_domain fails closed — an allowlist it cannot
+            # document_scope_domain fails closed — an allowlist it cannot
             # read must surface as retryable, never as an unscoped result.
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:

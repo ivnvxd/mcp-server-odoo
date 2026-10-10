@@ -193,6 +193,27 @@ class TestAccessControl:
         assert access_denied_message(exc_info.value) == str(exc_info.value)
 
     @patch("urllib.request.urlopen")
+    def test_an_unknown_model_keeps_its_text_through_validate(self, mock_urlopen, controller):
+        """validate_model_access must not turn the module's 404 into a plain
+        AccessControlError, or the handlers prefix it with "Access denied"."""
+        body = json.dumps(
+            {
+                "success": False,
+                "error": {"message": "Model 'sale.order' not found in Odoo instance."},
+            }
+        ).encode("utf-8")
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            None, 404, "Not Found", {}, io.BytesIO(body)
+        )
+
+        with pytest.raises(AccessControlError) as exc_info:
+            controller.validate_model_access("sale.order", "read")
+
+        assert access_denied_message(exc_info.value) == (
+            "Model 'sale.order' not found in Odoo instance."
+        )
+
+    @patch("urllib.request.urlopen")
     def test_make_request_http_500(self, mock_urlopen, controller):
         """Test REST API request with 500 error returns generic HTTP error."""
         mock_urlopen.side_effect = urllib.error.HTTPError(

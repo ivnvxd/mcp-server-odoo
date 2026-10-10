@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .config import OdooConfig
 from .error_handling import ValidationError
@@ -513,9 +513,11 @@ class AccessController:
 
             return True, None
 
-        except AccessControlUnavailableError:
+        except (AccessControlUnavailableError, AccessControlModelNotFoundError):
             # Infrastructure failure — propagate so callers report a
-            # connection problem (retryable), not a permission denial
+            # connection problem (retryable), not a permission denial. A model
+            # the module does not know propagates too, so that it is not
+            # reported as "Access denied".
             raise
         except AccessControlError as e:
             logger.error(f"Access control check failed: {e}")
@@ -621,66 +623,130 @@ def check_domain_balance(domain: List[Any], path: str = "domain") -> None:
         )
 
 
-def attachment_scope_domain(
-    config: OdooConfig, access_controller: "AccessController"
-) -> Optional[List[Any]]:
-    """Domain restricting ir.attachment rows to MCP-accessible res_models.
+# Models whose rows belong to a document of another model, mapped to the
+# domain path that names that model. Enabling one of them must not expose the
+# rows of every model: an attachment carries url and index_content (the
+# extracted document text), a message its body, a tracking value the old and
+# new values of a tracked field. A tracking value or a notification belongs
+# to the document of its message.
+DOCUMENT_LINKS: Dict[str, str] = {
+    "ir.attachment": "res_model",
+    "mail.message": "model",
+    "mail.mail": "model",
+    "mail.followers": "res_model",
+    "mail.activity": "res_model",
+    "mail.tracking.value": "mail_message_id.model",
+    "mail.notification": "mail_message_id.model",
+}
 
-    An attachment row exposes more than a payload: `res_model`, `url` and
-    `index_content` (the extracted document TEXT). Gating only the binary
-    readers would leave the allowlist sidestep open for metadata, so searches
-    and reads of ir.attachment are scoped here instead of post-filtering rows
-    — a domain keeps `search_count` and the pagination math consistent with
-    what is actually returned.
+
+# How the gates name a row of a DOCUMENT_LINKS model in a refusal
+DOCUMENT_NOUNS: Dict[str, str] = {
+    "ir.attachment": "attachment",
+    "mail.message": "message",
+    "mail.mail": "email",
+    "mail.followers": "follower",
+    "mail.activity": "activity",
+    "mail.tracking.value": "tracking value",
+    "mail.notification": "notification",
+}
+
+
+def document_scope_domain(
+    model: str,
+    config: OdooConfig,
+    access_controller: "AccessController",
+    operation: str = "read",
+) -> Optional[List[Any]]:
+    """Domain restricting a DOCUMENT_LINKS model to MCP-accessible owners.
+
+    Searches and reads of these models are scoped here instead of
+    post-filtering rows: a domain keeps `search_count` and the pagination math
+    consistent with what is actually returned.
 
     Lives here rather than beside its callers: the tool and resource handlers
     both need it, and an allowlist-derived domain belongs with the allowlist.
 
-    Scoped to models the caller may READ, not merely ones that are enabled:
-    the two are separate endpoints, and an enabled-but-unreadable model whose
-    attachments were admitted here would sidestep `validate_model_access`.
+    Scoped to owner models that allow `operation`, not merely ones that are
+    enabled: the two are separate endpoints, and an enabled-but-unreadable
+    model whose rows were admitted here would sidestep
+    `validate_model_access`.
 
     Fails CLOSED, like every other gate on this path: an unreadable allowlist
     propagates as AccessControlError so the caller sees a retryable "could not
     verify access" instead of an unscoped result set. Swallowing the error
     would silently disable the scope on every surface at once, which is the
-    one outcome a security control must not have. Returns None only when
-    scoping genuinely does not apply — YOLO mode allows every model.
+    one outcome a security control must not have. Returns None when scoping
+    does not apply: YOLO mode allows every model, and other models have no
+    owner.
 
     Raises:
         AccessControlError: If the enabled-model listing or a per-model
-            read permission cannot be retrieved.
+            permission cannot be retrieved.
     """
-    if config.is_yolo_enabled:
+    link = DOCUMENT_LINKS.get(model)
+    if config.is_yolo_enabled or not link:
         return None
     enabled = access_controller.get_enabled_models()
     names = []
     for entry in enabled:
-        model = entry.get("model")
-        if not model:
+        owner = entry.get("model")
+        if not owner:
             continue
-        # Enablement and READ permission are different endpoints (/mcp/models
-        # vs /mcp/models/{model}/access), so an enabled model may still be
-        # unreadable — and admitting it here would expose exactly the
-        # attachment metadata the gate exists to withhold.
+        # Enablement and the per-operation permission are different endpoints
+        # (/mcp/models vs /mcp/models/{model}/access), so an enabled model may
+        # still refuse the operation, and admitting it here would expose
+        # exactly the rows the gate exists to withhold.
         operations = entry.get("operations") or {}
         if operations:
-            # Newer MCP modules ship the flag in the listing itself — free.
-            if operations.get("read"):
-                names.append(model)
+            # Newer MCP modules ship the flags in the listing itself — free.
+            if operations.get(operation):
+                names.append(owner)
             continue
         # Older modules return only {model, name}. Neither default is safe:
-        # True admits attachments the caller cannot read, False hides ones it
-        # can — so resolve it. The per-model cache is shared with list_models,
-        # so this is usually already warm; an unresolvable permission raises
+        # True admits rows the caller cannot reach, False hides ones it can,
+        # so resolve it. The per-model cache is shared with list_models, so
+        # this is usually already warm; an unresolvable permission raises
         # AccessControlError and fails closed like the listing above.
-        if access_controller.get_model_permissions(model).can_read:
-            names.append(model)
+        if access_controller.get_model_permissions(owner).can_perform(operation):
+            names.append(owner)
     if not names:
-        # Standard mode with nothing enabled: only standalone attachments can
-        # qualify. Contradictory state (the ir.attachment gate already passed),
+        # Standard mode with nothing enabled: only rows without an owner can
+        # qualify. Contradictory state (the model's own gate already passed),
         # but the fail-closed reading is the safe one.
-        return [("res_model", "=", False)]
-    # Standalone attachments (no res_model) stay governed by the
-    # ir.attachment gate alone, exactly as the payload readers treat them.
-    return ["|", ("res_model", "=", False), ("res_model", "in", names)]
+        return [(link, "=", False)]
+    # Rows without an owner (a standalone attachment) stay governed by the
+    # model's own gate alone, exactly as the payload readers treat them.
+    return ["|", (link, "=", False), (link, "in", names)]
+
+
+def document_owners(
+    connection: Any, model: str, record_ids: Iterable[int]
+) -> List[Tuple[int, Optional[str]]]:
+    """Return (id, owner model) for each existing row of a DOCUMENT_LINKS model.
+
+    Blocking. A tracking value or a notification belongs to the owner of its
+    message, so that one extra read follows the message. Archived rows count:
+    an archived attachment still holds its document.
+    """
+    link = DOCUMENT_LINKS[model]
+    field = link.split(".")[0]
+    rows = connection.search_read(
+        model,
+        [["id", "in", list(record_ids)]],
+        [field],
+        context={"active_test": False},
+    )
+    if "." not in link:
+        return [(row["id"], row.get(field) or None) for row in rows]
+    message_ids = {}
+    for row in rows:
+        value = row.get(field)
+        if value:
+            message_ids[row["id"]] = value[0] if isinstance(value, (list, tuple)) else value
+    owners = (
+        dict(document_owners(connection, "mail.message", set(message_ids.values())))
+        if message_ids
+        else {}
+    )
+    return [(row["id"], owners.get(message_ids.get(row["id"]))) for row in rows]

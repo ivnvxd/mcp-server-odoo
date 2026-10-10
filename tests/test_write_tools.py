@@ -91,6 +91,8 @@ class TestWriteTools:
 
         mock_connection.create.return_value = created_id
         mock_connection.read.return_value = [essential_record]
+        # The owner gate resolves res_model_id through ir.model
+        mock_connection.search_read.return_value = [{"id": 448, "model": "res.partner"}]
 
         result = await tool_handler._handle_create_record_tool(model, values)
 
@@ -147,6 +149,7 @@ class TestWriteTools:
         mock_connection.search_count.return_value = 1
         mock_connection.read.return_value = [updated_record]
         mock_connection.write.return_value = True
+        mock_connection.search_read.return_value = [{"id": record_id, "res_model": "res.partner"}]
 
         result = await tool_handler._handle_update_record_tool(model, record_id, values)
 
@@ -215,6 +218,7 @@ class TestWriteTools:
 
         mock_connection.read.return_value = [{"id": 6115, "display_name": False}]
         mock_connection.unlink.return_value = True
+        mock_connection.search_read.return_value = [{"id": 6115, "model": "res.partner"}]
 
         result = await tool_handler._handle_delete_record_tool("mail.message", 6115)
 

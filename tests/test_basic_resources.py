@@ -2093,6 +2093,36 @@ class TestAttachmentMetadataGatingInResources:
         mock_access_controller.validate_model_access.assert_any_call("res.partner", "read")
 
     @pytest.mark.asyncio
+    async def test_record_resource_refuses_a_message_of_a_denied_model(
+        self, handler, mock_connection, mock_access_controller
+    ):
+        mock_connection.search_read = Mock(return_value=[{"id": 5, "model": "mail.channel"}])
+
+        def gate(model, operation):
+            if model == "mail.channel":
+                raise AccessControlError("not enabled")
+
+        mock_access_controller.validate_model_access.side_effect = gate
+
+        with pytest.raises(MCPPermissionError, match="message 5 belongs to 'mail.channel'"):
+            await handler._handle_record_retrieval("mail.message", "5")
+
+        mock_connection.read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_search_resource_scopes_messages(self, handler, mock_connection):
+        mock_connection.search.return_value = []
+        mock_connection.search_count.return_value = 0
+
+        await handler._handle_search("mail.message", None, None, None, None, None)
+
+        assert mock_connection.search.call_args[0][1] == [
+            "|",
+            ("model", "=", False),
+            ("model", "in", ["res.partner"]),
+        ]
+
+    @pytest.mark.asyncio
     async def test_search_resource_scopes_attachments(self, handler, mock_connection):
         mock_connection.search.return_value = []
         mock_connection.search_count.return_value = 0

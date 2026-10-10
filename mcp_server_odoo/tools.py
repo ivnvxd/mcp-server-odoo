@@ -33,12 +33,15 @@ from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BeforeValidator, WithJsonSchema
 
 from .access_control import (
+    DOCUMENT_LINKS,
+    DOCUMENT_NOUNS,
     AccessControlError,
     AccessController,
     AccessControlUnavailableError,
     access_denied_message,
-    attachment_scope_domain,
     check_domain_balance,
+    document_owners,
+    document_scope_domain,
 )
 from .binary_reads import read_without_binary_payloads, uses_odoo_20_binaries
 from .config import OdooConfig, max_offset_for
@@ -174,6 +177,49 @@ _BLOCKED_METHOD_CALLS = frozenset(
 # so the rejection message states the actual reason instead of calling
 # these ORM data-access primitives.
 _BLOCKED_PRIVILEGED_METHOD_NAMES = frozenset({"run", "method_direct_trigger"})
+
+_NESTED_VERBS = {"create": "create", "write": "change", "unlink": "delete"}
+
+
+def _nested_operations(command: Any, field_type: str) -> Tuple[str, ...]:
+    """The operations an x2many command performs on the related model.
+
+    0 creates, 1 updates and 2 deletes a related record. On a one2many, 4
+    (link) sets the related record's inverse field, a write, and 3 (unlink),
+    5 (clear) and 6 (set) clear it, or delete the record when the inverse
+    field is ondelete='cascade' (Odoo's One2many.write_real). The ondelete
+    rule is not in fields_get, so both are required. On a many2many, 3 to 6
+    change only the relation table: a write on the parent, already checked.
+    """
+    if command == 0:
+        return ("create",)
+    if command == 1:
+        return ("write",)
+    if command == 2:
+        return ("unlink",)
+    if field_type == "one2many":
+        if command == 4:
+            return ("write",)
+        if command in (3, 5, 6):
+            return ("write", "unlink")
+    return ()
+
+
+def _plain_scalar(value: Any) -> bool:
+    """A value no many2one check is needed for: a number, a boolean or None."""
+    return value is None or isinstance(value, (bool, int, float))
+
+
+def _ids_only(value: Any) -> bool:
+    """Whether a condition value names records by id only (no name search)."""
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, int):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(isinstance(v, int) and not isinstance(v, bool) for v in value)
+    return False
+
 
 # List results from call_model_method are truncated to this many items
 # (matches the search max limit) so a method returning a huge list cannot
@@ -1327,26 +1373,41 @@ class OdooToolHandler:
             ]
         return summaries or None
 
-    async def _gate_attachment_target(self, res_model: Any, label: str) -> None:
-        """Refuse an ir.attachment operation aimed at an inaccessible model."""
+    async def _gate_document_target(
+        self, res_model: Any, label: str, operation: str = "read"
+    ) -> None:
+        """Refuse an operation on an attachment or message whose owner refuses it.
+
+        ``operation`` is the one checked on the owner: ``read`` for reads,
+        ``write`` for creating, changing, moving or deleting the row, as Odoo
+        itself requires write access to the document for those.
+        """
         if not res_model or res_model == "ir.attachment":
             return
         try:
-            await asyncio.to_thread(self.access_controller.validate_model_access, res_model, "read")
+            await asyncio.to_thread(
+                self.access_controller.validate_model_access, res_model, operation
+            )
         except AccessControlUnavailableError:
             # Checked before AccessControlError, its base: "could not verify"
             # is an outage, not a denial, and must stay retryable.
             raise
         except AccessControlError as e:
-            raise MCPPermissionError(
-                f"Access denied: {label} '{res_model}', which is not accessible via MCP"
-            ) from e
+            reason = (
+                "which is not accessible via MCP"
+                if operation == "read"
+                else "which MCP does not allow to be changed"
+            )
+            raise MCPPermissionError(f"Access denied: {label} '{res_model}', {reason}") from e
 
-    async def _gate_attachment_records(self, record_ids: Sequence[int]) -> None:
-        """Refuse ir.attachment rows whose res_model is not accessible.
+    async def _gate_document_records(
+        self, model: str, record_ids: Sequence[int], operation: str = "read"
+    ) -> None:
+        """Refuse rows of a DOCUMENT_LINKS model whose owner refuses ``operation``.
 
-        The row carries `url` and `index_content` (the extracted document
-        text), so metadata reads need the same gate the payload readers use.
+        The rows carry more than a payload (an attachment's url and
+        index_content, a message's body), so metadata reads need the same gate
+        the payload readers use.
 
         Applied to WRITES as well as reads. Ungated, `update_record` on an
         attachment could repoint `res_model` from an excluded model to an
@@ -1354,19 +1415,303 @@ class OdooToolHandler:
         not merely an inconsistency — while `delete_record` would reach
         documents hanging off models deliberately left out of the allowlist.
         """
-        if not record_ids:
+        if model not in DOCUMENT_LINKS or not record_ids:
             return
-        rows = await asyncio.to_thread(
-            self.connection.search_read,
-            "ir.attachment",
-            [["id", "in", list(record_ids)]],
-            ["res_model"],
-            context={"active_test": False},
-        )
-        for row in rows:
-            await self._gate_attachment_target(
-                row.get("res_model"), f"attachment {row.get('id')} belongs to"
-            )
+        owners = await asyncio.to_thread(document_owners, self.connection, model, record_ids)
+        noun = DOCUMENT_NOUNS.get(model, model)
+        for record_id, owner in owners:
+            await self._gate_document_target(owner, f"{noun} {record_id} belongs to", operation)
+
+    async def _gate_document_values(self, model: str, values: Dict[str, Any], verb: str) -> None:
+        """Refuse values that would attach a DOCUMENT_LINKS row to a refusing owner."""
+        link = DOCUMENT_LINKS.get(model)
+        if not link:
+            return
+        noun = DOCUMENT_NOUNS.get(model, model)
+        if "." in link:
+            # A tracking value or a notification belongs to its message's owner
+            field = link.split(".")[0]
+            if values.get(field):
+                await self._gate_document_records("mail.message", [values[field]], "write")
+        elif model == "mail.activity":
+            # res_model is a read-only related field; the owner is set
+            # through res_model_id, an ir.model id
+            model_id = values.get("res_model_id")
+            if model_id:
+                try:
+                    rows = await asyncio.to_thread(
+                        self.connection.search_read,
+                        "ir.model",
+                        [["id", "=", model_id]],
+                        ["model"],
+                    )
+                except (OdooValidationFault, OdooRequestFault) as e:
+                    raise MCPPermissionError(
+                        f"Access denied: cannot check which model res_model_id {model_id} "
+                        "is, because ir.model is not readable via MCP"
+                    ) from e
+                if rows:
+                    await self._gate_document_target(
+                        rows[0].get("model"), f"{noun} would be {verb}", "write"
+                    )
+        elif link in values:
+            await self._gate_document_target(values[link], f"{noun} would be {verb}", "write")
+
+    async def _gate_writes(
+        self,
+        model: str,
+        vals_list: Sequence[Dict[str, Any]],
+        record_ids: Sequence[int] = (),
+        paths: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Refuse a create or update that reaches a model MCP refuses.
+
+        The allowlist is checked on the model a tool names. Two things reach
+        other models from there: the owner of an attachment or a message
+        (both the current owner of ``record_ids`` and a new one in the
+        values), and the nested commands in x2many values. ``paths`` names
+        each entry of ``vals_list`` in a refusal (``records[1]``); the
+        default is ``values``. The many2one values are checked in every mode.
+        """
+        labels = list(paths) if paths else ["values"] * len(vals_list)
+        for values, path in zip(vals_list, labels, strict=True):
+            await asyncio.to_thread(self._check_many2one_values, model, values, path)
+        if self.config.is_yolo_enabled:
+            # Every model is open, and the nested walk must not fail closed
+            # where fields_get does not answer
+            return
+        if model in DOCUMENT_LINKS:
+            # Both directions. Gating the CURRENT owner stops the escalation:
+            # repoint an excluded model's row at an allowed one and the read
+            # gate would then wave it through. Gating the NEW owner stops
+            # planting.
+            await self._gate_document_records(model, record_ids, "write")
+            verb = "moved to" if record_ids else "attached to"
+            for values in vals_list:
+                await self._gate_document_values(model, values, verb)
+        for values, path in zip(vals_list, labels, strict=True):
+            await asyncio.to_thread(self._check_nested_writes, model, values, path)
+
+    def _check_many2one_values(self, model: str, values: Dict[str, Any], path: str) -> None:
+        """Refuse a many2one value that is not a record id (blocking).
+
+        Reads return a many2one as ``[id, "name"]``, so a client easily sends
+        that pair, a dict or a name back. Odoo 16 to 18 fail with a database
+        error ("can't adapt type 'list'"), and Odoo 19 empties the field
+        without an error. The values of nested create and update commands are
+        checked the same way. Without field metadata nothing is checked here:
+        the write goes to Odoo, which refuses an unknown field itself.
+        """
+        if all(_plain_scalar(v) for v in values.values()):
+            return
+        try:
+            fields = self.connection.fields_get(model)
+        except Exception as e:
+            logger.debug(f"Could not get field metadata for {model}; values unchecked: {e}")
+            return
+        if not isinstance(fields, dict):
+            return
+        for name, value in values.items():
+            meta = fields.get(name)
+            if not isinstance(meta, dict):
+                continue
+            relation = meta.get("relation")
+            if meta.get("type") == "many2one":
+                if (
+                    value is None
+                    or value is False
+                    or (isinstance(value, int) and not isinstance(value, bool))
+                ):
+                    continue
+                hint = ""
+                if isinstance(value, (list, tuple)) and value and isinstance(value[0], int):
+                    hint = f" Pass {value[0]}, not the [id, name] pair a read returns."
+                elif isinstance(value, dict) and isinstance(value.get("id"), int):
+                    hint = f" Pass {value['id']}."
+                elif isinstance(value, str):
+                    hint = f" Find the id with search_records on {relation} first."
+                raise ValidationError(
+                    f"Invalid value for {path}.{name}: it links to {relation} and takes a "
+                    f"record id or false, got {value!r}.{hint}"
+                )
+            if (
+                meta.get("type") in ("one2many", "many2many")
+                and relation
+                and isinstance(value, (list, tuple))
+            ):
+                for command in value:
+                    if (
+                        isinstance(command, (list, tuple))
+                        and len(command) > 2
+                        and command[0] in (0, 1)
+                        and isinstance(command[2], dict)
+                    ):
+                        self._check_many2one_values(relation, command[2], f"{path}.{name}")
+
+    def _check_nested_writes(self, model: str, values: Dict[str, Any], path: str) -> None:
+        """Refuse x2many commands that act on a model MCP refuses (blocking).
+
+        A write on res.partner with ``user_ids: [[0, 0, {...}]]`` creates a
+        res.users row, and ``[[1, id, {...}]]`` changes one, while the
+        allowlist was only asked about res.partner. Each command is checked as
+        the operation it is on the related model, and the values of a nested
+        create or update are walked the same way. Fails closed: without field
+        metadata the nested commands cannot be checked, so they are refused.
+        """
+        candidates = [
+            (name, value)
+            for name, value in values.items()
+            if isinstance(value, (list, tuple)) and value
+        ]
+        if not candidates:
+            return
+        try:
+            fields = self.connection.fields_get(model)
+        except Exception as e:
+            raise ValidationError(
+                f"Could not check the related records in {path} on {model}: {e}"
+            ) from e
+        for name, commands in candidates:
+            meta = fields.get(name) if isinstance(fields, dict) else None
+            if not isinstance(meta, dict):
+                continue  # An unknown field is refused by _check_field_names
+            field_type = meta.get("type")
+            comodel = meta.get("relation")
+            if field_type not in ("one2many", "many2many") or not comodel:
+                continue
+            for command in commands:
+                if isinstance(command, bool):
+                    continue
+                if isinstance(command, int):
+                    # A plain id list replaces the set. On a one2many that
+                    # reparents the related records, a write on them.
+                    if field_type == "one2many":
+                        self._require_nested(comodel, "write", f"{path}.{name}")
+                    continue
+                if not isinstance(command, (list, tuple)) or not command:
+                    continue
+                for operation in _nested_operations(command[0], field_type):
+                    self._require_nested(
+                        comodel, operation, f"{path}.{name}", removal=command[0] in (3, 5, 6)
+                    )
+                if command[0] in (0, 1) and len(command) > 2 and isinstance(command[2], dict):
+                    self._check_nested_writes(comodel, command[2], f"{path}.{name}")
+
+    def _require_nested(
+        self, comodel: str, operation: str, label: str, removal: bool = False
+    ) -> None:
+        """Raise MCPPermissionError if ``operation`` on ``comodel`` is refused (blocking)."""
+        try:
+            self.access_controller.validate_model_access(comodel, operation)
+        except AccessControlUnavailableError:
+            raise
+        except AccessControlError as e:
+            verb = "change or delete" if removal else _NESTED_VERBS[operation]
+            reason = str(e).strip().rstrip(".")
+            if reason.lower().startswith("access denied: "):
+                reason = reason[len("access denied: ") :]
+            hint = ""
+            if removal and operation == "unlink":
+                # Only useful when the related record itself can be changed
+                try:
+                    self.access_controller.validate_model_access(comodel, "write")
+                    hint = f" To detach a record, set its own link field on {comodel} instead."
+                except AccessControlUnavailableError:
+                    raise
+                except AccessControlError:
+                    pass
+            raise MCPPermissionError(
+                f"Access denied: {label} would {verb} {comodel} records. {reason}.{hint}"
+            ) from e
+
+    def _check_related_paths(
+        self,
+        model: str,
+        domain: Optional[Sequence[Any]] = None,
+        groupby: Optional[Sequence[str]] = None,
+        order: Optional[str] = None,
+    ) -> None:
+        """Refuse a read that reaches a model MCP refuses through a relation (blocking).
+
+        A condition such as ``user_ids.groups_id.name`` filters on res.groups,
+        and an ``any`` sub-domain or a condition on an x2many by name does the
+        same, while the allowlist was only asked about the model searched. A
+        client that cannot read res.groups could still test its values one
+        guess at a time. Grouping by an x2many lists the names of the related
+        records, which record reads withhold for a model that is not readable.
+        Every relation a path passes through must allow reads. A many2one at
+        the end of a path stays allowed: record reads show its name too.
+        Unknown fields are left to Odoo, which refuses them.
+        """
+        if self.config.is_yolo_enabled:
+            return
+        if domain:
+            self._check_domain_paths(model, domain)
+        for spec in groupby or ():
+            if isinstance(spec, str):
+                name = spec.split(":")[0].strip()
+                end = self._walk_field_path(model, name, "grouping by")
+                if end and end.get("type") in ("one2many", "many2many"):
+                    self._require_readable(end.get("relation"), name, "grouping by")
+        for term in (order or "").split(","):
+            words = term.split()
+            name = words[0].split(":")[0] if words else ""
+            if name and not name.startswith("__"):
+                self._walk_field_path(model, name, "ordering by")
+
+    def _check_domain_paths(self, model: str, domain: Sequence[Any]) -> None:
+        for leaf in domain:
+            if not (isinstance(leaf, (list, tuple)) and len(leaf) == 3):
+                continue
+            path, operator, value = leaf
+            if not isinstance(path, str):
+                continue
+            end = self._walk_field_path(model, path, "the condition on")
+            if not end:
+                continue
+            relation = end.get("relation")
+            if end.get("type") not in ("many2one", "one2many", "many2many") or not relation:
+                continue
+            if operator in ("any", "not any"):
+                self._require_readable(relation, path, "the condition on")
+                if isinstance(value, (list, tuple)):
+                    self._check_domain_paths(relation, value)
+            elif end.get("type") != "many2one" and not _ids_only(value):
+                # A name on an x2many runs a name search on the related model
+                self._require_readable(relation, path, "the condition on")
+
+    def _walk_field_path(self, model: str, path: str, usage: str) -> Optional[Dict[str, Any]]:
+        """Check each relation a dotted path passes through; return the last field."""
+        current = model
+        segments = path.split(".")
+        for index, segment in enumerate(segments):
+            try:
+                fields = self.connection.fields_get(current)
+            except Exception:
+                return None  # Odoo answers the condition itself
+            meta = fields.get(segment) if isinstance(fields, dict) else None
+            if not isinstance(meta, dict):
+                return None
+            if index == len(segments) - 1:
+                return meta
+            relation = meta.get("relation")
+            if not relation:
+                return None  # A path into a properties or json field
+            self._require_readable(relation, path, usage)
+            current = relation
+        return None
+
+    def _require_readable(self, relation: Optional[str], path: str, usage: str) -> None:
+        if not relation:
+            return
+        try:
+            self.access_controller.validate_model_access(relation, "read")
+        except AccessControlUnavailableError:
+            raise
+        except AccessControlError as e:
+            raise ValidationError(
+                f"Access denied: {usage} '{path}' reads {relation}, which is not accessible via MCP"
+            ) from e
 
     def _parse_domain_input(self, domain: Optional[Any]) -> List[Any]:
         """Coerce a domain parameter into an Odoo domain list.
@@ -2165,19 +2510,22 @@ class OdooToolHandler:
                 call_context = await asyncio.to_thread(self._call_context, context)
                 parsed_domain = self._parse_domain_input(domain)
                 self._check_domain_operators(parsed_domain)
-                if model == "ir.attachment":
-                    # Scope to accessible res_models — an attachment row
-                    # carries url and index_content (the extracted document
-                    # text), so the allowlist gate must cover metadata, not
-                    # only payloads. Appended, not prefixed with an explicit
-                    # "&": Odoo normalizes a flat sequence of expressions
+                await asyncio.to_thread(
+                    self._check_related_paths, model, parsed_domain, None, order
+                )
+                if model in DOCUMENT_LINKS:
+                    # Scope to accessible owners: an attachment row carries
+                    # url and index_content (the extracted document text), a
+                    # message its body, so the allowlist gate must cover
+                    # metadata, not only payloads. Appended, not prefixed with
+                    # an explicit "&": Odoo normalizes a flat sequence of expressions
                     # with implicit ANDs, whereas a hand-written "&" would
                     # bind only the first term of a multi-leaf domain. That
                     # normalization only holds for a balanced caller domain,
                     # which _parse_domain_input has already enforced — an
                     # unbalanced one would capture this scope as an operand.
                     scope = await asyncio.to_thread(
-                        attachment_scope_domain, self.config, self.access_controller
+                        document_scope_domain, model, self.config, self.access_controller
                     )
                     if scope:
                         parsed_domain = list(parsed_domain) + scope
@@ -2372,8 +2720,7 @@ class OdooToolHandler:
 
                 await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
                 call_context = await asyncio.to_thread(self._call_context, context)
-                if model == "ir.attachment":
-                    await self._gate_attachment_records([record_id])
+                await self._gate_document_records(model, [record_id])
                 await self._ctx_info(ctx, f"Getting {model}/{record_id}...")
 
                 if not self.connection.is_authenticated:
@@ -2529,7 +2876,7 @@ class OdooToolHandler:
         except NotFoundError as e:
             raise ValidationError(str(e)) from e
         except MCPPermissionError as e:
-            # _gate_attachment_records' denial. Without this it would reach the
+            # _gate_document_records' denial. Without this it would reach the
             # generic handler below: logged as an unexpected failure and its
             # actionable "belongs to <model>" text replaced by a generic one.
             raise ValidationError(str(e)) from e
@@ -3037,13 +3384,9 @@ class OdooToolHandler:
                 # fail cleanly before any RPC.
                 _check_xmlrpc_int_bounds(values, "values")
 
-                if model == "ir.attachment":
-                    # Planting a document on a model left out of the allowlist
-                    # is the write-side of the same sidestep the read gate
-                    # closes.
-                    await self._gate_attachment_target(
-                        values.get("res_model"), "attachment would be attached to"
-                    )
+                # Planting a document on a model left out of the allowlist is
+                # the write-side of the same sidestep the read gate closes
+                await self._gate_writes(model, [values])
 
                 await asyncio.to_thread(self._check_field_names, model, values)
                 record_id = await asyncio.to_thread(
@@ -3131,12 +3474,9 @@ class OdooToolHandler:
                     raise ValidationError("Not authenticated with Odoo")
                 call_context = await asyncio.to_thread(self._call_context, context)
 
-                if model == "ir.attachment":
-                    # Same gate as create_record, per planted attachment
-                    for values in records:
-                        await self._gate_attachment_target(
-                            values.get("res_model"), "attachment would be attached to"
-                        )
+                await self._gate_writes(
+                    model, records, paths=[f"records[{i}]" for i in range(len(records))]
+                )
 
                 await asyncio.to_thread(
                     self._check_field_names, model, {k for values in records for k in values}
@@ -3221,16 +3561,7 @@ class OdooToolHandler:
                 # fail cleanly before any RPC.
                 _check_xmlrpc_int_bounds(values, "values")
 
-                if model == "ir.attachment":
-                    # Both directions. Gating the CURRENT owner stops the
-                    # escalation: repoint an excluded model's attachment at an
-                    # allowed one and the read gate would then wave it through.
-                    # Gating the NEW owner stops planting.
-                    await self._gate_attachment_records([record_id])
-                    if "res_model" in values:
-                        await self._gate_attachment_target(
-                            values["res_model"], "attachment would be moved to"
-                        )
+                await self._gate_writes(model, [values], [record_id])
 
                 # Check that the record exists. A read of only "id" cannot:
                 # Odoo 19 echoes {"id": x} back for a missing x. active_test=False
@@ -3342,12 +3673,7 @@ class OdooToolHandler:
 
                 _check_xmlrpc_int_bounds(values, "values")
 
-                if model == "ir.attachment":
-                    await self._gate_attachment_records(record_ids)
-                    if "res_model" in values:
-                        await self._gate_attachment_target(
-                            values["res_model"], "attachment would be moved to"
-                        )
+                await self._gate_writes(model, [values], record_ids)
 
                 # Check every record exists before writing — a partial batch
                 # write with no rollback signal would be worse than failing
@@ -3478,14 +3804,9 @@ class OdooToolHandler:
                     raise ValidationError("Not authenticated with Odoo")
                 call_context = await asyncio.to_thread(self._call_context, context)
 
-                if model == "ir.attachment":
-                    # Both directions, as in update_record
-                    await self._gate_attachment_records(ids)
-                    for entry_values in vals_list:
-                        if "res_model" in entry_values:
-                            await self._gate_attachment_target(
-                                entry_values["res_model"], "attachment would be moved to"
-                            )
+                await self._gate_writes(
+                    model, vals_list, ids, paths=[f"updates[{i}].values" for i in range(len(ids))]
+                )
 
                 # Name every missing id before writing anything; active_test=False
                 # so that archived records count (see the shared-values form)
@@ -3690,7 +4011,7 @@ class OdooToolHandler:
         if not self.connection.is_authenticated:
             raise ValidationError("Not authenticated with Odoo")
         # Gate on the attached-to model before any metadata leaves Odoo
-        await self._gate_attachment_records([attachment_id])
+        await self._gate_document_records("ir.attachment", [attachment_id])
         rows = await asyncio.to_thread(
             self.connection.search_read,
             "ir.attachment",
@@ -3996,10 +4317,9 @@ class OdooToolHandler:
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
-                if model == "ir.attachment":
-                    # Destroying a document behind an excluded model is at
-                    # least as serious as reading it.
-                    await self._gate_attachment_records([record_id])
+                # Deleting an attachment or a message changes its document,
+                # so its owner must allow writes, as Odoo itself requires
+                await self._gate_document_records(model, [record_id], "write")
 
                 # Check if record exists and get display info
                 existing = await asyncio.to_thread(
@@ -4082,10 +4402,11 @@ class OdooToolHandler:
                 if not body or not body.strip():
                     raise ValidationError("body must not be empty")
 
-                # message_post repoints the attachments it is handed onto the
-                # thread record, so handing it an excluded model's attachment
-                # would move that document somewhere readable.
-                await self._gate_attachment_records(attachment_ids or [])
+                # message_post links the attachments it is handed to the
+                # message (it moves only the user's pending composer uploads),
+                # so an excluded model's attachment would become readable
+                # from this record's chatter.
+                await self._gate_document_records("ir.attachment", attachment_ids or [])
 
                 # Odoo's own errors for a missing record or attachment name
                 # the user id and the raw recordset; say it like the other tools
@@ -4362,9 +4683,12 @@ class OdooToolHandler:
 
                 parsed_domain = self._parse_domain_input(domain)
                 self._check_domain_operators(parsed_domain)
-                if model == "ir.attachment":
+                await asyncio.to_thread(
+                    self._check_related_paths, model, parsed_domain, groupby, order
+                )
+                if model in DOCUMENT_LINKS:
                     scope = await asyncio.to_thread(
-                        attachment_scope_domain, self.config, self.access_controller
+                        document_scope_domain, model, self.config, self.access_controller
                     )
                     if scope:
                         # Appended, not "&"-prefixed — see the matching comment

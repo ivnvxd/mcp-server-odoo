@@ -11,7 +11,7 @@ from mcp_server_odoo.access_control import (
     AccessController,
     AccessControlUnavailableError,
     ModelPermissions,
-    attachment_scope_domain,
+    document_scope_domain,
 )
 from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.error_handling import (
@@ -1995,14 +1995,17 @@ class TestAggregateRecordsTool:
 
         mock_connection.execute_kw.assert_called_once()
 
-    async def test_no_typed_function_needs_no_field_metadata(self, handler, mock_connection):
+    async def test_no_typed_function_reads_fields_only_for_the_path_check(
+        self, handler, mock_connection
+    ):
         mock_connection.execute_kw.return_value = []
 
         await handler._handle_aggregate_records_tool(
             "sale.order", ["partner_id"], None, None, None, None, 0
         )
 
-        mock_connection.fields_get.assert_not_called()
+        # Only the related-path check of the groupby reads the fields
+        assert mock_connection.fields_get.call_count <= 1
 
     @pytest.mark.asyncio
     async def test_success_with_sum_aggregate(
@@ -5872,7 +5875,7 @@ class TestAttachmentScopeDomain:
         return OdooConfig(url="http://localhost:8069", api_key="k", database="d")
 
     def test_scopes_to_enabled_models(self, config, access):
-        assert attachment_scope_domain(config, access) == [
+        assert document_scope_domain("ir.attachment", config, access) == [
             "|",
             ("res_model", "=", False),
             ("res_model", "in", ["res.partner", "ir.attachment"]),
@@ -5886,7 +5889,7 @@ class TestAttachmentScopeDomain:
             username="admin",
             yolo_mode="read",
         )
-        assert attachment_scope_domain(config, access) is None
+        assert document_scope_domain("ir.attachment", config, access) is None
 
     def test_unreportable_allowlist_fails_closed(self, config, access):
         """Swallowing this would disable the scope on every surface at once —
@@ -5895,14 +5898,14 @@ class TestAttachmentScopeDomain:
         """
         access.get_enabled_models.side_effect = AccessControlUnavailableError("boom")
         with pytest.raises(AccessControlUnavailableError):
-            attachment_scope_domain(config, access)
+            document_scope_domain("ir.attachment", config, access)
 
     def test_empty_allowlist_admits_only_standalone_attachments(self, config, access):
         """Nothing enabled means nothing an attachment may hang off. Returning
         None here would read as "no scope needed" and expose every row.
         """
         access.get_enabled_models.return_value = []
-        assert attachment_scope_domain(config, access) == [("res_model", "=", False)]
+        assert document_scope_domain("ir.attachment", config, access) == [("res_model", "=", False)]
 
     def test_enabled_but_unreadable_model_is_excluded(self, config, access):
         """Enablement and read permission are different endpoints. A model the
@@ -5913,7 +5916,7 @@ class TestAttachmentScopeDomain:
             model=model, enabled=True, can_read=(model != "res.partner")
         )
 
-        assert attachment_scope_domain(config, access) == [
+        assert document_scope_domain("ir.attachment", config, access) == [
             "|",
             ("res_model", "=", False),
             ("res_model", "in", ["ir.attachment"]),
@@ -5928,7 +5931,7 @@ class TestAttachmentScopeDomain:
             {"model": "hr.payslip", "name": "Payslip", "operations": {"read": False}},
         ]
 
-        assert attachment_scope_domain(config, access) == [
+        assert document_scope_domain("ir.attachment", config, access) == [
             "|",
             ("res_model", "=", False),
             ("res_model", "in", ["res.partner"]),
@@ -5943,7 +5946,7 @@ class TestAttachmentScopeDomain:
             model=model, enabled=True, can_read=False
         )
 
-        assert attachment_scope_domain(config, access) == [("res_model", "=", False)]
+        assert document_scope_domain("ir.attachment", config, access) == [("res_model", "=", False)]
 
     def test_unreportable_permission_fails_closed(self, config, access):
         """Same reasoning as the allowlist itself: a permission that cannot be
@@ -5952,7 +5955,7 @@ class TestAttachmentScopeDomain:
         access.get_model_permissions.side_effect = AccessControlUnavailableError("boom")
 
         with pytest.raises(AccessControlUnavailableError):
-            attachment_scope_domain(config, access)
+            document_scope_domain("ir.attachment", config, access)
 
     def test_appended_not_and_prefixed(self, config, access):
         """A hand-written leading "&" would bind only the first of a
@@ -5960,7 +5963,7 @@ class TestAttachmentScopeDomain:
         normalize_domain inserts the ANDs for a flat sequence instead.
         """
         caller = [("mimetype", "=", "application/pdf"), ("public", "=", False)]
-        combined = list(caller) + attachment_scope_domain(config, access)
+        combined = list(caller) + document_scope_domain("ir.attachment", config, access)
         assert combined[:2] == caller
         assert combined[2] == "|"
 
@@ -6245,8 +6248,8 @@ class TestAttachmentGatingOnWrites:
 
     @pytest.mark.asyncio
     async def test_post_message_refuses_a_denied_attachment(self, handler, connection):
-        """message_post repoints the attachments it is handed onto the thread
-        record, so an ungated attachment_ids moves the document into view."""
+        """message_post links the attachments it is handed to the message, so
+        an ungated attachment_ids makes the document readable from the chatter."""
         with pytest.raises(ValidationError, match="hr.payslip"):
             await handler._handle_post_message_tool(
                 "res.partner", 1, "hi", "note", "comment", None, [7], False
@@ -6270,6 +6273,729 @@ class TestAttachmentGatingOnWrites:
         result = await handler._handle_delete_record_tool("ir.attachment", 7)
 
         assert result["success"] is True
+
+
+def _tool_app():
+    app = MagicMock(spec=MCPServer)
+    app._tools = {}
+
+    def tool_decorator(**kwargs):
+        def decorator(func):
+            app._tools[func.__name__] = func
+            return func
+
+        return decorator
+
+    app.tool = tool_decorator
+    return app
+
+
+def _standard_config():
+    return OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+
+
+class TestDocumentOwnerWriteGate:
+    """Changing an attachment or a message changes its document, so the owner
+    must allow writes, as upload_attachment and Odoo itself require. A read
+    check alone let a file be attached to a read-only model.
+    """
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.search_read.return_value = [{"id": 7, "res_model": "res.company"}]
+        connection.search.return_value = [7]
+        connection.search_count.return_value = 1
+        connection.read.return_value = [{"id": 7, "display_name": "logo.png"}]
+        connection.write.return_value = True
+        connection.unlink.return_value = True
+        connection.create.return_value = 9
+        connection.create_many.return_value = [9]
+        connection.fields_get.return_value = {}
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+
+        def gate(model, operation):
+            if model == "res.company" and operation != "read":
+                raise AccessControlError(f"Operation '{operation}' not allowed on model '{model}'")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    @pytest.mark.asyncio
+    async def test_create_on_a_read_only_owner_is_refused(self, handler, connection):
+        with pytest.raises(ValidationError, match="'res.company', which MCP does not allow"):
+            await handler._handle_create_record_tool(
+                "ir.attachment", {"name": "x.txt", "res_model": "res.company", "res_id": 1}
+            )
+
+        connection.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_records_on_a_read_only_owner_is_refused(self, handler, connection):
+        with pytest.raises(ValidationError, match="res.company"):
+            await handler._handle_create_records_tool(
+                "ir.attachment",
+                [{"name": "x.txt", "res_model": "res.company", "res_id": 1}],
+            )
+
+        connection.create_many.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_of_a_read_only_owners_attachment_is_refused(self, handler, connection):
+        with pytest.raises(ValidationError, match="attachment 7 belongs to 'res.company'"):
+            await handler._handle_update_record_tool("ir.attachment", 7, {"name": "y.txt"})
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bulk_update_of_a_read_only_owners_attachment_is_refused(
+        self, handler, connection
+    ):
+        with pytest.raises(ValidationError, match="res.company"):
+            await handler._handle_update_records_tool("ir.attachment", [7], {"name": "y.txt"})
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_move_onto_a_read_only_owner_is_refused(self, handler, connection):
+        connection.search_read.return_value = [{"id": 7, "res_model": "res.partner"}]
+
+        with pytest.raises(ValidationError, match="would be moved to 'res.company'"):
+            await handler._handle_update_record_tool(
+                "ir.attachment", 7, {"res_model": "res.company"}
+            )
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_of_a_read_only_owners_attachment_is_refused(self, handler, connection):
+        with pytest.raises(ValidationError, match="res.company"):
+            await handler._handle_delete_record_tool("ir.attachment", 7)
+
+        connection.unlink.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reading_a_read_only_owners_attachment_still_works(self, handler, connection):
+        connection.read.return_value = [{"id": 7, "name": "logo.png"}]
+
+        await handler._handle_get_record_tool("ir.attachment", 7, ["name"])
+
+        connection.read.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_a_writable_owner_is_allowed(self, handler, connection):
+        result = await handler._handle_create_record_tool(
+            "ir.attachment", {"name": "x.txt", "res_model": "res.partner", "res_id": 1}
+        )
+
+        assert result["success"] is True
+        connection.create.assert_called_once()
+
+
+class TestMessageScope:
+    """Enabling mail.message must not expose the chatter of every model: its
+    rows, like attachments, are scoped to the owners MCP allows.
+    """
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.search.return_value = []
+        connection.search_count.return_value = 0
+        connection.read.return_value = [{"id": 5, "body": "hi"}]
+        connection.unlink.return_value = True
+        connection.create.return_value = 9
+        connection.fields_get.return_value = {
+            "id": {"type": "integer", "string": "ID"},
+            "body": {"type": "html", "string": "Body"},
+        }
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+        controller.get_enabled_models.return_value = [{"model": "res.partner", "name": "Contact"}]
+
+        def gate(model, operation):
+            if model in ("mail.channel", "hr.payslip", "ir.model"):
+                raise AccessControlError(f"Model '{model}' is not enabled for MCP access")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model, link",
+        [
+            ("mail.message", "model"),
+            ("mail.mail", "model"),
+            ("mail.followers", "res_model"),
+            ("mail.activity", "res_model"),
+            ("mail.tracking.value", "mail_message_id.model"),
+            ("mail.notification", "mail_message_id.model"),
+        ],
+    )
+    async def test_search_records_scopes_the_rows(self, handler, connection, model, link):
+        await handler._handle_search_tool(model, None, None, 5, 0, None)
+
+        assert connection.search.call_args[0][1] == [
+            "|",
+            (link, "=", False),
+            (link, "in", ["res.partner"]),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_aggregate_records_scopes_messages(self, handler, connection):
+        connection.get_major_version = MagicMock(return_value=19)
+        connection.execute_kw.return_value = []
+
+        await handler._handle_aggregate_records_tool(
+            "mail.message", ["subject"], ["__count"], None, None, 10, 0
+        )
+
+        assert connection.execute_kw.call_args[0][2][0] == [
+            "|",
+            ("model", "=", False),
+            ("model", "in", ["res.partner"]),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_get_record_refuses_a_message_of_a_denied_model(self, handler, connection):
+        connection.search_read.return_value = [{"id": 5, "model": "mail.channel"}]
+
+        with pytest.raises(ValidationError, match="message 5 belongs to 'mail.channel'"):
+            await handler._handle_get_record_tool("mail.message", 5, None)
+
+        connection.read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_tracking_value_follows_its_message(self, handler, connection):
+        connection.search_read.side_effect = [
+            [{"id": 3, "mail_message_id": [5, "Payslip"]}],
+            [{"id": 5, "model": "hr.payslip"}],
+        ]
+
+        with pytest.raises(ValidationError, match="tracking value 3 belongs to 'hr.payslip'"):
+            await handler._handle_get_record_tool("mail.tracking.value", 3, None)
+
+    @pytest.mark.asyncio
+    async def test_delete_of_a_denied_models_message_is_refused(self, handler, connection):
+        connection.search_read.return_value = [{"id": 5, "model": "mail.channel"}]
+
+        with pytest.raises(ValidationError, match="mail.channel"):
+            await handler._handle_delete_record_tool("mail.message", 5)
+
+        connection.unlink.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_follower_cannot_be_planted_on_a_denied_model(self, handler, connection):
+        with pytest.raises(ValidationError, match="follower would be attached to 'hr.payslip'"):
+            await handler._handle_create_record_tool(
+                "mail.followers", {"res_model": "hr.payslip", "res_id": 1, "partner_id": 3}
+            )
+
+        connection.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_activity_owner_comes_from_res_model_id(self, handler, connection, access):
+        connection.search_read.return_value = [{"id": 80, "model": "hr.payslip"}]
+        access.validate_model_access.side_effect = lambda model, operation: (
+            None if model != "hr.payslip" else (_ for _ in ()).throw(AccessControlError("no"))
+        )
+
+        with pytest.raises(ValidationError, match="activity would be attached to 'hr.payslip'"):
+            await handler._handle_create_record_tool(
+                "mail.activity", {"res_model_id": 80, "res_id": 1}
+            )
+
+        connection.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_activity_with_an_unreadable_ir_model_is_refused(self, handler, connection):
+        connection.search_read.side_effect = OdooValidationFault("Access denied", 403)
+
+        with pytest.raises(ValidationError, match="ir.model is not readable"):
+            await handler._handle_create_record_tool(
+                "mail.activity", {"res_model_id": 80, "res_id": 1}
+            )
+
+        connection.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_message_of_an_allowed_model_is_readable(self, handler, connection):
+        connection.search_read.return_value = [{"id": 5, "model": "res.partner"}]
+
+        await handler._handle_get_record_tool("mail.message", 5, ["body"])
+
+        connection.read.assert_called()
+
+    def test_yolo_mode_is_unscoped(self, access):
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", yolo_mode="read"
+        )
+
+        assert document_scope_domain("mail.message", config, access) is None
+
+    def test_write_scope_uses_the_write_permission(self, access):
+        access.get_model_permissions.return_value = ModelPermissions(
+            model="res.partner", enabled=True, can_read=True, can_write=False
+        )
+
+        assert document_scope_domain(
+            "mail.message", _standard_config(), access, operation="write"
+        ) == [("model", "=", False)]
+
+
+class TestNestedWriteGate:
+    """A write on res.partner with user_ids: [[0, 0, {...}]] creates a
+    res.users row, while the allowlist was asked only about res.partner. Each
+    x2many command is checked as the operation it performs on the related
+    model.
+    """
+
+    FIELDS = {
+        "name": {"type": "char"},
+        "tags": {"type": "char"},
+        "user_ids": {"type": "one2many", "relation": "res.users"},
+        "bank_ids": {"type": "one2many", "relation": "res.partner.bank"},
+        "child_ids": {"type": "one2many", "relation": "res.partner"},
+        "category_id": {"type": "many2many", "relation": "res.partner.category"},
+    }
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.fields_get.return_value = self.FIELDS
+        connection.search_count.return_value = 1
+        connection.search.return_value = [1]
+        connection.read.return_value = [{"id": 1, "display_name": "Azure"}]
+        connection.write.return_value = True
+        connection.create.return_value = 9
+        connection.create_many.return_value = [9]
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+        refused = {
+            ("res.users", "create"),
+            ("res.users", "write"),
+            ("res.users", "unlink"),
+            ("res.partner.bank", "create"),
+            ("res.partner.bank", "write"),
+            ("res.partner.bank", "unlink"),
+            ("res.partner.category", "unlink"),
+            ("res.partner", "unlink"),
+        }
+
+        def gate(model, operation):
+            if (model, operation) in refused:
+                raise AccessControlError(f"Operation '{operation}' not allowed on model '{model}'")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "values, message",
+        [
+            ({"user_ids": [[0, 0, {"login": "x"}]]}, "values.user_ids would create res.users"),
+            ({"user_ids": [[1, 2, {"signature": "x"}]]}, "values.user_ids would change res.users"),
+            ({"bank_ids": [[0, 0, {"acc_number": "1"}]]}, "would create res.partner.bank"),
+            ({"category_id": [[2, 5]]}, "would delete res.partner.category"),
+            ({"child_ids": [[3, 7]]}, "would change or delete res.partner"),
+            ({"child_ids": [[5]]}, "would change or delete res.partner"),
+            ({"child_ids": [[6, 0, [7]]]}, "would change or delete res.partner"),
+            ({"user_ids": [(0, 0, {"login": "x"})]}, "would create res.users"),
+        ],
+    )
+    async def test_update_record_refuses(self, handler, connection, values, message):
+        with pytest.raises(ValidationError, match=message.replace(".", r"\.")):
+            await handler._handle_update_record_tool("res.partner", 1, values)
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_nested_command_inside_a_nested_create_is_checked(self, handler, connection):
+        values = {"child_ids": [[0, 0, {"name": "c", "user_ids": [[0, 0, {"login": "x"}]]}]]}
+
+        with pytest.raises(ValidationError, match=r"values\.child_ids\.user_ids would create"):
+            await handler._handle_update_record_tool("res.partner", 1, values)
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_removal_refusal_names_the_way_around(self, handler):
+        with pytest.raises(ValidationError, match="set its own link field on res.partner"):
+            await handler._handle_update_record_tool("res.partner", 1, {"child_ids": [[3, 7]]})
+
+    @pytest.mark.asyncio
+    async def test_create_records_refuses(self, handler, connection):
+        with pytest.raises(ValidationError, match="would create res.users"):
+            await handler._handle_create_records_tool(
+                "res.partner", [{"name": "a"}, {"name": "b", "user_ids": [[0, 0, {}]]}]
+            )
+
+        connection.create_many.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_records_refuses(self, handler, connection):
+        with pytest.raises(ValidationError, match="would change res.users"):
+            await handler._handle_update_records_tool(
+                "res.partner", [1], {"user_ids": [[1, 2, {"active": False}]]}
+            )
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "values",
+        [
+            {"child_ids": [[0, 0, {"name": "child"}]]},
+            {"child_ids": [[1, 7, {"name": "child"}]]},
+            {"child_ids": [[4, 7]]},
+            {"child_ids": [7, 8]},
+            {"category_id": [[6, 0, [1, 2]]]},
+            {"category_id": [[4, 5]]},
+            {"category_id": [[3, 5]]},
+            {"category_id": [1, 2]},
+            {"user_ids": []},
+            {"tags": ["a", "b"]},
+        ],
+    )
+    async def test_allowed_commands_go_through(self, handler, connection, values):
+        result = await handler._handle_update_record_tool("res.partner", 1, values)
+
+        assert result["success"] is True
+        connection.write.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_without_field_metadata_nested_commands_are_refused(self, handler, connection):
+        connection.fields_get.side_effect = OdooValidationFault("Access denied", 403)
+
+        with pytest.raises(ValidationError, match="Could not check the related records"):
+            await handler._handle_update_record_tool(
+                "res.partner", 1, {"child_ids": [[0, 0, {"name": "c"}]]}
+            )
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_linking_through_a_one2many_is_a_write_on_the_related_record(
+        self, handler, connection
+    ):
+        """user_ids: [[4, 2]] sets the user's partner_id, a write on res.users."""
+        with pytest.raises(ValidationError, match="would change res.users"):
+            await handler._handle_update_record_tool("res.partner", 1, {"user_ids": [[4, 2]]})
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_yolo_mode_skips_the_check(self, connection, access):
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", yolo_mode="true"
+        )
+        handler = OdooToolHandler(_tool_app(), connection, access, config)
+
+        result = await handler._handle_update_record_tool(
+            "res.partner", 1, {"user_ids": [[0, 0, {"login": "x"}]]}
+        )
+
+        assert result["success"] is True
+
+
+class TestRelatedPathReadGate:
+    """A condition, sub-domain, grouping or order through a relation reaches
+    the related model, so that model must allow reads: a filter on
+    user_ids.groups_id.name tests res.groups values, and grouping by an
+    x2many lists the names of the related records.
+    """
+
+    FIELDS = {
+        "res.partner": {
+            "name": {"type": "char"},
+            "user_ids": {"type": "one2many", "relation": "res.users"},
+            "state_id": {"type": "many2one", "relation": "res.country.state"},
+            "category_id": {"type": "many2many", "relation": "res.partner.category"},
+        },
+        "res.users": {
+            "name": {"type": "char"},
+            "groups_id": {"type": "many2many", "relation": "res.groups"},
+            "partner_id": {"type": "many2one", "relation": "res.partner"},
+        },
+        "res.groups": {"name": {"type": "char"}},
+        "res.partner.category": {"name": {"type": "char"}},
+    }
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.fields_get.side_effect = lambda model, *a, **k: self.FIELDS.get(model, {})
+        connection.search.return_value = []
+        connection.search_count.return_value = 0
+        connection.get_major_version = MagicMock(return_value=19)
+        connection.execute_kw.return_value = []
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+
+        def gate(model, operation):
+            if model in ("res.groups", "res.country.state"):
+                raise AccessControlError(f"Model '{model}' is not enabled for MCP access")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    async def _search(self, handler, domain, order=None):
+        return await handler._handle_search_tool("res.partner", domain, None, 5, 0, order)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            [["user_ids.groups_id.name", "=", "Settings"]],
+            [["user_ids.groups_id", "any", [["name", "ilike", "admin"]]]],
+            [["user_ids", "any", [["groups_id.name", "ilike", "admin"]]]],
+            [["user_ids", "any", [["groups_id", "ilike", "admin"]]]],
+            ["|", ["name", "=", "x"], ["user_ids.groups_id.name", "=", "Settings"]],
+            [["state_id.name", "=", "Texas"]],
+        ],
+    )
+    async def test_search_refuses_a_path_into_a_refused_model(self, handler, connection, domain):
+        with pytest.raises(ValidationError, match="Access denied: the condition on"):
+            await self._search(handler, domain)
+
+        connection.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            [["user_ids.name", "ilike", "admin"]],
+            [["user_ids.groups_id", "in", [1, 2]]],
+            [["user_ids.groups_id", "!=", False]],
+            [["state_id", "ilike", "Texas"]],
+            [["state_id", "=", 5]],
+            [["category_id.name", "=", "VIP"]],
+            [["category_id", "ilike", "VIP"]],
+            [["no_such_field.name", "=", "x"]],
+        ],
+    )
+    async def test_search_allows_readable_paths(self, handler, connection, domain):
+        await self._search(handler, domain)
+
+        connection.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_order_through_a_refused_model_is_refused(self, handler, connection):
+        with pytest.raises(ValidationError, match="ordering by 'state_id.name'"):
+            await self._search(handler, None, order="state_id.name desc, id")
+
+        connection.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_aggregate_refuses_grouping_by_a_refused_x2many(self, handler, connection):
+        with pytest.raises(ValidationError, match="grouping by 'groups_id' reads res.groups"):
+            await handler._handle_aggregate_records_tool(
+                "res.users", ["groups_id"], None, None, None, None, 0
+            )
+
+        connection.execute_kw.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_aggregate_allows_grouping_by_a_many2one(self, handler, connection):
+        """A many2one's name is on every record read too."""
+        await handler._handle_aggregate_records_tool(
+            "res.partner", ["state_id"], None, None, None, None, 0
+        )
+
+        connection.execute_kw.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_aggregate_checks_its_domain(self, handler, connection):
+        with pytest.raises(ValidationError, match="res.groups"):
+            await handler._handle_aggregate_records_tool(
+                "res.partner", None, None, [["user_ids.groups_id.name", "=", "x"]], None, None, 0
+            )
+
+    @pytest.mark.asyncio
+    async def test_yolo_mode_skips_the_check(self, connection, access):
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", yolo_mode="read"
+        )
+        handler = OdooToolHandler(_tool_app(), connection, access, config)
+
+        await self._search(handler, [["user_ids.groups_id.name", "=", "Settings"]])
+
+        connection.search.assert_called_once()
+
+
+class TestNestedWriteMessages:
+    """The refusal names the record a batch entry came from, and offers the
+    way around only when it works.
+    """
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.fields_get.return_value = {
+            "name": {"type": "char"},
+            "user_ids": {"type": "one2many", "relation": "res.users"},
+            "child_ids": {"type": "one2many", "relation": "res.partner"},
+        }
+        connection.search.return_value = [1]
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+
+        def gate(model, operation):
+            if model == "res.users" or (model == "res.partner" and operation == "unlink"):
+                raise AccessControlError(f"Operation '{operation}' not allowed on model '{model}'")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    @pytest.mark.asyncio
+    async def test_create_records_names_the_record(self, handler):
+        with pytest.raises(ValidationError, match=r"records\[1\]\.user_ids would create"):
+            await handler._handle_create_records_tool(
+                "res.partner", [{"name": "a"}, {"name": "b", "user_ids": [[0, 0, {}]]}]
+            )
+
+    @pytest.mark.asyncio
+    async def test_the_reason_reads_as_one_sentence(self, handler):
+        with pytest.raises(ValidationError) as exc:
+            await handler._handle_update_record_tool("res.partner", 1, {"user_ids": [[1, 2, {}]]})
+
+        assert str(exc.value) == (
+            "Access denied: values.user_ids would change res.users records. "
+            "Operation 'write' not allowed on model 'res.users'."
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_hint_when_the_related_model_is_read_only(self, handler):
+        with pytest.raises(ValidationError) as exc:
+            await handler._handle_update_record_tool("res.partner", 1, {"user_ids": [[3, 2]]})
+
+        assert "To detach" not in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_hint_when_the_related_model_is_writable(self, handler):
+        with pytest.raises(ValidationError, match=r"model 'res\.partner'\. To detach"):
+            await handler._handle_update_record_tool("res.partner", 1, {"child_ids": [[3, 7]]})
+
+
+class TestMany2oneValues:
+    """A many2one takes a record id. Reads return [id, name], and Odoo 19
+    empties the field when that pair comes back in a write, without an error.
+    """
+
+    FIELDS = {
+        "name": {"type": "char"},
+        "country_id": {"type": "many2one", "relation": "res.country"},
+        "child_ids": {"type": "one2many", "relation": "res.partner"},
+    }
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.fields_get.return_value = self.FIELDS
+        connection.search_count.return_value = 1
+        connection.search.return_value = [1]
+        connection.read.return_value = [{"id": 1, "display_name": "Azure"}]
+        connection.write.return_value = True
+        connection.create.return_value = 9
+        connection.create_many.return_value = [9]
+        return connection
+
+    @pytest.fixture(params=["off", "true"])
+    def handler(self, request, connection):
+        access = MagicMock(spec=AccessController)
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", yolo_mode=request.param
+        )
+        return OdooToolHandler(_tool_app(), connection, access, config)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "value, hint",
+        [
+            ([20, "Belgium"], "Pass 20, not the [id, name] pair"),
+            ({"id": 20, "name": "Belgium"}, "Pass 20."),
+            ("Belgium", "search_records on res.country"),
+            ([0, 0, {"name": "Atlantis"}], "takes a record id or false"),
+        ],
+    )
+    async def test_update_refuses_a_value_that_is_not_an_id(self, handler, connection, value, hint):
+        with pytest.raises(ValidationError, match="values.country_id: it links to res.country"):
+            await handler._handle_update_record_tool("res.partner", 1, {"country_id": value})
+
+        connection.write.assert_not_called()
+        with pytest.raises(ValidationError, match=hint.replace(".", r"\.").replace("[", r"\[")):
+            await handler._handle_update_record_tool("res.partner", 1, {"country_id": value})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", [20, False, None])
+    async def test_an_id_or_false_goes_through(self, handler, connection, value):
+        result = await handler._handle_update_record_tool(
+            "res.partner", 1, {"name": "x", "country_id": value}
+        )
+
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_create_records_names_the_record(self, handler, connection):
+        with pytest.raises(ValidationError, match=r"records\[1\]\.country_id"):
+            await handler._handle_create_records_tool(
+                "res.partner", [{"name": "a"}, {"name": "b", "country_id": [20, "Belgium"]}]
+            )
+
+        connection.create_many.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_nested_create_is_checked(self, handler, connection):
+        with pytest.raises(ValidationError, match=r"values\.child_ids\.country_id"):
+            await handler._handle_update_record_tool(
+                "res.partner",
+                1,
+                {"child_ids": [[0, 0, {"name": "c", "country_id": "Belgium"}]]},
+            )
+
+        connection.write.assert_not_called()
 
 
 class TestSmartDefaultsEmptySelection:

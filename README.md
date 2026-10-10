@@ -317,6 +317,7 @@ The server requires the following environment variables:
 - If database listing is restricted on your server, you must specify `ODOO_DB`
 - API key authentication is recommended for better security
 - The server also loads environment variables from a `.env` file in the working directory
+- In standard mode, the server keeps each model's MCP permissions for 5 minutes. If you remove a permission in Odoo, the next call is refused at once, because the MCP module checks every call. If you grant a permission, it can take up to 5 minutes to work. Restart the server to apply it at once.
 
 **Multi-company scoping (`ODOO_ALLOWED_COMPANIES`):**
 In multi-company databases, the authenticated user's default company applies to
@@ -541,6 +542,7 @@ YOLO mode allows the MCP server to connect directly to any standard Odoo instanc
 - No rate limiting is applied
 - All operations are logged but not restricted
 - Model listing shows 200+ models instead of just enabled ones
+- In full YOLO mode (`true`), the create, update and delete tools reach every model, scheduled actions (`ir.cron`) and server actions (`ir.actions.server`) included. `call_model_method` refuses to run them directly, but a changed action runs on its next schedule or trigger. This is the same power that an administrator has in the Odoo UI.
 
 ## Usage Examples
 
@@ -911,6 +913,18 @@ The server translates MCP tool calls into Odoo XML-RPC requests, or JSON-2 reque
 - Configure model access carefully - only enable necessary models
 - The MCP module respects Odoo's built-in access rights and record rules
 - Each API key is linked to a specific user with their permissions
+
+### How standard mode applies the model allowlist
+
+In standard mode, the server checks the MCP module's model allowlist before each call. It also checks the models that a call reaches through another model:
+
+- Nested x2many commands in `values`. A create command (`[0, 0, {...}]`) needs create access on the related model, an update (`[1, id, {...}]`) needs write access, and a delete (`[2, id]`) needs delete access.
+- On a one2many field, a link (`[4, id]`) needs write access on the related model. A removal (`[3, id]`, `[5]` or `[6, 0, ids]`) needs write and delete access, because Odoo deletes the related records when the inverse field cascades. If the related model does not allow deletes, update the link field of the related record instead.
+- Attachments, messages, emails, followers, activities, tracking values and notifications. Reads return only the rows of models that allow reads. Creating, changing, moving or deleting a row needs write access on the model that it belongs to.
+- To create an activity, the server reads `ir.model` to find the model of `res_model_id`, so `ir.model` must be readable for MCP.
+- Reads through a relation. A condition on a dotted path such as `user_ids.groups_id.name`, an `any` or `not any` condition, a name condition on an x2many field, and an `order` through a relation need read access on each related model that they pass through. Grouping by an x2many field needs read access on its related model. A condition on a many2one by name (`country_id ilike Germany`) stays allowed, but a dotted path into it (`country_id.code = DE`) needs read access on the related model.
+
+These checks do not cover writable related fields and `_inherits` parents. For example, a write of `email` on a user also writes to its partner. In the same way, the name, email, phone and address of a company are fields of its partner record: if `res.partner` allows writes, they can be changed there even when `res.company` is read-only. A many2one value counts as part of the record that holds it: its name is returned on reads and groupings, and you can set it to a record of a model that is not enabled. The same applies to a many2many link (`[4, id]`, `[3, id]`, `[6, 0, ids]`). Odoo's own access rights and record rules apply to every call.
 
 ## Troubleshooting
 
