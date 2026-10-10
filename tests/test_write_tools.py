@@ -1,6 +1,6 @@
 """Tests for write operation tools."""
 
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
 
@@ -15,7 +15,7 @@ class TestWriteTools:
 
     @pytest.fixture
     def mock_app(self):
-        """Create mock FastMCP app."""
+        """Create mock MCPServer app."""
         app = Mock()
         app.tool = Mock(side_effect=lambda **kwargs: lambda func: func)
         return app
@@ -41,6 +41,7 @@ class TestWriteTools:
     def mock_config(self):
         """Create mock OdooConfig."""
         config = Mock()
+        config.allowed_companies = None
         config.default_limit = 10
         config.max_limit = 100
         config.url = "http://localhost:8069"
@@ -90,6 +91,8 @@ class TestWriteTools:
 
         mock_connection.create.return_value = created_id
         mock_connection.read.return_value = [essential_record]
+        # The owner gate resolves res_model_id through ir.model
+        mock_connection.search_read.return_value = [{"id": 448, "model": "res.partner"}]
 
         result = await tool_handler._handle_create_record_tool(model, values)
 
@@ -111,12 +114,11 @@ class TestWriteTools:
         model = "res.partner"
         record_id = 123
         values = {"email": "updated@example.com"}
-        # First read call (existence check) returns just ID
-        existing_record = {"id": record_id}
-        # Second read call returns essential fields
+        # Existence check counts the record; the read returns essential fields
         updated_record = {"id": record_id, "display_name": "Test Partner"}
 
-        mock_connection.read.side_effect = [[existing_record], [updated_record]]
+        mock_connection.search_count.return_value = 1
+        mock_connection.read.return_value = [updated_record]
         mock_connection.write.return_value = True
 
         # Execute
@@ -131,12 +133,10 @@ class TestWriteTools:
         )
         assert "Successfully updated" in result["message"]
         mock_connection.write.assert_called_once_with(model, [record_id], values)
-        # Verify both read calls with correct parameters
-        expected_calls = [
-            call(model, [record_id], ["id"]),  # Existence check
-            call(model, [record_id], ["id", "display_name"]),  # Essential fields
-        ]
-        mock_connection.read.assert_has_calls(expected_calls)
+        mock_connection.search_count.assert_called_once_with(
+            model, [["id", "=", record_id]], context={"active_test": False}
+        )
+        mock_connection.read.assert_called_once_with(model, [record_id], ["id", "display_name"])
 
     @pytest.mark.asyncio
     async def test_update_record_model_without_name_field(self, tool_handler, mock_connection):
@@ -144,29 +144,37 @@ class TestWriteTools:
         model = "mail.activity"
         record_id = 42
         values = {"summary": "Updated summary"}
-        existing_record = {"id": record_id}
         updated_record = {"id": record_id, "display_name": "Activity #42"}
 
-        mock_connection.read.side_effect = [[existing_record], [updated_record]]
+        mock_connection.search_count.return_value = 1
+        mock_connection.read.return_value = [updated_record]
         mock_connection.write.return_value = True
+        mock_connection.search_read.return_value = [{"id": record_id, "res_model": "res.partner"}]
 
         result = await tool_handler._handle_update_record_tool(model, record_id, values)
 
         assert result["success"] is True
         # Only universally available fields requested — no 'name'
-        expected_calls = [
-            call(model, [record_id], ["id"]),
-            call(model, [record_id], ["id", "display_name"]),
-        ]
-        mock_connection.read.assert_has_calls(expected_calls)
+        mock_connection.read.assert_called_once_with(model, [record_id], ["id", "display_name"])
 
     @pytest.mark.asyncio
     async def test_update_record_not_found(self, tool_handler, mock_connection):
         """Test update record that doesn't exist."""
-        mock_connection.read.return_value = []
+        mock_connection.search_count.return_value = 0
 
         with pytest.raises(ValidationError, match="Record not found"):
             await tool_handler._handle_update_record_tool("res.partner", 999, {"name": "Test"})
+        mock_connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_record_not_found_despite_echoed_id(self, tool_handler, mock_connection):
+        """Odoo 19 echoes {'id': x} for a read of only 'id', even for a missing x."""
+        mock_connection.search_count.return_value = 0
+        mock_connection.read.return_value = [{"id": 999}]
+
+        with pytest.raises(ValidationError, match="Record not found"):
+            await tool_handler._handle_update_record_tool("res.partner", 999, {"name": "Test"})
+        mock_connection.write.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_update_record_no_values(self, tool_handler):
@@ -210,6 +218,7 @@ class TestWriteTools:
 
         mock_connection.read.return_value = [{"id": 6115, "display_name": False}]
         mock_connection.unlink.return_value = True
+        mock_connection.search_read.return_value = [{"id": 6115, "model": "res.partner"}]
 
         result = await tool_handler._handle_delete_record_tool("mail.message", 6115)
 
@@ -274,6 +283,32 @@ class TestWriteTools:
         mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "write")
 
     @pytest.mark.asyncio
+    async def test_update_records_calls_validate_model_access_once(
+        self, tool_handler, mock_access_controller, mock_connection
+    ):
+        """Verify update_records calls validate_model_access with 'write' exactly
+        once per batch, not once per record."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+
+        with pytest.raises(ValidationError, match="Access denied"):
+            await tool_handler._handle_update_records_tool(
+                "res.partner", [1, 2, 3], {"name": "Test"}
+            )
+
+        mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "write")
+
+    @pytest.mark.asyncio
+    async def test_update_records_rejects_over_cap(self, tool_handler, mock_access_controller):
+        """More than MAX_BATCH_RECORDS ids is rejected before access control runs."""
+        with pytest.raises(ValidationError, match="Too many records"):
+            await tool_handler._handle_update_records_tool(
+                "res.partner", list(range(1, 102)), {"name": "Test"}
+            )
+        mock_access_controller.validate_model_access.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_delete_record_calls_validate_model_access(
         self, tool_handler, mock_access_controller
     ):
@@ -322,6 +357,7 @@ class TestWriteTools:
         # Check that tool decorator was called for write operations
         assert "create_record" in decorated_functions
         assert "update_record" in decorated_functions
+        assert "update_records" in decorated_functions
         assert "delete_record" in decorated_functions
 
 
@@ -363,10 +399,10 @@ class TestWriteToolsIntegration:
 
     @pytest.fixture
     def real_app(self):
-        """Create real FastMCP app."""
-        from mcp.server.fastmcp import FastMCP
+        """Create real MCPServer app."""
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP("test-app")
+        return MCPServer("test-app")
 
     @pytest.fixture
     def real_tool_handler(self, real_app, real_connection, real_access_controller, real_config):
@@ -735,9 +771,9 @@ class TestCallModelMethodIntegration:
 
     @pytest.fixture
     def real_app(self):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP("test-app")
+        return MCPServer("test-app")
 
     @pytest.fixture
     def real_tool_handler(self, real_app, real_connection, real_access_controller, real_config):
@@ -745,8 +781,11 @@ class TestCallModelMethodIntegration:
 
     @pytest.mark.yolo
     @pytest.mark.asyncio
-    async def test_toggle_active_round_trip(self, real_tool_handler):
-        """Happy path: toggle_active flips res.partner.active; idempotent under double toggle."""
+    async def test_archive_round_trip(self, real_tool_handler):
+        """Happy path: action_archive and action_unarchive flip res.partner.active.
+
+        Not toggle_active: Odoo 20 removed it. Both methods exist on 16 to 20.
+        """
         handler = real_tool_handler
 
         create_result = await handler._handle_create_record_tool(
@@ -755,17 +794,17 @@ class TestCallModelMethodIntegration:
         partner_id = create_result["record"]["id"]
 
         try:
-            # First toggle: True -> False (do not assert toggle_active's return
-            # value; it varies across Odoo versions).
+            # Archive: True -> False (do not assert the return value; it varies
+            # across Odoo versions).
             await handler._handle_call_model_method_tool(
-                "res.partner", "toggle_active", [[partner_id]], None
+                "res.partner", "action_archive", [[partner_id]], None
             )
             row = handler.connection.read("res.partner", [partner_id], ["active"])
             assert row[0]["active"] is False, "expected partner deactivated"
 
-            # Second toggle: False -> True
+            # Unarchive: False -> True
             await handler._handle_call_model_method_tool(
-                "res.partner", "toggle_active", [[partner_id]], None
+                "res.partner", "action_unarchive", [[partner_id]], None
             )
             row = handler.connection.read("res.partner", [partner_id], ["active"])
             assert row[0]["active"] is True, "expected partner reactivated"
@@ -788,7 +827,7 @@ class TestCallModelMethodIntegration:
 
         try:
             await handler._handle_call_model_method_tool(
-                "res.partner", "toggle_active", f"[[{partner_id}]]", None
+                "res.partner", "action_archive", f"[[{partner_id}]]", None
             )
             row = handler.connection.read("res.partner", [partner_id], ["active"])
             assert row[0]["active"] is False
@@ -800,8 +839,8 @@ class TestCallModelMethodIntegration:
 
     @pytest.mark.yolo
     @pytest.mark.asyncio
-    async def test_kwargs_path_via_toggle_active_with_context(self, real_tool_handler):
-        """``keyword_arguments`` reach execute_kw — a context kwarg rides along toggle_active.
+    async def test_kwargs_path_via_action_archive_with_context(self, real_tool_handler):
+        """``keyword_arguments`` reach execute_kw — a context kwarg rides along action_archive.
 
         (``read`` used to be the vehicle here, but ORM data-access primitives
         are now denylisted; any method accepts a ``context`` kwarg via execute_kw.)
@@ -816,7 +855,7 @@ class TestCallModelMethodIntegration:
         try:
             result = await handler._handle_call_model_method_tool(
                 "res.partner",
-                "toggle_active",
+                "action_archive",
                 [[partner_id]],
                 {"context": {"lang": "en_US"}},
             )
@@ -865,7 +904,7 @@ class TestCallModelMethodIntegration:
     @pytest.mark.yolo
     @pytest.mark.asyncio
     async def test_nonexistent_method_returns_validation_error(self, real_tool_handler):
-        """Unknown public method on a real model surfaces as a Connection error → ValidationError."""
+        """Unknown public method on a real model surfaces Odoo's text, not a connection error."""
         from mcp_server_odoo.error_handling import ValidationError
 
         handler = real_tool_handler
@@ -873,10 +912,9 @@ class TestCallModelMethodIntegration:
             await handler._handle_call_model_method_tool(
                 "res.partner", "definitely_does_not_exist", [[1]], None
             )
-        # Either the OdooConnectionError → "Connection error" path or the
-        # generic sanitized "Failed to call model method" — accept both.
         msg = str(exc_info.value)
-        assert "Connection error" in msg or "Failed to call model method" in msg
+        assert "res.partner.definitely_does_not_exist' does not exist" in msg
+        assert "Connection error" not in msg
 
 
 class TestPostMessageMCPIntegration:
@@ -907,9 +945,9 @@ class TestPostMessageMCPIntegration:
 
     @pytest.fixture
     def mcp_app(self):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP("test-app-mcp")
+        return MCPServer("test-app-mcp")
 
     @pytest.fixture
     def mcp_tool_handler(self, mcp_app, mcp_connection, mcp_access_controller, mcp_config):

@@ -7,7 +7,7 @@ Spec-compliant MCP clients inject it into the model context on connect
 returns the same block with structured data.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from .logging_config import get_logger
 from .odoo_connection import OdooConnection
@@ -23,6 +23,55 @@ UTC_DATETIME_GUIDANCE = (
     "- Provide datetimes to tools in UTC.\n"
     "- Convert to the user's timezone only for display."
 )
+
+# Cross-tool guidance for initialize.instructions: which tool to use, and one
+# batch call over a loop of single calls. Detail for one tool stays in its
+# description. Each line names the tools it needs, and is left out when one of
+# them is not registered (call_model_method is opt-in).
+_USAGE_LINES = (
+    (
+        ("list_models", "get_fields"),
+        "- Discovery: list_models lists the models you can access. get_fields describes the "
+        "fields of a model, the most relevant ones by default.",
+    ),
+    (
+        ("search_records", "get_record"),
+        "- Reads: search_records is the main read tool. Filter with 'domain' and ask only for "
+        "the columns you need with 'fields'. To read many known records, use one call with "
+        '[["id", "in", ids]], not one get_record call per ID. Prefer one call with a larger '
+        "'limit' over many small pages.",
+    ),
+    (
+        ("aggregate_records",),
+        "- Counts and totals: use aggregate_records for counts and per-group totals, not a "
+        "list of rows.",
+    ),
+    (
+        ("create_records", "update_records"),
+        "- Writes: to create or update many records, use create_records or update_records in "
+        "one atomic call, not a loop of single calls. update_records takes shared values "
+        "(record_ids + values) or, on Odoo 19 and later, per-record values (updates).",
+    ),
+    (
+        ("call_model_method",),
+        "- Business actions: call_model_method runs a public model method, for example "
+        "action_confirm.",
+    ),
+    (
+        ("read_attachment", "list_record_attachments", "upload_attachment"),
+        "- Files: get_record and search_records return binary fields as odoo:// URIs. "
+        "read_attachment returns the content for a URI or an attachment ID. "
+        "list_record_attachments lists the files on a record, and upload_attachment adds one.",
+    ),
+)
+
+
+def usage_guidance(tool_names: Iterable[str]) -> str:
+    """The usage block for initialize.instructions, limited to ``tool_names``."""
+    registered = set(tool_names)
+    lines = [line for tools, line in _USAGE_LINES if registered.issuperset(tools)]
+    return "\n".join(["Usage guidance:", *lines]) if lines else ""
+
 
 # Prefixed to the fallback text so the caller learns WHY the personalized
 # block is missing instead of silently seeing null identity fields. The
@@ -113,8 +162,14 @@ def _one_line(value: Any) -> str:
     return str(value).translate(_LINE_BREAK_TRANSLATION)
 
 
-def get_user_context_data(connection: OdooConnection) -> Dict[str, Any]:
+def get_user_context_data(
+    connection: OdooConnection, allowed_companies: Optional[List[int]] = None
+) -> Dict[str, Any]:
     """Read the connected user's session context.
+
+    ``allowed_companies`` is ODOO_ALLOWED_COMPANIES. When it is set, Odoo
+    acts in the first of these companies and shows records of all of them,
+    so they replace the user's own active and allowed companies.
 
     Raises when the ``res.users`` read fails; a failing company-name read
     degrades to an empty ``allowed_companies`` instead (the rest of the
@@ -141,15 +196,22 @@ def get_user_context_data(connection: OdooConnection) -> Dict[str, Any]:
         "allowed_companies": [],
     }
     company_ids = user.get("company_ids") or []
-    if len(company_ids) > 1:
+    if allowed_companies:
+        company_ids = list(allowed_companies)
+        if data["company_id"] != company_ids[0]:
+            data["company_id"], data["company_name"] = company_ids[0], ""
+    if len(company_ids) > 1 or not data["company_name"]:
         # Separate failure domain: the res.company read can be denied on its
         # own (e.g. standard mode with res.users MCP-enabled but res.company
         # not) — keep the already-read user context and drop only this list.
         try:
             companies = connection.read("res.company", company_ids, ["display_name"])
-            data["allowed_companies"] = [
-                {"id": c["id"], "name": c["display_name"]} for c in companies
-            ]
+            names = {c["id"]: c["display_name"] for c in companies}
+            data["company_name"] = data["company_name"] or names.get(data["company_id"], "")
+            if len(company_ids) > 1:
+                data["allowed_companies"] = [
+                    {"id": cid, "name": names[cid]} for cid in company_ids if cid in names
+                ]
         except Exception as e:
             logger.warning(f"Could not resolve allowed companies for MCP user context: {e}")
     return data
@@ -184,7 +246,9 @@ def format_user_context(data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def build_user_context(connection: OdooConnection) -> str:
+def build_user_context(
+    connection: OdooConnection, allowed_companies: Optional[List[int]] = None
+) -> str:
     """Build the personalized user-context block for ``initialize.instructions``.
 
     Best-effort: on any failure it logs and falls back to the always-safe
@@ -196,7 +260,7 @@ def build_user_context(connection: OdooConnection) -> str:
     and an ERROR on every startup for a supported setup is just noise.
     """
     try:
-        return format_user_context(get_user_context_data(connection))
+        return format_user_context(get_user_context_data(connection, allowed_companies))
     except Exception as e:
         logger.warning(f"Could not build MCP user context, serving UTC guidance only: {e}")
         return context_unavailable_text(str(e))

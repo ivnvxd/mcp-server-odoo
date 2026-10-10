@@ -7,7 +7,8 @@ on:
   push:
     branches: [main, dev]
   pull_request:
-    branches: ['*']
+    # '**', not '*': '*' does not match a '/', so PRs against release/* ran no CI
+    branches: ['**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -91,10 +92,24 @@ jobs:
         path: coverage-unit.xml
 
   yolo-integration-test:
-    name: YOLO Integration Tests
+    # ODOO_RPC_TRANSPORT=auto takes JSON-2 on Odoo 19 and later; those
+    # versions also run once over XML-RPC. Each leg fails unless the
+    # transport in use is the one in its name (tests/test_transport_e2e.py).
+    name: YOLO Integration Tests (Odoo ${{ matrix.odoo }}, ${{ matrix.label }})
     runs-on: ubuntu-latest
     needs: [lint, test]
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {odoo: '16', rpc: auto, expect: xmlrpc, label: XML-RPC}
+          - {odoo: '17', rpc: auto, expect: xmlrpc, label: XML-RPC}
+          - {odoo: '18', rpc: auto, expect: xmlrpc, label: XML-RPC}
+          - {odoo: '19', rpc: auto, expect: json2, label: JSON-2}
+          - {odoo: '19', rpc: xmlrpc, expect: xmlrpc, label: XML-RPC}
+          - {odoo: '20', rpc: auto, expect: json2, label: JSON-2}
+          - {odoo: '20', rpc: xmlrpc, expect: xmlrpc, label: XML-RPC}
 
     services:
       postgres:
@@ -131,10 +146,12 @@ jobs:
 
     - name: Start Odoo and initialize database
       run: |
+        # --http-interface 0.0.0.0: Odoo 20 listens on 127.0.0.1 by default,
+        # which the published port cannot reach
         docker run -d --name odoo --network "${{ job.services.postgres.network }}" \
           -e HOST=postgres -e USER=odoo -e PASSWORD=odoo \
           -p 8069:8069 \
-          odoo:19 -- --database test --init base,mail --without-demo all
+          odoo:${{ matrix.odoo }} -- --http-interface 0.0.0.0 --database test --init base,mail --without-demo all
 
         # Wait for Odoo to finish initializing
         echo "Waiting for Odoo to initialize database..."
@@ -151,11 +168,16 @@ jobs:
             exit(1)
         " 2>/dev/null; then
             echo "Odoo is ready!"
-            break
+            exit 0
           fi
           echo "Waiting... ($i/60)"
           sleep 5
         done
+        # Fail here: tests/conftest.py skips every test when Odoo does not
+        # answer, so the leg would pass while testing nothing
+        echo "::error::Odoo did not answer within 5 minutes"
+        docker logs --tail 50 odoo
+        exit 1
 
     - name: Generate API key for admin user
       id: yolo-apikey
@@ -179,16 +201,17 @@ jobs:
         # Insert into Odoo's API key table using dollar-quoting for the hash
         # (passlib hashes contain $ characters that break normal SQL quoting).
         # Note: res_users_apikeys has _log_access=False, so no create_uid/write_uid columns.
+        # Scope 'rpc': Odoo 20 matches the scope exactly; 16 to 19 also accept NULL.
         PGPASSWORD=odoo psql -h localhost -U odoo -d test -c \
           "INSERT INTO res_users_apikeys (name, user_id, scope, index, key)
-           VALUES ('CI Test Key', 2, NULL, '${INDEX}', \$hash\$${KEY_HASH}\$hash\$)"
+           VALUES ('CI Test Key', 2, 'rpc', '${INDEX}', \$hash\$${KEY_HASH}\$hash\$)"
 
         echo "key=${API_KEY}" >> "$GITHUB_OUTPUT"
         echo "API key generated and inserted for admin user"
 
     - name: Run YOLO integration tests
       run: |
-        pytest -m "yolo" -v --cov=mcp_server_odoo --cov-report=xml:coverage-yolo.xml --cov-report=term
+        pytest -m "yolo" -v --cov=mcp_server_odoo --cov-report=xml:coverage-yolo-${{ matrix.odoo }}-${{ matrix.rpc }}.xml --cov-report=term
       env:
         ODOO_URL: http://localhost:8069
         ODOO_DB: test
@@ -197,16 +220,19 @@ jobs:
         ODOO_YOLO: "true"
         ODOO_MCP_ENABLE_METHOD_CALLS: "true"
         ODOO_API_KEY: ${{ steps.yolo-apikey.outputs.key }}
+        ODOO_RPC_TRANSPORT: ${{ matrix.rpc }}
+        ODOO_EXPECT_RPC_TRANSPORT: ${{ matrix.expect }}
 
     - name: Upload coverage artifact
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: coverage-yolo
-        path: coverage-yolo.xml
+        name: coverage-yolo-${{ matrix.odoo }}-${{ matrix.rpc }}
+        path: coverage-yolo-${{ matrix.odoo }}-${{ matrix.rpc }}.xml
 
   mcp-integration-test:
-    name: MCP Integration Tests
+    # Each leg runs the module branch of its Odoo version
+    name: MCP Integration Tests (Odoo ${{ matrix.odoo }})
     runs-on: ubuntu-latest
     needs: [lint, test]
     # Skip for fork PRs AND Dependabot PRs — repository secrets
@@ -218,6 +244,10 @@ jobs:
       || (github.event_name == 'pull_request'
           && github.event.pull_request.head.repo.full_name == github.repository
           && github.actor != 'dependabot[bot]')
+    strategy:
+      fail-fast: false
+      matrix:
+        odoo: ['16', '17', '18', '19', '20']
 
     services:
       postgres:
@@ -241,7 +271,7 @@ jobs:
       uses: actions/checkout@v7
       with:
         repository: much-GmbH/much-mcp-server
-        ref: '19.0'
+        ref: '${{ matrix.odoo }}.0'
         path: odoo-apps
         token: ${{ secrets.MCP_MODULE_PAT }}
 
@@ -262,26 +292,31 @@ jobs:
 
     - name: Build Odoo image with the module's Python dependencies
       run: |
-        # mcp_server declares external_dependencies (authlib, defusedxml,
-        # packaging) in its manifest; Odoo refuses to install the module if
-        # any are missing, and the stock odoo image ships none of them.
-        # Versions are pinned to the manifest's own constraint.
-        cat > Dockerfile.ci <<'EOF'
-        FROM odoo:19
+        # mcp_server declares external_dependencies in its manifest (2.x:
+        # authlib, defusedxml, packaging; 1.x: defusedxml); Odoo refuses to
+        # install the module if any are missing. They are read from the
+        # branch's own manifest, with its version constraints.
+        # PIP_BREAK_SYSTEM_PACKAGES, not the flag: pip 20 and 22 in the
+        # odoo:16 and odoo:17 images do not know --break-system-packages.
+        DEPS=$(python -c "import ast, shlex; m = ast.literal_eval(open('odoo-apps/mcp_server/__manifest__.py').read()); print(' '.join(shlex.quote(d) for d in m.get('external_dependencies', {}).get('python', [])))")
+        echo "Module dependencies: $DEPS"
+        cat > Dockerfile.ci <<EOF
+        FROM odoo:${{ matrix.odoo }}
         USER root
-        RUN pip install --no-cache-dir --break-system-packages \
-              "authlib>=1.6.12,<1.7.0" defusedxml packaging
+        ENV PIP_BREAK_SYSTEM_PACKAGES=1
+        RUN python3 -m pip install --no-cache-dir $DEPS
         USER odoo
         EOF
-        docker build -t odoo-mcp-ci:19 -f Dockerfile.ci .
+        docker build -t odoo-mcp-ci:${{ matrix.odoo }} -f Dockerfile.ci .
 
     - name: Start Odoo with MCP module and initialize database
       run: |
+        # --http-interface 0.0.0.0: see the YOLO job
         docker run -d --name odoo-mcp --network "${{ job.services.postgres.network }}" \
           -e HOST=postgres -e USER=odoo -e PASSWORD=odoo \
           -v "${{ github.workspace }}/odoo-apps:/mnt/extra-addons" \
           -p 8069:8069 \
-          odoo-mcp-ci:19 -- --database test --init base,mcp_server --without-demo all
+          odoo-mcp-ci:${{ matrix.odoo }} -- --http-interface 0.0.0.0 --database test --init base,mcp_server --without-demo all
 
         # Wait for Odoo to finish initializing (includes MCP module install)
         echo "Waiting for Odoo to initialize database with MCP module..."
@@ -298,11 +333,14 @@ jobs:
             exit(1)
         " 2>/dev/null; then
             echo "Odoo is ready!"
-            break
+            exit 0
           fi
           echo "Waiting... ($i/90)"
           sleep 5
         done
+        echo "::error::Odoo did not answer within 7.5 minutes"
+        docker logs --tail 50 odoo-mcp
+        exit 1
 
     - name: Configure MCP module
       run: |
@@ -328,7 +366,13 @@ jobs:
             ('mcp_server.use_api_keys', 'True'),
             ('mcp_server.enable_rate_limiting', 'False'),
         ]:
-            models.execute_kw(db, uid, 'admin', 'ir.config_parameter', 'set_param', [param, value])
+            # search/write/create, not set_param: Odoo 20 replaced it with
+            # typed setters (set_bool, set_str)
+            ids = models.execute_kw(db, uid, 'admin', 'ir.config_parameter', 'search', [[('key', '=', param)]])
+            if ids:
+                models.execute_kw(db, uid, 'admin', 'ir.config_parameter', 'write', [ids, {'value': value}])
+            else:
+                models.execute_kw(db, uid, 'admin', 'ir.config_parameter', 'create', [{'key': param, 'value': value}])
         print('MCP enabled, API keys enabled, rate limiting disabled (CI only)')
 
         # Enable models with permissions matching auth-test-matrix.md:
@@ -372,14 +416,39 @@ jobs:
 
         PGPASSWORD=odoo psql -h localhost -U odoo -d test -c \
           "INSERT INTO res_users_apikeys (name, user_id, scope, index, key)
-           VALUES ('CI Test Key', 2, NULL, '${INDEX}', \$hash\$${KEY_HASH}\$hash\$)"
+           VALUES ('CI Test Key', 2, 'rpc', '${INDEX}', \$hash\$${KEY_HASH}\$hash\$)"
 
         echo "key=${API_KEY}" >> "$GITHUB_OUTPUT"
         echo "API key generated and inserted for admin user"
 
+    - name: Restart Odoo and require /mcp/health
+      run: |
+        # The 1.x module (Odoo 16 and 17) caches is_mcp_enabled() for five
+        # minutes, so the configuration above takes effect only after a
+        # restart. A new container without --init: restarting the old one
+        # would run the module install again.
+        docker rm -f odoo-mcp
+        docker run -d --name odoo-mcp --network "${{ job.services.postgres.network }}" \
+          -e HOST=postgres -e USER=odoo -e PASSWORD=odoo \
+          -v "${{ github.workspace }}/odoo-apps:/mnt/extra-addons" \
+          -p 8069:8069 \
+          odoo-mcp-ci:${{ matrix.odoo }} -- --http-interface 0.0.0.0 --database test
+
+        # Without /mcp/health, tests/conftest.py skips every mcp-marked test
+        # and the leg would pass while testing nothing.
+        for i in $(seq 1 60); do
+          if curl -fsS http://localhost:8069/mcp/health; then
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "::error::GET /mcp/health did not answer, so every mcp-marked test would skip"
+        docker logs --tail 50 odoo-mcp
+        exit 1
+
     - name: Run MCP integration tests
       run: |
-        pytest -m "mcp" -v --cov=mcp_server_odoo --cov-report=xml:coverage-mcp.xml --cov-report=term
+        pytest -m "mcp" -v --cov=mcp_server_odoo --cov-report=xml:coverage-mcp-${{ matrix.odoo }}.xml --cov-report=term
       env:
         ODOO_URL: http://localhost:8069
         ODOO_DB: test
@@ -391,8 +460,8 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: coverage-mcp
-        path: coverage-mcp.xml
+        name: coverage-mcp-${{ matrix.odoo }}
+        path: coverage-mcp-${{ matrix.odoo }}.xml
 
   coverage:
     name: Upload Coverage

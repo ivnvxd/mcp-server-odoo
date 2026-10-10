@@ -14,6 +14,7 @@ from .uri_schema import (
     BINARY_FIELD_TYPES,
     build_binary_uri,
     build_record_uri,
+    is_binary_payload_dict,
 )
 
 logger = logging.getLogger(__name__)
@@ -199,10 +200,11 @@ class RecordFormatter:
         Returns:
             Formatted field value
         """
+        field_type = field_meta.get("type", "unknown")
+        if field_type == "boolean":
+            return "Yes" if value else "No"
         if value is None or value is False:
             return "Not set"
-
-        field_type = field_meta.get("type", "unknown")
 
         # Text fields
         if field_type in ("char", "text", "html"):
@@ -288,8 +290,11 @@ class RecordFormatter:
             # payment_term_details); bin_size does not apply to them, so
             # emitting a URI would drop the payload AND advertise a link whose
             # read fails with "Unexpected binary value type: dict". Mirrors
-            # the guard in tools._replace_binary_values.
-            if not isinstance(value, (str, bytes, bytearray, xmlrpc.client.Binary)):
+            # the guard in tools._replace_binary_values. Odoo 20's
+            # {content, size} read shape is the one dict that is a payload.
+            if not is_binary_payload_dict(value) and not isinstance(
+                value, (str, bytes, bytearray, xmlrpc.client.Binary)
+            ):
                 return self._truncate_value(str(value))
             if record_id is None:
                 return "[Binary data]"
@@ -540,7 +545,11 @@ class DatasetFormatter:
             for idx, record in enumerate(records, 1):
                 if offset:
                     idx = offset + idx
-                lines.append(f"[{idx}] {self.record_formatter._get_record_summary(record)}")
+                # The position is not the record ID; name the ID next to it
+                summary = self.record_formatter._get_record_summary(record)
+                if "id" in record and not summary.startswith("ID:"):
+                    summary = f"ID {record['id']}: {summary}"
+                lines.append(f"[{idx}] {summary}")
 
                 # Add selected field values if specific fields were requested
                 if fields and len(fields) <= 5:  # Only show inline for small field sets

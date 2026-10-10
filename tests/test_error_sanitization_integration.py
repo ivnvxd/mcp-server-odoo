@@ -21,6 +21,7 @@ class TestErrorSanitizationIntegration:
         connection = Mock()
         access_controller = Mock()
         config = Mock()
+        config.allowed_companies = None
         config.default_limit = 10
         config.max_limit = 100
 
@@ -33,6 +34,7 @@ class TestErrorSanitizationIntegration:
         connection = Mock()
         access_controller = Mock()
         config = Mock()
+        config.allowed_companies = None
         config.default_limit = 10
         config.max_limit = 100
 

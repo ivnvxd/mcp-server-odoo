@@ -64,7 +64,7 @@ class TestCreateOperation:
             1, "Access denied on res.partner"
         )
 
-        with pytest.raises(OdooConnectionError, match="Operation failed"):
+        with pytest.raises(OdooConnectionError, match="Odoo error"):
             conn.create("res.partner", {"name": "Fail"})
 
     def test_create_propagates_connection_error(self, conn):

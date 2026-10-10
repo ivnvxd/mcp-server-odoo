@@ -190,11 +190,12 @@ class TestXMLRPCOperationsIntegration:
         with OdooConnection(real_config) as conn:
             conn.authenticate()
 
-            # Search for companies
-            partner_ids = conn.search("res.partner", [["is_company", "=", True]], limit=5)
+            # Top-level partners: present on every version without demo data.
+            # Not is_company: Odoo 20 sets it only for a partner with a VAT.
+            partner_ids = conn.search("res.partner", [["parent_id", "=", False]], limit=5)
 
-            assert len(partner_ids) > 0, "Expected at least one company partner"
-            print(f"Found {len(partner_ids)} company partners")
+            assert len(partner_ids) > 0, "Expected at least one top-level partner"
+            print(f"Found {len(partner_ids)} top-level partners")
 
     @skip_on_rate_limit
     def test_real_read_partners(self, real_config):
@@ -230,14 +231,15 @@ class TestXMLRPCOperationsIntegration:
                 raise
 
             # Search and read in one operation
+            # Top-level partners: see test_real_search_partners
             partners = conn.search_read(
-                "res.partner", [["is_company", "=", True]], ["name", "email", "phone"], limit=3
+                "res.partner", [["parent_id", "=", False]], ["name", "email", "phone"], limit=3
             )
 
-            assert partners, "expected at least one company partner"
+            assert partners, "expected at least one top-level partner"
             for partner in partners:
                 assert "name" in partner
-                print(f"Company: {partner.get('name')}")
+                print(f"Partner: {partner.get('name')}")
 
     @skip_on_rate_limit
     def test_real_fields_get(self, real_config):

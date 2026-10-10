@@ -16,6 +16,7 @@ from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.error_handling import ValidationError
 from mcp_server_odoo.odoo_connection import OdooConnection
 from mcp_server_odoo.tools import OdooToolHandler
+from mcp_server_odoo.uri_schema import is_binary_payload_dict
 
 
 @pytest.mark.yolo
@@ -531,7 +532,7 @@ class TestDynamicInstructionsE2E:
             assert "Datetime handling:" in instructions
 
             result = await client.call_tool("get_current_context", {})
-            structured = result.structuredContent
+            structured = result.structured_content
             assert structured is not None
             assert structured["login"] == "admin"
             # The tool text is exactly the dynamic block inside the instructions
@@ -559,21 +560,17 @@ class TestBinaryResourcesE2E:
         )
 
     async def _read_resource(self, app, uri: str):
-        """Invoke the registered low-level resources/read handler."""
-        from mcp import types
+        """Read through the in-memory MCP client: the full resources/read path."""
+        from mcp import Client
 
-        handler = app._mcp_server.request_handlers[types.ReadResourceRequest]
-        request = types.ReadResourceRequest(
-            method="resources/read",
-            params=types.ReadResourceRequestParams(uri=uri),
-        )
-        result = await handler(request)
-        return result.root.contents[0]
+        async with Client(app, mode="legacy") as client:
+            result = await client.read_resource(uri)
+        return result.contents[0]
 
     @pytest.mark.asyncio
     async def test_binary_field_and_attachment_round_trip(self, config_full_access):
         from mcp import types
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         from mcp_server_odoo.resources import register_resources
 
@@ -593,16 +590,20 @@ class TestBinaryResourcesE2E:
                     "image_1920": base64.b64encode(self.PNG_BYTES).decode("ascii"),
                 },
             )
+            # Odoo 20 removed ir.attachment.datas (a create drops it with a
+            # warning); raw takes the same base64 string there
+            major = connection.get_major_version()
+            content_field = "raw" if major is not None and major >= 20 else "datas"
             attachment_id = connection.create(
                 "ir.attachment",
                 {
                     "name": "binary-e2e.pdf",
-                    "datas": base64.b64encode(self.PDF_BYTES).decode("ascii"),
+                    content_field: base64.b64encode(self.PDF_BYTES).decode("ascii"),
                     "mimetype": "application/pdf",
                 },
             )
 
-            app = FastMCP("test-binary-e2e")
+            app = MCPServer("test-binary-e2e")
             register_resources(app, connection, access_controller, config_full_access)
             tool_handler = OdooToolHandler(
                 MagicMock(), connection, access_controller, config_full_access
@@ -613,14 +614,16 @@ class TestBinaryResourcesE2E:
                 app, f"odoo://res.partner/record/{partner_id}/image_1920"
             )
             assert isinstance(content, types.BlobResourceContents)
-            assert content.mimeType == "image/png"
+            assert content.mime_type == "image/png"
             stored = connection.read("res.partner", [partner_id], ["image_1920"])[0]["image_1920"]
+            if is_binary_payload_dict(stored):  # Odoo 20: {content, size, filename}
+                stored = stored["content"]
             assert base64.b64decode(content.blob) == base64.b64decode(stored)
 
             # Attachment: correct mimeType, blob byte-identical to the upload
             content = await self._read_resource(app, f"odoo://attachment/{attachment_id}")
             assert isinstance(content, types.BlobResourceContents)
-            assert content.mimeType == "application/pdf"
+            assert content.mime_type == "application/pdf"
             assert base64.b64decode(content.blob) == self.PDF_BYTES
 
             # get_record never inlines base64: binary value arrives as a URI

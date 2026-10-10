@@ -16,6 +16,7 @@ import pytest
 from mcp_server_odoo.access_control import (
     AccessControlError,
     AccessController,
+    AccessControlUnavailableError,
     access_denied_message,
 )
 from mcp_server_odoo.config import OdooConfig
@@ -165,6 +166,52 @@ class TestAccessControl:
 
         with pytest.raises(AccessControlError, match="Endpoint not found"):
             controller._make_request("/test/endpoint")
+
+    @patch("urllib.request.urlopen")
+    def test_make_request_http_404_for_an_unknown_model(self, mock_urlopen, controller):
+        """The module's 404 for an unknown model is a refusal with its own text,
+        not an unavailable endpoint."""
+        body = json.dumps(
+            {
+                "success": False,
+                "error": {
+                    "message": "Model 'sale.order' not found in Odoo instance.",
+                    "code": "E404",
+                },
+            }
+        ).encode("utf-8")
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            None, 404, "Not Found", {}, io.BytesIO(body)
+        )
+
+        with pytest.raises(AccessControlError) as exc_info:
+            controller._make_request("/mcp/models/sale.order/access")
+
+        assert not isinstance(exc_info.value, AccessControlUnavailableError)
+        assert str(exc_info.value) == "Model 'sale.order' not found in Odoo instance."
+        # A missing model is not an access problem
+        assert access_denied_message(exc_info.value) == str(exc_info.value)
+
+    @patch("urllib.request.urlopen")
+    def test_an_unknown_model_keeps_its_text_through_validate(self, mock_urlopen, controller):
+        """validate_model_access must not turn the module's 404 into a plain
+        AccessControlError, or the handlers prefix it with "Access denied"."""
+        body = json.dumps(
+            {
+                "success": False,
+                "error": {"message": "Model 'sale.order' not found in Odoo instance."},
+            }
+        ).encode("utf-8")
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            None, 404, "Not Found", {}, io.BytesIO(body)
+        )
+
+        with pytest.raises(AccessControlError) as exc_info:
+            controller.validate_model_access("sale.order", "read")
+
+        assert access_denied_message(exc_info.value) == (
+            "Model 'sale.order' not found in Odoo instance."
+        )
 
     @patch("urllib.request.urlopen")
     def test_make_request_http_500(self, mock_urlopen, controller):

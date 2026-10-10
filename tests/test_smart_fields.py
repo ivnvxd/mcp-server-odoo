@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from mcp_server_odoo.field_security import is_sensitive_field_name
-from mcp_server_odoo.tools import OdooToolHandler
+from mcp_server_odoo.tools import MAX_SCHEMA_FIELDS, OdooToolHandler
 
 
 class TestSmartFieldSelection:
@@ -18,6 +18,7 @@ class TestSmartFieldSelection:
         connection = Mock()
         access_controller = Mock()
         config = Mock()
+        config.allowed_companies = None
         config.default_limit = 10
         config.max_limit = 100
         config.max_smart_fields = 15
@@ -111,6 +112,21 @@ class TestSmartFieldSelection:
 
         assert "stored_field" in result
         assert "amount_total" not in result
+
+    def test_get_smart_default_fields_keeps_the_hierarchy_parent(self, tool_handler):
+        """parent_id is kept even when the cap leaves no room for a many2one."""
+        tool_handler.connection.fields_get.return_value = {
+            "id": {"type": "integer"},
+            "name": {"type": "char", "required": True},
+            "ref": {"type": "char"},
+            "parent_id": {"type": "many2one", "relation": "res.partner"},
+        }
+        tool_handler.config.max_smart_fields = 2
+
+        result = tool_handler._get_smart_default_fields("res.partner")
+
+        assert "parent_id" in result
+        assert "ref" not in result
 
     def test_get_smart_default_fields_related_non_stored_makes_the_cut(self, tool_handler):
         """A related non-stored business field outranks a weaker stored field.
@@ -413,6 +429,42 @@ class TestSmartFieldSelection:
         # The exact order depends on the scoring algorithm and essential field processing
         # Just verify the expected fields are present in correct quantity
         assert set(result) == {"active", "name", "display_name", "id", "email", "city", "zip"}
+
+    def test_schema_default_keeps_structure_fields_beyond_the_cap(self, tool_handler):
+        """Value fields are capped; x2many, binary and html fields skip the cap."""
+        fields_info = {f"x_code_{i:02d}": {"type": "char", "required": True} for i in range(70)}
+        fields_info.update(
+            {
+                "name": {"type": "char"},
+                "order_line": {"type": "one2many"},
+                "tag_ids": {"type": "many2many"},
+                "image_1920": {"type": "image"},
+                "attachment": {"type": "binary"},
+                "note": {"type": "html"},
+            }
+        )
+
+        result = tool_handler._schema_default_fields(fields_info)
+
+        assert {"name", "order_line", "tag_ids", "image_1920", "attachment", "note"} <= set(result)
+        assert sum(name.startswith("x_code_") for name in result) == MAX_SCHEMA_FIELDS - 1
+
+    @pytest.mark.parametrize(
+        "field_name,field_type",
+        [
+            ("message_ids", "one2many"),
+            ("activity_ids", "one2many"),
+            ("website_message_ids", "one2many"),
+            ("signing_secret", "binary"),
+            ("create_date", "datetime"),
+        ],
+    )
+    def test_schema_default_keeps_technical_exclusions(self, tool_handler, field_name, field_type):
+        result = tool_handler._schema_default_fields(
+            {"name": {"type": "char"}, field_name: {"type": field_type}}
+        )
+
+        assert result == ["name"]
 
 
 class TestSensitiveFieldNames:

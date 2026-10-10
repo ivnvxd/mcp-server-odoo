@@ -1,16 +1,17 @@
 """Test suite for MCP tools functionality."""
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcp_server_odoo.access_control import (
     AccessControlError,
     AccessController,
     AccessControlUnavailableError,
     ModelPermissions,
-    attachment_scope_domain,
+    document_scope_domain,
 )
 from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.error_handling import (
@@ -19,9 +20,21 @@ from mcp_server_odoo.error_handling import (
 from mcp_server_odoo.odoo_connection import (
     OdooConnection,
     OdooConnectionError,
+    OdooRequestFault,
     OdooValidationFault,
 )
-from mcp_server_odoo.tools import _BLOCKED_METHOD_CALLS, OdooToolHandler
+from mcp_server_odoo.resources import OdooResourceHandler
+from mcp_server_odoo.tools import (
+    _BLOCKED_METHOD_CALLS,
+    CURATED_FIELD_ATTRIBUTES,
+    MAX_SCHEMA_FIELDS,
+    SELECTION_OPTIONS_CAP,
+    OdooToolHandler,
+)
+
+# What get_fields asks fields_get for in its default view: the curated
+# attributes plus the inputs of the relevance score
+CURATED_REQUEST = list(CURATED_FIELD_ATTRIBUTES) + ["store", "related"]
 
 
 class TestOdooToolHandler:
@@ -29,8 +42,8 @@ class TestOdooToolHandler:
 
     @pytest.fixture
     def mock_app(self):
-        """Create a mock FastMCP app."""
-        app = MagicMock(spec=FastMCP)
+        """Create a mock MCPServer app."""
+        app = MagicMock(spec=MCPServer)
         # Store registered tools
         app._tools = {}
 
@@ -84,7 +97,7 @@ class TestOdooToolHandler:
         assert handler.config is valid_config
 
     def test_tools_registered(self, handler, mock_app):
-        """Test that all tools are registered with FastMCP."""
+        """Test that all tools are registered with MCPServer."""
         expected_tools = {
             "search_records",
             "get_record",
@@ -92,9 +105,14 @@ class TestOdooToolHandler:
             "get_current_context",
             "list_models",
             "create_record",
+            "create_records",
             "update_record",
+            "update_records",
             "delete_record",
             "post_message",
+            "upload_attachment",
+            "list_record_attachments",
+            "read_attachment",
             "aggregate_records",
             "list_resource_templates",
         }
@@ -350,7 +368,10 @@ class TestOdooToolHandler:
             "odoo://{model}/record/{record_id}": (
                 "Retrieve a specific record from an Odoo model by ID"
             ),
-            "odoo://{model}/search": "Search records with default settings (first 10 records)",
+            "odoo://{model}/search": (
+                "Search records with default settings "
+                "(the first ODOO_MCP_DEFAULT_LIMIT records, 25 by default)"
+            ),
             "odoo://{model}/count": "Count all records in an Odoo model",
             "odoo://{model}/fields": "Get field definitions and metadata for an Odoo model",
             "odoo://{model}/record/{record_id}/{field}": (
@@ -525,6 +546,39 @@ class TestOdooToolHandler:
         message = str(exc_info.value)
         assert "Connection error" not in message
         assert "Invalid field 'bogus' in request" in message
+
+    @pytest.mark.asyncio
+    async def test_search_records_odoo_error_not_labeled_connection_error(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """An error Odoo answered with (a ValueError for a bad operator) is not
+        a connection error either."""
+        mock_connection.search.side_effect = OdooRequestFault(
+            "Odoo error: ValueError: Invalid operator in condition ('name', 'like2', 'x')"
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            await mock_app._tools["search_records"](model="res.partner")
+
+        message = str(exc_info.value)
+        assert "Connection error" not in message
+        assert message.startswith("Odoo error: ValueError: Invalid operator")
+
+    @pytest.mark.asyncio
+    async def test_search_records_explicit_field_odoo_error(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """An Odoo error from the read of an explicit field list keeps Odoo's text."""
+        mock_connection.search.return_value = [1]
+        mock_connection.search_count.return_value = 1
+        mock_connection.read.side_effect = OdooRequestFault(
+            "Odoo error: ValueError: Invalid field 'nope'"
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            await mock_app._tools["search_records"](model="res.partner", fields=["nope"])
+
+        assert str(exc_info.value) == "Odoo error: ValueError: Invalid field 'nope'"
 
     @pytest.mark.asyncio
     async def test_search_records_access_error_fault_surfaces_without_prefix(
@@ -1082,17 +1136,18 @@ class TestOdooToolHandler:
         result = await search_records(model="res.partner", limit=valid_config.max_limit)
         assert result.limit == valid_config.max_limit
 
-        # Test with negative limit
-        result = await search_records(model="res.partner", limit=-1)
-
-        # Should use default limit
+        # 0 uses the default limit; a negative limit is refused
+        result = await search_records(model="res.partner", limit=0)
         assert result.limit == valid_config.default_limit
+        with pytest.raises(ValidationError, match="limit must be 0 or more, got -1"):
+            await search_records(model="res.partner", limit=-1)
 
     @pytest.mark.asyncio
     async def test_search_records_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that search_records sends context logging."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         # Setup mocks
@@ -1115,17 +1170,17 @@ class TestOdooToolHandler:
             ctx=ctx,
         )
 
-        # Verify context.info was called with operation name and model
-        ctx.info.assert_called()
-        first_call_msg = ctx.info.call_args_list[0][0][0]
-        assert "res.partner" in first_call_msg
-        assert "Searching" in first_call_msg
+        # Step messages go to the server log, not through ctx (mcp 2.x
+        # deprecates client logging)
+        assert any("Searching" in m and "res.partner" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_record_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that get_record sends context logging."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         mock_access_controller.validate_model_access.return_value = None
@@ -1137,14 +1192,12 @@ class TestOdooToolHandler:
         get_record = mock_app._tools["get_record"]
         await get_record(model="res.partner", record_id=1, fields=["name"], ctx=ctx)
 
-        ctx.info.assert_called()
-        first_msg = ctx.info.call_args_list[0][0][0]
-        assert "res.partner" in first_msg
-        assert "Getting" in first_msg
+        assert any("Getting" in m and "res.partner" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_list_models_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that list_models sends context info messages.
 
@@ -1153,6 +1206,7 @@ class TestOdooToolHandler:
         notifications can be flushed after the response under stdio transport,
         which strict MCP clients treat as a protocol violation.)
         """
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         from mcp_server_odoo.access_control import ModelPermissions
@@ -1173,17 +1227,16 @@ class TestOdooToolHandler:
         list_models = mock_app._tools["list_models"]
         await list_models(ctx=ctx)
 
-        ctx.info.assert_called()
-        first_msg = ctx.info.call_args_list[0][0][0]
-        assert "Listing" in first_msg
-        info_messages = [call.args[0] for call in ctx.info.call_args_list]
-        assert any("Enriching" in msg for msg in info_messages)
+        assert any("Listing" in m for m in caplog.messages)
+        assert any("Enriching" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_record_calls_context_info(
-        self, handler, mock_connection, mock_access_controller, mock_app, valid_config
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog, valid_config
     ):
         """Test that create_record sends context logging."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         mock_access_controller.validate_model_access.return_value = None
@@ -1195,16 +1248,15 @@ class TestOdooToolHandler:
         create_record = mock_app._tools["create_record"]
         await create_record(model="res.partner", values={"name": "New Record"}, ctx=ctx)
 
-        ctx.info.assert_called()
-        first_msg = ctx.info.call_args_list[0][0][0]
-        assert "res.partner" in first_msg
-        assert "Creating" in first_msg
+        assert any("Creating" in m and "res.partner" in m for m in caplog.messages)
+        ctx.info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_search_all_fields_sends_warning(
-        self, handler, mock_connection, mock_access_controller, mock_app
+        self, handler, mock_connection, mock_access_controller, mock_app, caplog
     ):
         """Test that searching with __all__ fields sends a warning via context."""
+        caplog.set_level(logging.DEBUG, logger="mcp_server_odoo")
         from unittest.mock import AsyncMock
 
         mock_access_controller.validate_model_access.return_value = None
@@ -1216,9 +1268,8 @@ class TestOdooToolHandler:
         search_records = mock_app._tools["search_records"]
         await search_records(model="res.partner", fields=["__all__"], limit=10, ctx=ctx)
 
-        ctx.warning.assert_called()
-        warning_msg = ctx.warning.call_args_list[0][0][0]
-        assert "ALL fields" in warning_msg
+        assert any("ALL fields" in m for m in caplog.messages)
+        ctx.warning.assert_not_called()
 
         # Verify that __all__ was translated to fields=None (fetch all fields from Odoo)
         mock_connection.read.assert_called_once()
@@ -1262,9 +1313,8 @@ class TestOdooToolHandler:
         result = await search_records(model="res.partner", fields=["name"], limit=10, ctx=ctx)
         assert result.total == 1
         assert len(result.records) == 1
-        # search_records reports every step through _ctx_info; the attempts
-        # were made and their RuntimeErrors swallowed by its except branch.
-        ctx.info.assert_called()
+        # The steps are logged on the server; the broken context is never used
+        ctx.info.assert_not_called()
         ctx.report_progress.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1325,7 +1375,7 @@ class TestGetFieldsTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -1363,12 +1413,23 @@ class TestGetFieldsTool:
         return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
 
     @pytest.mark.asyncio
+    async def test_unknown_field_and_attribute_names_are_noted(self, handler, mock_connection):
+        """Odoo drops unknown names silently; the note names them."""
+        mock_connection.fields_get.return_value = {"name": {"type": "char"}}
+
+        result = await handler._handle_get_fields_tool(
+            "res.partner", ["name", "nope"], ["type", "bogus"]
+        )
+
+        assert [f.name for f in result.fields] == ["name"]
+        assert "res.partner has no field named nope." in result.note
+        assert "No field has the attribute bogus." in result.note
+
+    @pytest.mark.asyncio
     async def test_curated_default_attributes(
         self, handler, mock_connection, mock_access_controller
     ):
         """Omitted attributes → curated set requested; results sorted by name."""
-        from mcp_server_odoo.tools import CURATED_FIELD_ATTRIBUTES
-
         mock_connection.fields_get.return_value = {
             "name": {"type": "char", "string": "Name", "required": True, "readonly": False},
             "state": {
@@ -1381,9 +1442,7 @@ class TestGetFieldsTool:
 
         result = await handler._handle_get_fields_tool("res.partner", None, None)
 
-        mock_connection.fields_get.assert_called_once_with(
-            "res.partner", list(CURATED_FIELD_ATTRIBUTES), None
-        )
+        mock_connection.fields_get.assert_called_once_with("res.partner", CURATED_REQUEST, None)
         assert result.model == "res.partner"
         assert result.total == 3
         assert [f.name for f in result.fields] == ["name", "partner_id", "state"]
@@ -1394,18 +1453,22 @@ class TestGetFieldsTool:
 
     @pytest.mark.asyncio
     async def test_explicit_attributes(self, handler, mock_connection, mock_access_controller):
-        """attributes=['help','store'] passed through; extras carried on FieldInfo."""
+        """attributes=['help','store'] passed through; extras carried on FieldInfo.
+        The scoring inputs are fetched too, and only the requested ones come back."""
         mock_connection.fields_get.return_value = {
-            "name": {"help": "The partner name", "store": True},
+            "name": {"type": "char", "required": True, "help": "The partner name", "store": True},
         }
 
         result = await handler._handle_get_fields_tool("res.partner", None, ["help", "store"])
 
-        mock_connection.fields_get.assert_called_once_with("res.partner", ["help", "store"], None)
-        field = result.fields[0].model_dump()
-        assert field["name"] == "name"
-        assert field["help"] == "The partner name"
-        assert field["store"] is True
+        mock_connection.fields_get.assert_called_once_with(
+            "res.partner", ["help", "store", "type", "required", "related"], None
+        )
+        assert result.fields[0].model_dump(exclude_none=True) == {
+            "name": "name",
+            "help": "The partner name",
+            "store": True,
+        }
 
     @pytest.mark.asyncio
     async def test_field_names_narrow_server_call(
@@ -1413,8 +1476,6 @@ class TestGetFieldsTool:
     ):
         """field_names goes server-side as fields_get's allfields filter;
         unknown names are silently omitted by the server (mocked here)."""
-        from mcp_server_odoo.tools import CURATED_FIELD_ATTRIBUTES
-
         # Server response already narrowed: Odoo skips unknown allfields names
         mock_connection.fields_get.return_value = {
             "name": {"type": "char"},
@@ -1436,24 +1497,18 @@ class TestGetFieldsTool:
         self, handler, mock_connection, mock_access_controller
     ):
         """attributes=[] ≡ omitted → curated defaults (repo-wide [] convention)."""
-        from mcp_server_odoo.tools import CURATED_FIELD_ATTRIBUTES
-
         mock_connection.fields_get.return_value = {"name": {"type": "char", "string": "Name"}}
 
         result = await handler._handle_get_fields_tool("res.partner", None, [])
 
-        mock_connection.fields_get.assert_called_once_with(
-            "res.partner", list(CURATED_FIELD_ATTRIBUTES), None
-        )
+        mock_connection.fields_get.assert_called_once_with("res.partner", CURATED_REQUEST, None)
         assert result.total == 1
 
     @pytest.mark.asyncio
     async def test_empty_field_names_treated_like_omitted(
         self, handler, mock_connection, mock_access_controller
     ):
-        """field_names=[] ≡ omitted → no server-side filter, every field returned."""
-        from mcp_server_odoo.tools import CURATED_FIELD_ATTRIBUTES
-
+        """field_names=[] ≡ omitted → the curated view, no server-side filter."""
         mock_connection.fields_get.return_value = {
             "name": {"type": "char"},
             "email": {"type": "char"},
@@ -1462,11 +1517,91 @@ class TestGetFieldsTool:
 
         result = await handler._handle_get_fields_tool("res.partner", [], None)
 
+        mock_connection.fields_get.assert_called_once_with("res.partner", CURATED_REQUEST, None)
+        assert [f.name for f in result.fields] == ["email", "name", "phone"]
+        assert result.total == 3
+
+    @staticmethod
+    def _wide_model(extra=None):
+        """fields_get output with 80 plain char fields, plus `extra`."""
+        fields = {f"x_field_{i:02d}": {"type": "char", "string": f"F{i}"} for i in range(80)}
+        fields.update(extra or {})
+        return fields
+
+    async def test_default_view_keeps_the_most_relevant_fields(self, handler, mock_connection):
+        mock_connection.fields_get.return_value = self._wide_model(
+            {
+                "id": {"type": "integer", "store": True},
+                "name": {"type": "char", "required": True, "store": True},
+                "partner_id": {"type": "many2one", "required": True, "relation": "res.partner"},
+                "order_line": {"type": "one2many", "required": True, "relation": "x.line"},
+                "image_1920": {"type": "image", "required": True},
+                "note": {"type": "html", "required": True},
+                "message_ids": {"type": "one2many", "required": True},
+                "create_date": {"type": "datetime", "required": True},
+                "webhook_secret": {"type": "char", "required": True},
+                "total": {"type": "monetary", "store": False, "related": "x.total"},
+            }
+        )
+
+        result = await handler._handle_get_fields_tool("sale.order", None, None)
+
+        names = {f.name for f in result.fields}
+        assert {"id", "name", "partner_id", "order_line", "image_1920", "note"} <= names
+        assert not names & {"message_ids", "create_date", "webhook_secret"}
+        # 60 value fields plus the three structure fields
+        assert result.total == len(names) == MAX_SCHEMA_FIELDS + 3
+        assert result.omitted == 90 - result.total
+        assert '["__all__"]' in result.note
+        # the scoring inputs were fetched, not asked for: they do not leak out
+        dumped = [f.model_dump(exclude_none=True) for f in result.fields]
+        assert not any("store" in f or "related" in f for f in dumped)
+
+    async def test_default_view_cuts_long_selection_lists(self, handler, mock_connection):
+        options = [[f"tz{i}", f"Zone {i}"] for i in range(SELECTION_OPTIONS_CAP + 7)]
+        mock_connection.fields_get.return_value = {
+            "tz": {"type": "selection", "selection": options},
+            "state": {"type": "selection", "selection": [["a", "A"], ["b", "B"]]},
+        }
+
+        result = await handler._handle_get_fields_tool("res.partner", None, None)
+
+        by_name = {f.name: f for f in result.fields}
+        assert by_name["tz"].selection == options[:SELECTION_OPTIONS_CAP]
+        assert by_name["tz"].selection_more == 7
+        assert by_name["state"].selection_more is None
+        assert result.omitted is None
+        assert "selection_more" in result.note
+
+    @pytest.mark.parametrize("field_names", [["__all__"], ["name", "__all__"]])
+    async def test_all_returns_every_field_uncut(self, handler, mock_connection, field_names):
+        options = [[f"tz{i}", f"Zone {i}"] for i in range(SELECTION_OPTIONS_CAP + 7)]
+        mock_connection.fields_get.return_value = self._wide_model(
+            {"tz": {"type": "selection", "selection": options}, "message_ids": {}}
+        )
+
+        result = await handler._handle_get_fields_tool("res.partner", field_names, None)
+
         mock_connection.fields_get.assert_called_once_with(
             "res.partner", list(CURATED_FIELD_ATTRIBUTES), None
         )
-        assert [f.name for f in result.fields] == ["email", "name", "phone"]
-        assert result.total == 3
+        assert result.total == 82
+        assert result.omitted is None and result.note is None
+        tz = next(f for f in result.fields if f.name == "tz")
+        assert tz.selection == options and tz.selection_more is None
+
+    async def test_named_fields_are_returned_uncut(self, handler, mock_connection):
+        options = [[f"tz{i}", f"Zone {i}"] for i in range(SELECTION_OPTIONS_CAP + 7)]
+        mock_connection.fields_get.return_value = {
+            "tz": {"type": "selection", "selection": options},
+            "create_date": {"type": "datetime"},
+        }
+
+        result = await handler._handle_get_fields_tool("res.partner", ["tz", "create_date"], None)
+
+        assert [f.name for f in result.fields] == ["create_date", "tz"]
+        assert result.fields[1].selection == options
+        assert result.note is None
 
     @pytest.mark.asyncio
     async def test_registered_wrapper_delegates_to_handler(
@@ -1531,7 +1666,7 @@ class TestRelatedSummaries:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -1574,6 +1709,7 @@ class TestRelatedSummaries:
     ):
         """1..5 ids → display names resolved; ids in the record stay untouched."""
         mock_connection.fields_get.return_value = {
+            "name": {"type": "char"},
             "child_ids": {"type": "one2many", "relation": "res.partner", "store": True},
         }
 
@@ -1766,7 +1902,7 @@ class TestAggregateRecordsTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -1786,6 +1922,11 @@ class TestAggregateRecordsTool:
         # Default to v19 so this class focuses on the formatted_read_group path.
         # The legacy read_group fallback is exercised by TestAggregateRecordsReadGroupFallback.
         connection.get_major_version = MagicMock(return_value=19)
+        # Field types for the aggregate type check
+        connection.fields_get.return_value = {
+            "amount_total": {"type": "monetary"},
+            "partner_id": {"type": "many2one"},
+        }
         return connection
 
     @pytest.fixture
@@ -1805,6 +1946,66 @@ class TestAggregateRecordsTool:
     @pytest.fixture
     def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
         return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+
+    @pytest.mark.parametrize(
+        "spec,field,field_type",
+        [
+            ("name:sum", "name", "char"),
+            ("date_order:avg", "date_order", "datetime"),
+            ("active:sum", "active", "boolean"),
+            ("amount_total:bool_and", "amount_total", "monetary"),
+            ("amount_total:bool_or", "amount_total", "monetary"),
+        ],
+    )
+    async def test_typed_function_on_the_wrong_field_type_is_refused(
+        self, handler, mock_connection, spec, field, field_type
+    ):
+        """Odoo checks only the function name; name:sum would fail in SQL."""
+        mock_connection.fields_get.return_value = {field: {"type": field_type}}
+
+        with pytest.raises(ValidationError, match=f"needs a field of type .* '{field}' is a"):
+            await handler._handle_aggregate_records_tool(
+                "sale.order", None, [spec], None, None, None, 0
+            )
+        mock_connection.execute_kw.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "spec", ["active:bool_or", "amount_total:avg", "name:max", "name:count_distinct"]
+    )
+    async def test_fitting_or_untyped_function_is_sent(self, handler, mock_connection, spec):
+        mock_connection.fields_get.return_value = {
+            "name": {"type": "char"},
+            "active": {"type": "boolean"},
+            "amount_total": {"type": "monetary"},
+        }
+        mock_connection.execute_kw.return_value = []
+
+        await handler._handle_aggregate_records_tool(
+            "sale.order", None, [spec], None, None, None, 0
+        )
+
+        mock_connection.execute_kw.assert_called_once()
+
+    async def test_unknown_field_or_function_is_left_to_odoo(self, handler, mock_connection):
+        mock_connection.execute_kw.return_value = []
+
+        await handler._handle_aggregate_records_tool(
+            "sale.order", None, ["no_such_field:sum", "name:median"], None, None, None, 0
+        )
+
+        mock_connection.execute_kw.assert_called_once()
+
+    async def test_no_typed_function_reads_fields_only_for_the_path_check(
+        self, handler, mock_connection
+    ):
+        mock_connection.execute_kw.return_value = []
+
+        await handler._handle_aggregate_records_tool(
+            "sale.order", ["partner_id"], None, None, None, None, 0
+        )
+
+        # Only the related-path check of the groupby reads the fields
+        assert mock_connection.fields_get.call_count <= 1
 
     @pytest.mark.asyncio
     async def test_success_with_sum_aggregate(
@@ -2134,7 +2335,7 @@ class TestAggregateRecordsReadGroupFallback:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2153,6 +2354,11 @@ class TestAggregateRecordsReadGroupFallback:
         connection.is_authenticated = True
         # v18 → triggers the read_group fallback path
         connection.get_major_version = MagicMock(return_value=18)
+        # Field types for the aggregate type check
+        connection.fields_get.return_value = {
+            "amount_total": {"type": "monetary"},
+            "partner_id": {"type": "many2one"},
+        }
         return connection
 
     @pytest.fixture
@@ -2211,6 +2417,50 @@ class TestAggregateRecordsReadGroupFallback:
         assert passed_kwargs["lazy"] is False
 
     @pytest.mark.asyncio
+    async def test_odoo16_orders_by_the_bare_aggregate_field(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Odoo 16 refuses 'field:op' in orderby and takes the bare field name."""
+        mock_connection.get_major_version.return_value = 16
+        mock_connection.execute_kw.return_value = []
+
+        await mock_app._tools["aggregate_records"](
+            model="sale.order",
+            groupby=["partner_id"],
+            aggregates=["amount_total:sum"],
+            order="amount_total:sum desc, partner_id",
+        )
+
+        passed_kwargs = mock_connection.execute_kw.call_args.args[3]
+        assert passed_kwargs["orderby"] == "amount_total desc, partner_id"
+
+    @pytest.mark.asyncio
+    async def test_odoo16_empty_total_row(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        """Odoo 16 cannot marshal an empty ungrouped total; the connection returns None."""
+        mock_connection.get_major_version.return_value = 16
+        mock_connection.execute_kw.return_value = None
+
+        result = await mock_app._tools["aggregate_records"](
+            model="res.partner", aggregates=["color:sum"], domain=[["id", "=", 0]]
+        )
+
+        assert result.groups == [{"__count": 0, "__extra_domain": [], "color:sum": False}]
+
+    @pytest.mark.asyncio
+    async def test_odoo16_refuses_ordering_by_count(
+        self, handler, mock_connection, mock_access_controller, mock_app
+    ):
+        mock_connection.get_major_version.return_value = 16
+
+        with pytest.raises(ValidationError, match="Odoo 16 cannot order groups by __count"):
+            await mock_app._tools["aggregate_records"](
+                model="sale.order", groupby=["partner_id"], order="__count desc"
+            )
+        mock_connection.execute_kw.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_fallback_peeks_limit_plus_one_and_sets_has_more(
         self, handler, mock_connection, mock_access_controller, mock_app
     ):
@@ -2230,20 +2480,22 @@ class TestAggregateRecordsReadGroupFallback:
         assert result.has_more is True
         assert result.next_hint == "aggregate_records with offset=2, limit=2"
 
-    @pytest.mark.asyncio
-    async def test_count_stripped_from_fields(
-        self, handler, mock_connection, mock_access_controller, mock_app
+    @pytest.mark.parametrize("groupby", [[], ["partner_id"]])
+    async def test_count_alone_is_sent_as_the_count_field(
+        self, handler, mock_connection, mock_access_controller, mock_app, groupby
     ):
-        """__count must NOT be passed to read_group's fields= (it's implicit)."""
+        """fields=[] fails on Odoo 16 without a groupby (Odoo cannot marshal the
+        None it puts in the row), and with one it aggregates every numeric
+        field. fields=["__count"] works on 16, 17 and 18."""
         mock_access_controller.validate_model_access.return_value = None
         mock_connection.execute_kw.return_value = []
 
         aggregate_records = mock_app._tools["aggregate_records"]
-        # Caller omits aggregates → tool defaults to ["__count"] → stripped before fields=
-        await aggregate_records(model="sale.order", groupby=["partner_id"])
+        # Caller omits aggregates → tool defaults to ["__count"]
+        await aggregate_records(model="sale.order", groupby=groupby)
 
         passed_kwargs = mock_connection.execute_kw.call_args.args[3]
-        assert passed_kwargs["fields"] == []
+        assert passed_kwargs["fields"] == ["__count"]
 
     @pytest.mark.asyncio
     async def test_count_stripped_keeps_other_aggregates(
@@ -2581,7 +2833,7 @@ class TestYoloListModels:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2709,7 +2961,7 @@ class TestCreateRecordTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2819,7 +3071,7 @@ class TestUpdateRecordTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -2857,12 +3109,8 @@ class TestUpdateRecordTool:
     @pytest.mark.asyncio
     async def test_update_record_success(self, handler, mock_connection, mock_app):
         """Test successful record update with existence check and result read."""
-        # First read: existence check returns [{"id": 10}]
-        # Second read: post-update fetch returns updated record
-        mock_connection.read.side_effect = [
-            [{"id": 10}],  # existence check
-            [{"id": 10, "display_name": "Updated Partner"}],  # post-update read
-        ]
+        mock_connection.search_count.return_value = 1  # existence check
+        mock_connection.read.return_value = [{"id": 10, "display_name": "Updated Partner"}]
         mock_connection.write.return_value = True
         mock_connection.build_record_url.return_value = "http://localhost:8069/odoo/res.partner/10"
 
@@ -2877,17 +3125,54 @@ class TestUpdateRecordTool:
         assert "10" in result.message
 
         # Verify existence check then post-update read
-        assert mock_connection.read.call_count == 2
-        mock_connection.read.assert_any_call("res.partner", [10], ["id"])
-        mock_connection.read.assert_any_call("res.partner", [10], ["id", "display_name"])
+        mock_connection.search_count.assert_called_once_with(
+            "res.partner", [["id", "=", 10]], context={"active_test": False}
+        )
+        mock_connection.read.assert_called_once_with("res.partner", [10], ["id", "display_name"])
         mock_connection.write.assert_called_once_with(
             "res.partner", [10], {"name": "Updated Partner"}
         )
 
     @pytest.mark.asyncio
+    async def test_update_record_unknown_field(self, handler, mock_connection, mock_app):
+        """Odoo 19+ answer an unknown field in write() with a bare KeyError."""
+        mock_connection.search_count.return_value = 1
+        mock_connection.fields_get.return_value = {"name": {"type": "char"}}
+
+        with pytest.raises(
+            ValidationError,
+            match="Invalid field 'nope' on res.partner: it does not exist, or this user cannot see",
+        ):
+            await mock_app._tools["update_record"](
+                model="res.partner", record_id=10, values={"name": "x", "nope": 1}
+            )
+        mock_connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_record_unknown_field(self, handler, mock_connection, mock_app):
+        """The Odoo 20 MCP module hides Odoo's own error as "Internal server error"."""
+        mock_connection.fields_get.return_value = {"name": {"type": "char"}}
+
+        with pytest.raises(ValidationError, match="Invalid field 'nope' on res.partner"):
+            await mock_app._tools["create_record"](
+                model="res.partner", values={"name": "x", "nope": 1}
+            )
+        mock_connection.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_record_unknown_field(self, handler, mock_connection, mock_app):
+        mock_connection.fields_get.return_value = {"name": {"type": "char"}}
+
+        with pytest.raises(ValidationError, match="Invalid field 'nope' on res.partner"):
+            await mock_app._tools["get_record"](
+                model="res.partner", record_id=1, fields=["name", "nope"]
+            )
+        mock_connection.read.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_update_record_not_found(self, handler, mock_connection, mock_app):
         """Test update_record when record doesn't exist."""
-        mock_connection.read.return_value = []  # existence check fails
+        mock_connection.search_count.return_value = 0  # existence check fails
         update_record = mock_app._tools["update_record"]
         with pytest.raises(ValidationError, match="Record not found"):
             await update_record(model="res.partner", record_id=999, values={"name": "Test"})
@@ -2946,12 +3231,178 @@ class TestUpdateRecordTool:
             await update_record(model="res.partner", record_id=1, values={"name": "Test"})
 
 
+class TestUpdateRecordsTool:
+    """Test cases for the bulk update_records tool."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=MCPServer)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        return connection
+
+    @pytest.fixture
+    def mock_access_controller(self):
+        return MagicMock(spec=AccessController)
+
+    @pytest.fixture
+    def valid_config(self):
+        return OdooConfig(
+            url="http://localhost:8069",
+            api_key="test_api_key",
+            database="test_db",
+        )
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection, mock_access_controller, valid_config):
+        return OdooToolHandler(mock_app, mock_connection, mock_access_controller, valid_config)
+
+    @pytest.mark.asyncio
+    async def test_update_records_success(self, handler, mock_connection, mock_app):
+        """Test successful bulk update with existence check and result read."""
+        mock_connection.search.return_value = [10, 11]  # existence check
+        mock_connection.read.return_value = [
+            {"id": 10, "display_name": "Partner 10"},
+            {"id": 11, "display_name": "Partner 11"},
+        ]  # post-update read
+        mock_connection.write.return_value = True
+
+        update_records = mock_app._tools["update_records"]
+        result = await update_records(
+            model="res.partner", record_ids=[10, 11], values={"active": False}
+        )
+
+        assert result.success is True
+        assert result.updated_count == 2
+        assert [r["id"] for r in result.records] == [10, 11]
+        mock_connection.write.assert_called_once_with("res.partner", [10, 11], {"active": False})
+        # One access check for the whole batch, not per record.
+        handler.access_controller.validate_model_access.assert_called_once_with(
+            "res.partner", "write"
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_records_finds_archived_records(self, handler, mock_connection, mock_app):
+        """Unarchiving is a common bulk update; archived ids must count as existing."""
+        mock_connection.search.return_value = [10, 11]
+        mock_connection.write.return_value = True
+        mock_connection.read.return_value = [
+            {"id": 10, "display_name": "A"},
+            {"id": 11, "display_name": "B"},
+        ]
+
+        update_records = mock_app._tools["update_records"]
+        await update_records(model="res.partner", record_ids=[10, 11], values={"active": True})
+
+        mock_connection.search.assert_called_once_with(
+            "res.partner", [["id", "in", [10, 11]]], context={"active_test": False}
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_records_dedupes_ids_before_the_cap(
+        self, handler, mock_connection, mock_app
+    ):
+        mock_connection.search.return_value = [10, 11]
+        mock_connection.write.return_value = True
+        mock_connection.read.return_value = [
+            {"id": 10, "display_name": "A"},
+            {"id": 11, "display_name": "B"},
+        ]
+
+        update_records = mock_app._tools["update_records"]
+        # 101 entries but only two records: within the cap
+        result = await update_records(
+            model="res.partner", record_ids=[10] * 100 + [11], values={"comment": "x"}
+        )
+
+        mock_connection.write.assert_called_once_with("res.partner", [10, 11], {"comment": "x"})
+        assert result.updated_count == 2
+
+    @pytest.mark.asyncio
+    async def test_update_records_empty_ids_rejected(self, handler, mock_app):
+        """An empty record_ids list is rejected before any RPC."""
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match="No record IDs provided"):
+            await update_records(model="res.partner", record_ids=[], values={"name": "Test"})
+
+    @pytest.mark.asyncio
+    async def test_update_records_over_cap_rejected(self, handler, mock_connection, mock_app):
+        """More than MAX_BATCH_RECORDS ids is rejected before any RPC."""
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match="Too many records"):
+            await update_records(
+                model="res.partner",
+                record_ids=list(range(1, 102)),
+                values={"name": "Test"},
+            )
+        assert mock_connection.method_calls == []
+
+    @pytest.mark.asyncio
+    async def test_update_records_missing_id_rejected(self, handler, mock_connection, mock_app):
+        """A nonexistent id in the batch fails the whole call, naming it, with no write."""
+        mock_connection.search.return_value = [10]  # 11 missing
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match=r"not found.*\[11\]"):
+            await update_records(model="res.partner", record_ids=[10, 11], values={"name": "Test"})
+        mock_connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_records_oversized_id_rejected(self, handler, mock_connection, mock_app):
+        """An id beyond the XML-RPC 32-bit range fails cleanly before any RPC."""
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match=str(2**31)):
+            await update_records(
+                model="res.partner", record_ids=[1, 2**31], values={"name": "Test"}
+            )
+        assert mock_connection.method_calls == []
+
+    @pytest.mark.asyncio
+    async def test_update_records_empty_values(self, handler, mock_app):
+        """Test update_records rejects empty values."""
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match="No values provided"):
+            await update_records(model="res.partner", record_ids=[1], values={})
+
+    @pytest.mark.asyncio
+    async def test_update_records_access_denied(self, handler, mock_access_controller, mock_app):
+        """Test update_records checks 'write' permission once for the batch."""
+        mock_access_controller.validate_model_access.side_effect = AccessControlError(
+            "Access denied"
+        )
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match="Access denied"):
+            await update_records(model="res.partner", record_ids=[1, 2], values={"name": "Test"})
+        mock_access_controller.validate_model_access.assert_called_once_with("res.partner", "write")
+
+    @pytest.mark.asyncio
+    async def test_update_records_not_authenticated(self, handler, mock_connection, mock_app):
+        """Test update_records when not authenticated."""
+        mock_connection.is_authenticated = False
+        update_records = mock_app._tools["update_records"]
+        with pytest.raises(ValidationError, match="Not authenticated"):
+            await update_records(model="res.partner", record_ids=[1], values={"name": "Test"})
+
+
 class TestDeleteRecordTool:
     """Test cases for delete_record tool."""
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3056,7 +3507,7 @@ class TestPostMessageTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3234,6 +3685,8 @@ class TestPostMessageTool:
     ):
         """When provided, partner_ids and attachment_ids appear in kwargs."""
         mock_connection.execute_kw.return_value = 1
+        mock_connection.search_count.return_value = 1
+        mock_connection.search.return_value = [10]
 
         post_message = mock_app._tools["post_message"]
         await post_message(
@@ -3247,6 +3700,38 @@ class TestPostMessageTool:
         sent_kwargs = mock_connection.execute_kw.call_args[0][3]
         assert sent_kwargs["partner_ids"] == [5, 6]
         assert sent_kwargs["attachment_ids"] == [10]
+
+    @pytest.mark.asyncio
+    async def test_post_message_missing_record(self, handler, mock_connection, mock_app):
+        mock_connection.search_count.return_value = 0
+
+        with pytest.raises(ValidationError, match="Record not found: res.partner with ID 9"):
+            await mock_app._tools["post_message"](model="res.partner", record_id=9, body="Hi")
+        mock_connection.execute_kw.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_post_message_missing_attachment(self, handler, mock_connection, mock_app):
+        mock_connection.search_count.return_value = 1
+        mock_connection.search.return_value = [10]
+
+        with pytest.raises(ValidationError, match="Attachment not found: 11"):
+            await mock_app._tools["post_message"](
+                model="res.partner", record_id=1, body="Hi", attachment_ids=[10, 11]
+            )
+        mock_connection.execute_kw.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_post_message_escapes_plain_text_on_odoo_16(
+        self, handler, mock_connection, mock_app
+    ):
+        """Odoo 16 stores a str body as HTML; 17 and later escape it themselves."""
+        mock_connection.execute_kw.return_value = 1
+        mock_connection.search_count.return_value = 1
+        mock_connection.get_major_version.return_value = 16
+
+        await mock_app._tools["post_message"](model="res.partner", record_id=1, body="a <b> c")
+
+        assert mock_connection.execute_kw.call_args[0][3]["body"] == "a &lt;b&gt; c"
 
     @pytest.mark.asyncio
     async def test_post_message_no_mail_thread_has_no_attribute_branch(
@@ -3329,7 +3814,7 @@ class TestListModelsTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3441,7 +3926,7 @@ class TestSearchRecordReturnValue:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3515,7 +4000,7 @@ class TestToolEdgeCases:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -3586,6 +4071,17 @@ class TestToolEdgeCases:
             await search_records(model="res.partner", fields='"name"', limit=10)
 
         assert "Fields must be a list, got str" in str(exc_info.value)
+        assert "JSON-encoded twice" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_search_records_double_encoded_domain(
+        self, handler, mock_access_controller, mock_app
+    ):
+        """A domain JSON-encoded twice is refused with a hint, not a bare type name."""
+        search_records = mock_app._tools["search_records"]
+
+        with pytest.raises(ValidationError, match="JSON-encoded twice"):
+            await search_records(model="res.partner", domain='"[[\\"id\\", \\"=\\", 1]]"')
 
     @pytest.mark.asyncio
     async def test_create_record_generic_exception(self, handler, mock_connection, mock_app):
@@ -3606,7 +4102,7 @@ class TestParseDomainInput:
 
     @pytest.fixture
     def handler(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
         app.tool = lambda **kwargs: lambda func: app._tools.setdefault(func.__name__, func)
         connection = MagicMock(spec=OdooConnection)
@@ -3665,6 +4161,12 @@ class TestParseDomainInput:
     def test_balanced_domains_pass_through(self, handler, domain):
         assert handler._parse_domain_input(domain) is domain
 
+    @pytest.mark.parametrize("domain", [[["name", "ilike"]], [["name"]], ["&", ["a", "=", 1, 2]]])
+    def test_a_condition_without_three_parts_is_refused(self, handler, domain):
+        """Odoo answers it with a bare unpacking or index error."""
+        with pytest.raises(ValidationError, match="a condition has three parts"):
+            handler._parse_domain_input(domain)
+
     @pytest.mark.parametrize(
         "domain",
         [
@@ -3703,7 +4205,7 @@ class TestCallModelMethodTool:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -4382,7 +4884,7 @@ class TestSensitiveFieldStripping:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -4579,7 +5081,7 @@ class TestBinaryValueSwap:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -4866,12 +5368,162 @@ class TestBinaryValueSwap:
         assert result.record["datas"] is False
 
 
+class TestOdoo20BinaryReads:
+    """Odoo 20 dropped ``bin_size``: a populated binary reads as
+    ``{content, size, filename}``, so the payload must stay out of the read."""
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock(spec=MCPServer)
+        app._tools = {}
+
+        def tool_decorator(**kwargs):
+            def decorator(func):
+                app._tools[func.__name__] = func
+                return func
+
+            return decorator
+
+        app.tool = tool_decorator
+        return app
+
+    @pytest.fixture
+    def mock_connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.get_major_version.return_value = 20
+        connection.fields_get.return_value = {
+            "id": {"type": "integer", "string": "ID", "store": True},
+            "name": {"type": "char", "string": "Name", "store": True},
+            "image_1920": {"type": "image", "string": "Image", "store": True},
+            # Computed from image_1920; Odoo 20 cannot search a non-stored field
+            "avatar_128": {"type": "image", "string": "Avatar", "store": False},
+        }
+        return connection
+
+    @pytest.fixture
+    def handler(self, mock_app, mock_connection):
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", default_limit=10, max_limit=100
+        )
+        return OdooToolHandler(mock_app, mock_connection, MagicMock(spec=AccessController), config)
+
+    @pytest.mark.asyncio
+    async def test_get_record_leaves_binary_out_of_the_read(self, handler, mock_connection):
+        mock_connection.read.return_value = [{"id": 7, "name": "A"}]
+        mock_connection.search.return_value = [7]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert mock_connection.read.call_args[0][2] == ["name"]
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+        mock_connection.search.assert_called_once_with(
+            "res.partner",
+            [["id", "in", [7]], ["image_1920", "!=", False]],
+            context={"active_test": False},
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_record_empty_binary_is_false(self, handler, mock_connection):
+        mock_connection.read.return_value = [{"id": 7, "name": "A"}]
+        mock_connection.search.return_value = []
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert result.record["image_1920"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_record_all_fields_reads_named_non_binary_fields(
+        self, handler, mock_connection
+    ):
+        mock_connection.read.return_value = [{"id": 7, "name": "A"}]
+        mock_connection.search.return_value = [7]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["__all__"])
+
+        assert sorted(mock_connection.read.call_args[0][2]) == ["id", "name"]
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+        assert result.record["avatar_128"] == "odoo://res.partner/record/7/avatar_128"
+        # Only the stored binary is searched
+        assert mock_connection.search.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_non_stored_binary_gets_uri_without_search(self, handler, mock_connection):
+        mock_connection.read.return_value = [{"id": 7}]
+        mock_connection.search.return_value = [7]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["avatar_128"])
+
+        assert mock_connection.read.call_args[0][2] == ["id"]
+        assert result.record["avatar_128"] == "odoo://res.partner/record/7/avatar_128"
+        # Only the existence check, no search for populated binaries
+        mock_connection.search.assert_called_once_with(
+            "res.partner", [["id", "in", [7]]], context={"active_test": False}
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_record_with_only_binary_fields(self, handler, mock_connection):
+        """Odoo 20 echoes a missing id back for a read of only "id"."""
+        mock_connection.read.return_value = [{"id": 999}]
+        mock_connection.search.return_value = []
+
+        with pytest.raises(ValidationError, match="Record not found"):
+            await handler._handle_get_record_tool("res.partner", 999, ["image_1920"])
+
+    @pytest.mark.asyncio
+    async def test_search_records_flags_each_record(self, handler, mock_connection):
+        mock_connection.search_count.return_value = 2
+        # First call: the record search. Second call: the populated-binary flag.
+        mock_connection.search.side_effect = [[1, 2], [2]]
+        mock_connection.read.return_value = [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]
+
+        result = await handler._handle_search_tool(
+            "res.partner", None, ["name", "image_1920"], 10, 0, None
+        )
+
+        records = result["records"]
+        assert records[0]["image_1920"] is False
+        assert records[1]["image_1920"] == "odoo://res.partner/record/2/image_1920"
+        assert mock_connection.read.call_args[0][2] == ["name"]
+
+    @pytest.mark.asyncio
+    async def test_odoo_19_keeps_the_bin_size_read(self, handler, mock_connection):
+        mock_connection.get_major_version.return_value = 19
+        mock_connection.read.return_value = [{"id": 7, "name": "A", "image_1920": "12.5 KB"}]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert mock_connection.read.call_args[0][2:] == (["name", "image_1920"], {"bin_size": True})
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+        mock_connection.search.assert_not_called()
+
+    def test_url_attachment_raw_gets_the_attachment_uri(self, handler):
+        """Odoo 20 has no datas; a URL attachment's empty raw still gets its URI."""
+        record = {"id": 5, "type": "url", "raw": False}
+
+        handler._replace_binary_values("ir.attachment", record, {"raw"})
+
+        assert record["raw"] == "odoo://attachment/5"
+
+    @pytest.mark.asyncio
+    async def test_payload_dict_from_unknown_version_becomes_uri(self, handler, mock_connection):
+        """Odoo Online reports saas~19.x but can already return the 20 shape."""
+        mock_connection.get_major_version.return_value = None
+        mock_connection.read.return_value = [
+            {"id": 7, "name": "A", "image_1920": {"content": "aGk=", "size": 2}}
+        ]
+
+        result = await handler._handle_get_record_tool("res.partner", 7, ["name", "image_1920"])
+
+        assert result.record["image_1920"] == "odoo://res.partner/record/7/image_1920"
+
+
 class TestBinarySwapAndRelatedBudget:
     """Guards on the two read-path enrichments added in 0.8.0."""
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -4995,7 +5647,7 @@ class TestDomainIntBounds:
 
     @pytest.fixture
     def handler(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5037,7 +5689,7 @@ class TestAllFieldsMetadataReportsTotal:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5087,7 +5739,7 @@ class TestResourceTemplateReadFilter:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5134,7 +5786,7 @@ class TestDeeplyNestedParameterStrings:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5223,7 +5875,7 @@ class TestAttachmentScopeDomain:
         return OdooConfig(url="http://localhost:8069", api_key="k", database="d")
 
     def test_scopes_to_enabled_models(self, config, access):
-        assert attachment_scope_domain(config, access) == [
+        assert document_scope_domain("ir.attachment", config, access) == [
             "|",
             ("res_model", "=", False),
             ("res_model", "in", ["res.partner", "ir.attachment"]),
@@ -5237,7 +5889,7 @@ class TestAttachmentScopeDomain:
             username="admin",
             yolo_mode="read",
         )
-        assert attachment_scope_domain(config, access) is None
+        assert document_scope_domain("ir.attachment", config, access) is None
 
     def test_unreportable_allowlist_fails_closed(self, config, access):
         """Swallowing this would disable the scope on every surface at once —
@@ -5246,14 +5898,14 @@ class TestAttachmentScopeDomain:
         """
         access.get_enabled_models.side_effect = AccessControlUnavailableError("boom")
         with pytest.raises(AccessControlUnavailableError):
-            attachment_scope_domain(config, access)
+            document_scope_domain("ir.attachment", config, access)
 
     def test_empty_allowlist_admits_only_standalone_attachments(self, config, access):
         """Nothing enabled means nothing an attachment may hang off. Returning
         None here would read as "no scope needed" and expose every row.
         """
         access.get_enabled_models.return_value = []
-        assert attachment_scope_domain(config, access) == [("res_model", "=", False)]
+        assert document_scope_domain("ir.attachment", config, access) == [("res_model", "=", False)]
 
     def test_enabled_but_unreadable_model_is_excluded(self, config, access):
         """Enablement and read permission are different endpoints. A model the
@@ -5264,7 +5916,7 @@ class TestAttachmentScopeDomain:
             model=model, enabled=True, can_read=(model != "res.partner")
         )
 
-        assert attachment_scope_domain(config, access) == [
+        assert document_scope_domain("ir.attachment", config, access) == [
             "|",
             ("res_model", "=", False),
             ("res_model", "in", ["ir.attachment"]),
@@ -5279,7 +5931,7 @@ class TestAttachmentScopeDomain:
             {"model": "hr.payslip", "name": "Payslip", "operations": {"read": False}},
         ]
 
-        assert attachment_scope_domain(config, access) == [
+        assert document_scope_domain("ir.attachment", config, access) == [
             "|",
             ("res_model", "=", False),
             ("res_model", "in", ["res.partner"]),
@@ -5294,7 +5946,7 @@ class TestAttachmentScopeDomain:
             model=model, enabled=True, can_read=False
         )
 
-        assert attachment_scope_domain(config, access) == [("res_model", "=", False)]
+        assert document_scope_domain("ir.attachment", config, access) == [("res_model", "=", False)]
 
     def test_unreportable_permission_fails_closed(self, config, access):
         """Same reasoning as the allowlist itself: a permission that cannot be
@@ -5303,7 +5955,7 @@ class TestAttachmentScopeDomain:
         access.get_model_permissions.side_effect = AccessControlUnavailableError("boom")
 
         with pytest.raises(AccessControlUnavailableError):
-            attachment_scope_domain(config, access)
+            document_scope_domain("ir.attachment", config, access)
 
     def test_appended_not_and_prefixed(self, config, access):
         """A hand-written leading "&" would bind only the first of a
@@ -5311,7 +5963,7 @@ class TestAttachmentScopeDomain:
         normalize_domain inserts the ANDs for a flat sequence instead.
         """
         caller = [("mimetype", "=", "application/pdf"), ("public", "=", False)]
-        combined = list(caller) + attachment_scope_domain(config, access)
+        combined = list(caller) + document_scope_domain("ir.attachment", config, access)
         assert combined[:2] == caller
         assert combined[2] == "|"
 
@@ -5321,7 +5973,7 @@ class TestAttachmentGatingInTools:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5340,7 +5992,10 @@ class TestAttachmentGatingInTools:
         connection.is_authenticated = True
         connection.search.return_value = []
         connection.search_count.return_value = 0
-        connection.fields_get.return_value = {"id": {"type": "integer", "string": "ID"}}
+        connection.fields_get.return_value = {
+            "id": {"type": "integer", "string": "ID"},
+            "name": {"type": "char", "string": "Name"},
+        }
         return connection
 
     @pytest.fixture
@@ -5506,7 +6161,7 @@ class TestAttachmentGatingOnWrites:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5593,8 +6248,8 @@ class TestAttachmentGatingOnWrites:
 
     @pytest.mark.asyncio
     async def test_post_message_refuses_a_denied_attachment(self, handler, connection):
-        """message_post repoints the attachments it is handed onto the thread
-        record, so an ungated attachment_ids moves the document into view."""
+        """message_post links the attachments it is handed to the message, so
+        an ungated attachment_ids makes the document readable from the chatter."""
         with pytest.raises(ValidationError, match="hr.payslip"):
             await handler._handle_post_message_tool(
                 "res.partner", 1, "hi", "note", "comment", None, [7], False
@@ -5620,6 +6275,806 @@ class TestAttachmentGatingOnWrites:
         assert result["success"] is True
 
 
+def _tool_app():
+    app = MagicMock(spec=MCPServer)
+    app._tools = {}
+
+    def tool_decorator(**kwargs):
+        def decorator(func):
+            app._tools[func.__name__] = func
+            return func
+
+        return decorator
+
+    app.tool = tool_decorator
+    return app
+
+
+def _standard_config():
+    return OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+
+
+class TestDocumentOwnerWriteGate:
+    """Changing an attachment or a message changes its document, so the owner
+    must allow writes, as upload_attachment and Odoo itself require. A read
+    check alone let a file be attached to a read-only model.
+    """
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.search_read.return_value = [{"id": 7, "res_model": "res.company"}]
+        connection.search.return_value = [7]
+        connection.search_count.return_value = 1
+        connection.read.return_value = [{"id": 7, "display_name": "logo.png"}]
+        connection.write.return_value = True
+        connection.unlink.return_value = True
+        connection.create.return_value = 9
+        connection.create_many.return_value = [9]
+        connection.fields_get.return_value = {}
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+
+        def gate(model, operation):
+            if model == "res.company" and operation != "read":
+                raise AccessControlError(f"Operation '{operation}' not allowed on model '{model}'")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    @pytest.mark.asyncio
+    async def test_create_on_a_read_only_owner_is_refused(self, handler, connection):
+        with pytest.raises(ValidationError, match="'res.company', which MCP does not allow"):
+            await handler._handle_create_record_tool(
+                "ir.attachment", {"name": "x.txt", "res_model": "res.company", "res_id": 1}
+            )
+
+        connection.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_records_on_a_read_only_owner_is_refused(self, handler, connection):
+        with pytest.raises(ValidationError, match="res.company"):
+            await handler._handle_create_records_tool(
+                "ir.attachment",
+                [{"name": "x.txt", "res_model": "res.company", "res_id": 1}],
+            )
+
+        connection.create_many.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_of_a_read_only_owners_attachment_is_refused(self, handler, connection):
+        with pytest.raises(ValidationError, match="attachment 7 belongs to 'res.company'"):
+            await handler._handle_update_record_tool("ir.attachment", 7, {"name": "y.txt"})
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bulk_update_of_a_read_only_owners_attachment_is_refused(
+        self, handler, connection
+    ):
+        with pytest.raises(ValidationError, match="res.company"):
+            await handler._handle_update_records_tool("ir.attachment", [7], {"name": "y.txt"})
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_move_onto_a_read_only_owner_is_refused(self, handler, connection):
+        connection.search_read.return_value = [{"id": 7, "res_model": "res.partner"}]
+
+        with pytest.raises(ValidationError, match="would be moved to 'res.company'"):
+            await handler._handle_update_record_tool(
+                "ir.attachment", 7, {"res_model": "res.company"}
+            )
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_of_a_read_only_owners_attachment_is_refused(self, handler, connection):
+        with pytest.raises(ValidationError, match="res.company"):
+            await handler._handle_delete_record_tool("ir.attachment", 7)
+
+        connection.unlink.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reading_a_read_only_owners_attachment_still_works(self, handler, connection):
+        connection.read.return_value = [{"id": 7, "name": "logo.png"}]
+
+        await handler._handle_get_record_tool("ir.attachment", 7, ["name"])
+
+        connection.read.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_a_writable_owner_is_allowed(self, handler, connection):
+        result = await handler._handle_create_record_tool(
+            "ir.attachment", {"name": "x.txt", "res_model": "res.partner", "res_id": 1}
+        )
+
+        assert result["success"] is True
+        connection.create.assert_called_once()
+
+
+class TestMessageScope:
+    """Enabling mail.message must not expose the chatter of every model: its
+    rows, like attachments, are scoped to the owners MCP allows.
+    """
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.search.return_value = []
+        connection.search_count.return_value = 0
+        connection.read.return_value = [{"id": 5, "body": "hi"}]
+        connection.unlink.return_value = True
+        connection.create.return_value = 9
+        connection.fields_get.return_value = {
+            "id": {"type": "integer", "string": "ID"},
+            "body": {"type": "html", "string": "Body"},
+        }
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+        controller.get_enabled_models.return_value = [{"model": "res.partner", "name": "Contact"}]
+
+        def gate(model, operation):
+            if model in ("mail.channel", "hr.payslip", "ir.model"):
+                raise AccessControlError(f"Model '{model}' is not enabled for MCP access")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model, link",
+        [
+            ("mail.message", "model"),
+            ("mail.mail", "model"),
+            ("mail.followers", "res_model"),
+            ("mail.activity", "res_model"),
+            ("mail.tracking.value", "mail_message_id.model"),
+            ("mail.notification", "mail_message_id.model"),
+        ],
+    )
+    async def test_search_records_scopes_the_rows(self, handler, connection, model, link):
+        await handler._handle_search_tool(model, None, None, 5, 0, None)
+
+        assert connection.search.call_args[0][1] == [
+            "|",
+            (link, "=", False),
+            (link, "in", ["res.partner"]),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_aggregate_records_scopes_messages(self, handler, connection):
+        connection.get_major_version = MagicMock(return_value=19)
+        connection.execute_kw.return_value = []
+
+        await handler._handle_aggregate_records_tool(
+            "mail.message", ["subject"], ["__count"], None, None, 10, 0
+        )
+
+        assert connection.execute_kw.call_args[0][2][0] == [
+            "|",
+            ("model", "=", False),
+            ("model", "in", ["res.partner"]),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_get_record_refuses_a_message_of_a_denied_model(self, handler, connection):
+        connection.search_read.return_value = [{"id": 5, "model": "mail.channel"}]
+
+        with pytest.raises(ValidationError, match="message 5 belongs to 'mail.channel'"):
+            await handler._handle_get_record_tool("mail.message", 5, None)
+
+        connection.read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_tracking_value_follows_its_message(self, handler, connection):
+        connection.search_read.side_effect = [
+            [{"id": 3, "mail_message_id": [5, "Payslip"]}],
+            [{"id": 5, "model": "hr.payslip"}],
+        ]
+
+        with pytest.raises(ValidationError, match="tracking value 3 belongs to 'hr.payslip'"):
+            await handler._handle_get_record_tool("mail.tracking.value", 3, None)
+
+    @pytest.mark.asyncio
+    async def test_delete_of_a_denied_models_message_is_refused(self, handler, connection):
+        connection.search_read.return_value = [{"id": 5, "model": "mail.channel"}]
+
+        with pytest.raises(ValidationError, match="mail.channel"):
+            await handler._handle_delete_record_tool("mail.message", 5)
+
+        connection.unlink.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_follower_cannot_be_planted_on_a_denied_model(self, handler, connection):
+        with pytest.raises(ValidationError, match="follower would be attached to 'hr.payslip'"):
+            await handler._handle_create_record_tool(
+                "mail.followers", {"res_model": "hr.payslip", "res_id": 1, "partner_id": 3}
+            )
+
+        connection.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_activity_owner_comes_from_res_model_id(self, handler, connection, access):
+        connection.search_read.return_value = [{"id": 80, "model": "hr.payslip"}]
+        access.validate_model_access.side_effect = lambda model, operation: (
+            None if model != "hr.payslip" else (_ for _ in ()).throw(AccessControlError("no"))
+        )
+
+        with pytest.raises(ValidationError, match="activity would be attached to 'hr.payslip'"):
+            await handler._handle_create_record_tool(
+                "mail.activity", {"res_model_id": 80, "res_id": 1}
+            )
+
+        connection.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_activity_with_an_unreadable_ir_model_is_refused(self, handler, connection):
+        connection.search_read.side_effect = OdooValidationFault("Access denied", 403)
+
+        with pytest.raises(ValidationError, match="ir.model is not readable"):
+            await handler._handle_create_record_tool(
+                "mail.activity", {"res_model_id": 80, "res_id": 1}
+            )
+
+        connection.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_message_of_an_allowed_model_is_readable(self, handler, connection):
+        connection.search_read.return_value = [{"id": 5, "model": "res.partner"}]
+
+        await handler._handle_get_record_tool("mail.message", 5, ["body"])
+
+        connection.read.assert_called()
+
+    def test_yolo_mode_is_unscoped(self, access):
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", yolo_mode="read"
+        )
+
+        assert document_scope_domain("mail.message", config, access) is None
+
+    def test_write_scope_uses_the_write_permission(self, access):
+        access.get_model_permissions.return_value = ModelPermissions(
+            model="res.partner", enabled=True, can_read=True, can_write=False
+        )
+
+        assert document_scope_domain(
+            "mail.message", _standard_config(), access, operation="write"
+        ) == [("model", "=", False)]
+
+
+class TestNestedWriteGate:
+    """A write on res.partner with user_ids: [[0, 0, {...}]] creates a
+    res.users row, while the allowlist was asked only about res.partner. Each
+    x2many command is checked as the operation it performs on the related
+    model.
+    """
+
+    FIELDS = {
+        "name": {"type": "char"},
+        "tags": {"type": "char"},
+        "user_ids": {"type": "one2many", "relation": "res.users"},
+        "bank_ids": {"type": "one2many", "relation": "res.partner.bank"},
+        "child_ids": {"type": "one2many", "relation": "res.partner"},
+        "category_id": {"type": "many2many", "relation": "res.partner.category"},
+    }
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.fields_get.return_value = self.FIELDS
+        connection.search_count.return_value = 1
+        connection.search.return_value = [1]
+        connection.read.return_value = [{"id": 1, "display_name": "Azure"}]
+        connection.write.return_value = True
+        connection.create.return_value = 9
+        connection.create_many.return_value = [9]
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+        refused = {
+            ("res.users", "create"),
+            ("res.users", "write"),
+            ("res.users", "unlink"),
+            ("res.partner.bank", "create"),
+            ("res.partner.bank", "write"),
+            ("res.partner.bank", "unlink"),
+            ("res.partner.category", "unlink"),
+            ("res.partner", "unlink"),
+        }
+
+        def gate(model, operation):
+            if (model, operation) in refused:
+                raise AccessControlError(f"Operation '{operation}' not allowed on model '{model}'")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "values, message",
+        [
+            ({"user_ids": [[0, 0, {"login": "x"}]]}, "values.user_ids would create res.users"),
+            ({"user_ids": [[1, 2, {"signature": "x"}]]}, "values.user_ids would change res.users"),
+            ({"bank_ids": [[0, 0, {"acc_number": "1"}]]}, "would create res.partner.bank"),
+            ({"category_id": [[2, 5]]}, "would delete res.partner.category"),
+            ({"child_ids": [[3, 7]]}, "would change or delete res.partner"),
+            ({"child_ids": [[5]]}, "would change or delete res.partner"),
+            ({"child_ids": [[6, 0, [7]]]}, "would change or delete res.partner"),
+            ({"user_ids": [(0, 0, {"login": "x"})]}, "would create res.users"),
+        ],
+    )
+    async def test_update_record_refuses(self, handler, connection, values, message):
+        with pytest.raises(ValidationError, match=message.replace(".", r"\.")):
+            await handler._handle_update_record_tool("res.partner", 1, values)
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_nested_command_inside_a_nested_create_is_checked(self, handler, connection):
+        values = {"child_ids": [[0, 0, {"name": "c", "user_ids": [[0, 0, {"login": "x"}]]}]]}
+
+        with pytest.raises(ValidationError, match=r"values\.child_ids\.user_ids would create"):
+            await handler._handle_update_record_tool("res.partner", 1, values)
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_removal_refusal_names_the_way_around(self, handler):
+        with pytest.raises(ValidationError, match="set its own link field on res.partner"):
+            await handler._handle_update_record_tool("res.partner", 1, {"child_ids": [[3, 7]]})
+
+    @pytest.mark.asyncio
+    async def test_create_records_refuses(self, handler, connection):
+        with pytest.raises(ValidationError, match="would create res.users"):
+            await handler._handle_create_records_tool(
+                "res.partner", [{"name": "a"}, {"name": "b", "user_ids": [[0, 0, {}]]}]
+            )
+
+        connection.create_many.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_records_refuses(self, handler, connection):
+        with pytest.raises(ValidationError, match="would change res.users"):
+            await handler._handle_update_records_tool(
+                "res.partner", [1], {"user_ids": [[1, 2, {"active": False}]]}
+            )
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "values",
+        [
+            {"child_ids": [[0, 0, {"name": "child"}]]},
+            {"child_ids": [[1, 7, {"name": "child"}]]},
+            {"child_ids": [[4, 7]]},
+            {"child_ids": [7, 8]},
+            {"category_id": [[6, 0, [1, 2]]]},
+            {"category_id": [[4, 5]]},
+            {"category_id": [[3, 5]]},
+            {"category_id": [1, 2]},
+            {"user_ids": []},
+            {"tags": ["a", "b"]},
+        ],
+    )
+    async def test_allowed_commands_go_through(self, handler, connection, values):
+        result = await handler._handle_update_record_tool("res.partner", 1, values)
+
+        assert result["success"] is True
+        connection.write.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_without_field_metadata_nested_commands_are_refused(self, handler, connection):
+        connection.fields_get.side_effect = OdooValidationFault("Access denied", 403)
+
+        with pytest.raises(ValidationError, match="Could not check the related records"):
+            await handler._handle_update_record_tool(
+                "res.partner", 1, {"child_ids": [[0, 0, {"name": "c"}]]}
+            )
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_linking_through_a_one2many_is_a_write_on_the_related_record(
+        self, handler, connection
+    ):
+        """user_ids: [[4, 2]] sets the user's partner_id, a write on res.users."""
+        with pytest.raises(ValidationError, match="would change res.users"):
+            await handler._handle_update_record_tool("res.partner", 1, {"user_ids": [[4, 2]]})
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_yolo_mode_skips_the_check(self, connection, access):
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", yolo_mode="true"
+        )
+        handler = OdooToolHandler(_tool_app(), connection, access, config)
+
+        result = await handler._handle_update_record_tool(
+            "res.partner", 1, {"user_ids": [[0, 0, {"login": "x"}]]}
+        )
+
+        assert result["success"] is True
+
+
+class TestRelatedPathReadGate:
+    """A condition, sub-domain, grouping or order through a relation reaches
+    the related model, so that model must allow reads: a filter on
+    user_ids.groups_id.name tests res.groups values, and grouping by an
+    x2many lists the names of the related records.
+    """
+
+    FIELDS = {
+        "res.partner": {
+            "name": {"type": "char"},
+            "user_ids": {"type": "one2many", "relation": "res.users"},
+            "state_id": {"type": "many2one", "relation": "res.country.state"},
+            "category_id": {"type": "many2many", "relation": "res.partner.category"},
+        },
+        "res.users": {
+            "name": {"type": "char"},
+            "groups_id": {"type": "many2many", "relation": "res.groups"},
+            "partner_id": {"type": "many2one", "relation": "res.partner"},
+        },
+        "res.groups": {"name": {"type": "char"}},
+        "res.partner.category": {"name": {"type": "char"}},
+    }
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.fields_get.side_effect = lambda model, *a, **k: self.FIELDS.get(model, {})
+        connection.search.return_value = []
+        connection.search_count.return_value = 0
+        connection.get_major_version = MagicMock(return_value=19)
+        connection.execute_kw.return_value = []
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+
+        def gate(model, operation):
+            if model in ("res.groups", "res.country.state"):
+                raise AccessControlError(f"Model '{model}' is not enabled for MCP access")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    async def _search(self, handler, domain, order=None):
+        return await handler._handle_search_tool("res.partner", domain, None, 5, 0, order)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            [["user_ids.groups_id.name", "=", "Settings"]],
+            [["user_ids.groups_id", "any", [["name", "ilike", "admin"]]]],
+            [["user_ids", "any", [["groups_id.name", "ilike", "admin"]]]],
+            [["user_ids", "any", [["groups_id", "ilike", "admin"]]]],
+            ["|", ["name", "=", "x"], ["user_ids.groups_id.name", "=", "Settings"]],
+            [["state_id.name", "=", "Texas"]],
+        ],
+    )
+    async def test_search_refuses_a_path_into_a_refused_model(self, handler, connection, domain):
+        with pytest.raises(ValidationError, match="Access denied: the condition on"):
+            await self._search(handler, domain)
+
+        connection.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            [["user_ids.name", "ilike", "admin"]],
+            [["user_ids.groups_id", "in", [1, 2]]],
+            [["user_ids.groups_id", "!=", False]],
+            [["state_id", "ilike", "Texas"]],
+            [["state_id", "=", 5]],
+            [["category_id.name", "=", "VIP"]],
+            [["category_id", "ilike", "VIP"]],
+            [["no_such_field.name", "=", "x"]],
+        ],
+    )
+    async def test_search_allows_readable_paths(self, handler, connection, domain):
+        await self._search(handler, domain)
+
+        connection.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_order_through_a_refused_model_is_refused(self, handler, connection):
+        with pytest.raises(ValidationError, match="ordering by 'state_id.name'"):
+            await self._search(handler, None, order="state_id.name desc, id")
+
+        connection.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_aggregate_refuses_grouping_by_a_refused_x2many(self, handler, connection):
+        with pytest.raises(ValidationError, match="grouping by 'groups_id' reads res.groups"):
+            await handler._handle_aggregate_records_tool(
+                "res.users", ["groups_id"], None, None, None, None, 0
+            )
+
+        connection.execute_kw.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_aggregate_allows_grouping_by_a_many2one(self, handler, connection):
+        """A many2one's name is on every record read too."""
+        await handler._handle_aggregate_records_tool(
+            "res.partner", ["state_id"], None, None, None, None, 0
+        )
+
+        connection.execute_kw.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_aggregate_checks_its_domain(self, handler, connection):
+        with pytest.raises(ValidationError, match="res.groups"):
+            await handler._handle_aggregate_records_tool(
+                "res.partner", None, None, [["user_ids.groups_id.name", "=", "x"]], None, None, 0
+            )
+
+    @pytest.mark.asyncio
+    async def test_yolo_mode_skips_the_check(self, connection, access):
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", yolo_mode="read"
+        )
+        handler = OdooToolHandler(_tool_app(), connection, access, config)
+
+        await self._search(handler, [["user_ids.groups_id.name", "=", "Settings"]])
+
+        connection.search.assert_called_once()
+
+
+class TestNestedWriteMessages:
+    """The refusal names the record a batch entry came from, and offers the
+    way around only when it works.
+    """
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.fields_get.return_value = {
+            "name": {"type": "char"},
+            "user_ids": {"type": "one2many", "relation": "res.users"},
+            "child_ids": {"type": "one2many", "relation": "res.partner"},
+        }
+        connection.search.return_value = [1]
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+
+        def gate(model, operation):
+            if model == "res.users" or (model == "res.partner" and operation == "unlink"):
+                raise AccessControlError(f"Operation '{operation}' not allowed on model '{model}'")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    @pytest.mark.asyncio
+    async def test_create_records_names_the_record(self, handler):
+        with pytest.raises(ValidationError, match=r"records\[1\]\.user_ids would create"):
+            await handler._handle_create_records_tool(
+                "res.partner", [{"name": "a"}, {"name": "b", "user_ids": [[0, 0, {}]]}]
+            )
+
+    @pytest.mark.asyncio
+    async def test_the_reason_reads_as_one_sentence(self, handler):
+        with pytest.raises(ValidationError) as exc:
+            await handler._handle_update_record_tool("res.partner", 1, {"user_ids": [[1, 2, {}]]})
+
+        assert str(exc.value) == (
+            "Access denied: values.user_ids would change res.users records. "
+            "Operation 'write' not allowed on model 'res.users'."
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_hint_when_the_related_model_is_read_only(self, handler):
+        with pytest.raises(ValidationError) as exc:
+            await handler._handle_update_record_tool("res.partner", 1, {"user_ids": [[3, 2]]})
+
+        assert "To detach" not in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_hint_when_the_related_model_is_writable(self, handler):
+        with pytest.raises(ValidationError, match=r"model 'res\.partner'\. To detach"):
+            await handler._handle_update_record_tool("res.partner", 1, {"child_ids": [[3, 7]]})
+
+
+class TestMany2oneValues:
+    """A many2one takes a record id. Reads return [id, name], and Odoo 19
+    empties the field when that pair comes back in a write, without an error.
+    """
+
+    FIELDS = {
+        "name": {"type": "char"},
+        "country_id": {"type": "many2one", "relation": "res.country"},
+        "child_ids": {"type": "one2many", "relation": "res.partner"},
+    }
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.fields_get.return_value = self.FIELDS
+        connection.search_count.return_value = 1
+        connection.search.return_value = [1]
+        connection.read.return_value = [{"id": 1, "display_name": "Azure"}]
+        connection.write.return_value = True
+        connection.create.return_value = 9
+        connection.create_many.return_value = [9]
+        return connection
+
+    @pytest.fixture(params=["off", "true"])
+    def handler(self, request, connection):
+        access = MagicMock(spec=AccessController)
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", yolo_mode=request.param
+        )
+        return OdooToolHandler(_tool_app(), connection, access, config)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "value, hint",
+        [
+            ([20, "Belgium"], "Pass 20, not the [id, name] pair"),
+            ({"id": 20, "name": "Belgium"}, "Pass 20."),
+            ("Belgium", "search_records on res.country"),
+            ([0, 0, {"name": "Atlantis"}], "takes a record id or false"),
+        ],
+    )
+    async def test_update_refuses_a_value_that_is_not_an_id(self, handler, connection, value, hint):
+        with pytest.raises(ValidationError, match="values.country_id: it links to res.country"):
+            await handler._handle_update_record_tool("res.partner", 1, {"country_id": value})
+
+        connection.write.assert_not_called()
+        with pytest.raises(ValidationError, match=hint.replace(".", r"\.").replace("[", r"\[")):
+            await handler._handle_update_record_tool("res.partner", 1, {"country_id": value})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", [20, False, None])
+    async def test_an_id_or_false_goes_through(self, handler, connection, value):
+        result = await handler._handle_update_record_tool(
+            "res.partner", 1, {"name": "x", "country_id": value}
+        )
+
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_create_records_names_the_record(self, handler, connection):
+        with pytest.raises(ValidationError, match=r"records\[1\]\.country_id"):
+            await handler._handle_create_records_tool(
+                "res.partner", [{"name": "a"}, {"name": "b", "country_id": [20, "Belgium"]}]
+            )
+
+        connection.create_many.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_nested_create_is_checked(self, handler, connection):
+        with pytest.raises(ValidationError, match=r"values\.child_ids\.country_id"):
+            await handler._handle_update_record_tool(
+                "res.partner",
+                1,
+                {"child_ids": [[0, 0, {"name": "c", "country_id": "Belgium"}]]},
+            )
+
+        connection.write.assert_not_called()
+
+
+class TestNestedDocumentOwners:
+    """[1, id, {...}] and [2, id] act on the row with that id wherever it
+    belongs, so a nested command on a partner's message_ids could change a
+    message of a model MCP refuses. The owner must allow writes.
+    """
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.fields_get.return_value = {
+            "name": {"type": "char"},
+            "message_ids": {"type": "one2many", "relation": "mail.message"},
+        }
+        connection.search_count.return_value = 1
+        connection.search.return_value = [1]
+        connection.read.return_value = [{"id": 1, "display_name": "Azure"}]
+        connection.write.return_value = True
+        connection.search_read.return_value = [{"id": 5, "model": "res.groups"}]
+        return connection
+
+    @pytest.fixture
+    def access(self):
+        controller = MagicMock(spec=AccessController)
+
+        def gate(model, operation):
+            if model == "res.groups":
+                raise AccessControlError(f"Model '{model}' is not enabled for MCP access")
+
+        controller.validate_model_access.side_effect = gate
+        return controller
+
+    @pytest.fixture
+    def handler(self, connection, access):
+        return OdooToolHandler(_tool_app(), connection, access, _standard_config())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "commands",
+        [
+            [[1, 5, {"body": "x"}]],
+            [[2, 5]],
+            [[4, 5]],
+            [[6, 0, [5]]],
+            [5],
+            [[0, 0, {"body": "x", "model": "res.groups", "res_id": 1}]],
+        ],
+    )
+    async def test_a_message_of_a_refused_owner_is_refused(self, handler, connection, commands):
+        with pytest.raises(ValidationError, match="res.groups"):
+            await handler._handle_update_record_tool("res.partner", 1, {"message_ids": commands})
+
+        connection.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_names_the_field_and_the_message(self, handler):
+        with pytest.raises(ValidationError) as exc:
+            await handler._handle_update_record_tool(
+                "res.partner", 1, {"message_ids": [[1, 5, {"body": "x"}]]}
+            )
+
+        assert str(exc.value) == (
+            "Access denied: values.message_ids: message 5 belongs to 'res.groups', "
+            "which MCP does not allow to be changed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_message_of_an_allowed_owner_goes_through(self, handler, connection):
+        connection.search_read.return_value = [{"id": 5, "model": "res.partner"}]
+
+        result = await handler._handle_update_record_tool(
+            "res.partner", 1, {"message_ids": [[1, 5, {"body": "x"}]]}
+        )
+
+        assert result["success"] is True
+
+
 class TestSmartDefaultsEmptySelection:
     """Odoo's check_field_access_rights replaces a FALSY field list with every
     readable field, so `read(ids, [])` is an all-fields read. It has to take
@@ -5629,7 +7084,7 @@ class TestSmartDefaultsEmptySelection:
 
     @pytest.fixture
     def mock_app(self):
-        app = MagicMock(spec=FastMCP)
+        app = MagicMock(spec=MCPServer)
         app._tools = {}
 
         def tool_decorator(**kwargs):
@@ -5674,3 +7129,236 @@ class TestSmartDefaultsEmptySelection:
         assert handler.connection.read.call_args[0][2] is None
         assert "openai_api_key" not in result["records"][0]
         assert "openai_api_key" in result["note"]
+
+
+class TestJsonObjectReprScrub:
+    """A json field holds the repr of a value Odoo could not encode; it reads as null."""
+
+    REPR = "<function validate at 0x7f3a2b1c9d40>"
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.get_major_version.return_value = 19
+        connection.fields_get.return_value = {
+            "id": {"type": "integer"},
+            "name": {"type": "char"},
+            "options": {"type": "json"},
+        }
+        connection.search.return_value = [3]
+        connection.search_count.return_value = 1
+        connection.read.return_value = [
+            {
+                "id": 3,
+                "name": "<not a repr at 0x1>",
+                "options": {
+                    "validator": self.REPR,
+                    "steps": [{"check": self.REPR, "label": "A <b> tag at 0x10"}, 4],
+                    "note": "kept",
+                },
+            }
+        ]
+        return connection
+
+    @pytest.fixture
+    def handler(self, connection):
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+        return OdooToolHandler(
+            MagicMock(spec=MCPServer), connection, MagicMock(spec=AccessController), config
+        )
+
+    EXPECTED = {
+        "validator": None,
+        "steps": [{"check": None, "label": "A <b> tag at 0x10"}, 4],
+        "note": "kept",
+    }
+
+    async def test_get_record(self, handler):
+        result = await handler._handle_get_record_tool("x.model", 3, ["name", "options"])
+
+        assert result.record["options"] == self.EXPECTED
+        # only json fields are scrubbed
+        assert result.record["name"] == "<not a repr at 0x1>"
+
+    async def test_search_records(self, handler):
+        result = await handler._handle_search_tool("x.model", None, None, 10, 0, None)
+
+        assert result["records"][0]["options"] == self.EXPECTED
+
+    async def test_values_pass_through_without_field_metadata(self, handler, connection):
+        connection.fields_get.side_effect = Exception("metadata unavailable")
+
+        result = await handler._handle_get_record_tool("x.model", 3, ["name", "options"])
+
+        assert result.record["options"]["validator"] == self.REPR
+
+    @pytest.fixture
+    def resource_handler(self, connection):
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+        return OdooResourceHandler(
+            MagicMock(spec=MCPServer), connection, MagicMock(spec=AccessController), config
+        )
+
+    async def test_record_resource(self, resource_handler):
+        text = await resource_handler._handle_record_retrieval("x.model", "3")
+
+        assert "0x7f3a2b1c9d40" not in text
+        assert "kept" in text
+
+    async def test_search_resource(self, resource_handler):
+        text = await resource_handler._handle_search("x.model", None, "name,options", 10, 0, None)
+
+        assert "0x7f3a2b1c9d40" not in text
+
+
+class TestTypedParameters:
+    """Typed schemas for strict clients; the handlers still take the loose input."""
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.get_major_version.return_value = 19
+        connection.search.return_value = []
+        connection.search_count.return_value = 0
+        connection.execute_kw.return_value = []
+        return connection
+
+    @pytest.fixture
+    def app(self, connection):
+        app = MCPServer("typed-test")
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+        OdooToolHandler(app, connection, MagicMock(spec=AccessController), config)
+        return app
+
+    async def _call(self, app, tool, arguments):
+        from mcp import Client
+
+        async with Client(app, mode="legacy") as client:
+            result = await client.call_tool(tool, arguments)
+        assert not result.is_error, result.content
+        return result
+
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            [["is_company", "=", True]],
+            '[["is_company", "=", true]]',
+            "[('is_company', '=', True)]",
+        ],
+        ids=["list", "json-string", "python-string"],
+    )
+    async def test_domain_as_list_or_string(self, app, connection, domain):
+        await self._call(app, "search_records", {"model": "res.partner", "domain": domain})
+
+        # a Python-literal string keeps tuples, which XML-RPC sends as arrays
+        sent = connection.search.call_args.args[1]
+        assert [list(condition) for condition in sent] == [["is_company", "=", True]]
+
+    @pytest.mark.parametrize("operator", ["any", "not any"])
+    async def test_odoo_17_sub_domain_operators_pass_through(self, app, connection, operator):
+        domain = [["child_ids", operator, [["email", "ilike", "@example.com"]]]]
+
+        await self._call(app, "search_records", {"model": "res.partner", "domain": domain})
+
+        assert connection.search.call_args.args[1] == domain
+
+    async def test_domain_schema_names_the_odoo_17_operators(self, app):
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        domain = tools["search_records"].input_schema["properties"]["domain"]
+
+        assert domain["anyOf"][0] == {"type": "array", "items": {}}
+        assert "Odoo 17" in domain["description"]
+
+    async def test_bare_string_groupby_and_aggregates(self, app, connection):
+        await self._call(
+            app,
+            "aggregate_records",
+            {"model": "sale.order", "groupby": "partner_id", "aggregates": "__count"},
+        )
+
+        kwargs = connection.execute_kw.call_args.args[3]
+        assert kwargs["groupby"] == ["partner_id"]
+        assert kwargs["aggregates"] == ["__count"]
+
+    async def test_upper_case_subtype_and_message_type(self, app, connection):
+        connection.execute_kw.return_value = 42
+        connection.search_count.return_value = 1
+
+        await self._call(
+            app,
+            "post_message",
+            {
+                "model": "res.partner",
+                "record_id": 1,
+                "body": "Hello",
+                "subtype": "COMMENT",
+                "message_type": "Comment",
+            },
+        )
+
+        kwargs = connection.execute_kw.call_args.args[3]
+        assert kwargs["subtype_xmlid"] == "mail.mt_comment"
+        assert kwargs["message_type"] == "comment"
+
+
+class TestSubDomainOperatorsBeforeOdoo17:
+    """Odoo 16 has no 'any' / 'not any': it fails with "unhashable type: 'list'",
+    which reached the model as a connection error."""
+
+    DOMAINS = [
+        [["child_ids", "any", [["email", "!=", False]]]],
+        ["|", ["name", "=", "A"], ["child_ids", "not any", [["active", "=", False]]]],
+        [["parent_id", "any", [["category_id", "any", [["name", "=", "VIP"]]]]]],
+    ]
+
+    @pytest.fixture
+    def connection(self):
+        connection = MagicMock(spec=OdooConnection)
+        connection.is_authenticated = True
+        connection.search.return_value = []
+        connection.search_count.return_value = 0
+        connection.execute_kw.return_value = []
+        return connection
+
+    @pytest.fixture
+    def handler(self, connection):
+        config = OdooConfig(url="http://localhost:8069", api_key="k", database="d")
+        return OdooToolHandler(
+            MagicMock(spec=MCPServer), connection, MagicMock(spec=AccessController), config
+        )
+
+    @pytest.mark.parametrize("domain", DOMAINS)
+    async def test_refused_on_odoo_16(self, handler, connection, domain):
+        connection.get_major_version.return_value = 16
+
+        with pytest.raises(ValidationError, match=r"need Odoo 17 or later.*child_ids\.email"):
+            await handler._handle_search_tool("res.partner", domain, ["name"], 10, 0, None)
+        connection.search.assert_not_called()
+
+    async def test_refused_in_aggregate_records_on_odoo_16(self, handler, connection):
+        connection.get_major_version.return_value = 16
+
+        with pytest.raises(ValidationError, match="need Odoo 17 or later"):
+            await handler._handle_aggregate_records_tool(
+                "res.partner", None, None, self.DOMAINS[0], None, None, 0
+            )
+        connection.execute_kw.assert_not_called()
+
+    @pytest.mark.parametrize("major", [17, 18, 19, 20])
+    async def test_sent_on_odoo_17_and_later(self, handler, connection, major):
+        connection.get_major_version.return_value = major
+
+        await handler._handle_search_tool("res.partner", self.DOMAINS[1], ["name"], 10, 0, None)
+
+        assert connection.search.call_args.args[1] == self.DOMAINS[1]
+
+    async def test_a_value_named_any_is_not_an_operator(self, handler, connection):
+        connection.get_major_version.return_value = 16
+
+        await handler._handle_search_tool(
+            "res.partner", [["name", "=", "any"]], ["name"], 10, 0, None
+        )
+
+        connection.search.assert_called_once()

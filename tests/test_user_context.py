@@ -13,7 +13,9 @@ from mcp_server_odoo.user_context import (
     UTC_DATETIME_GUIDANCE,
     build_user_context,
     context_unavailable_text,
+    format_user_context,
     get_user_context_data,
+    usage_guidance,
 )
 
 
@@ -396,3 +398,104 @@ class TestReasonAwareFallback:
         """Matching is by equality after unwrapping, not containment — a
         generic phrase must not suppress the guess it is no better than."""
         assert context_unavailable_text(reason) == CONTEXT_UNAVAILABLE_TEXT
+
+
+class TestUsageGuidance:
+    """The usage block in initialize.instructions names only registered tools."""
+
+    ALL_TOOLS = (
+        "search_records",
+        "get_record",
+        "get_fields",
+        "get_current_context",
+        "list_models",
+        "list_resource_templates",
+        "create_record",
+        "create_records",
+        "update_record",
+        "update_records",
+        "delete_record",
+        "post_message",
+        "aggregate_records",
+        "upload_attachment",
+        "list_record_attachments",
+        "read_attachment",
+        "call_model_method",
+    )
+
+    def test_every_tool_registered(self):
+        text = usage_guidance(self.ALL_TOOLS)
+
+        assert text.startswith("Usage guidance:\n")
+        assert '[["id", "in", ids]]' in text
+        assert "aggregate_records" in text
+        assert "create_records or update_records" in text
+        assert "call_model_method" in text
+        assert "read_attachment" in text
+
+    def test_optional_tool_left_out_when_not_registered(self):
+        text = usage_guidance(t for t in self.ALL_TOOLS if t != "call_model_method")
+
+        assert "call_model_method" not in text
+        assert "aggregate_records" in text
+
+    def test_no_known_tools_gives_no_block(self):
+        assert usage_guidance(["some_other_tool"]) == ""
+
+
+class TestAllowedCompaniesScope:
+    """ODOO_ALLOWED_COMPANIES replaces the user's own active and allowed companies."""
+
+    USER = {**ADMIN_USER, "company_id": [1, "My Company"], "company_ids": [1, 2, 3]}
+    COMPANIES = [
+        {"id": 1, "display_name": "My Company"},
+        {"id": 2, "display_name": "Branch"},
+        {"id": 3, "display_name": "Other Co"},
+    ]
+
+    def _connection(self):
+        connection = _make_connection(self.USER)
+
+        def fake_read(model, ids, fields=None):
+            if model == "res.users":
+                return [self.USER]
+            return [c for c in self.COMPANIES if c["id"] in ids]
+
+        connection.read.side_effect = fake_read
+        return connection
+
+    def test_first_configured_company_is_active(self):
+        data = get_user_context_data(self._connection(), [3, 2])
+
+        assert (data["company_id"], data["company_name"]) == (3, "Other Co")
+        assert data["allowed_companies"] == [
+            {"id": 3, "name": "Other Co"},
+            {"id": 2, "name": "Branch"},
+        ]
+        text = format_user_context(data)
+        assert "- Active company: Other Co (ID: 3)" in text
+        assert "My Company" not in text
+
+    def test_one_configured_company_lists_no_others(self):
+        data = get_user_context_data(self._connection(), [2])
+
+        assert (data["company_id"], data["company_name"]) == (2, "Branch")
+        assert data["allowed_companies"] == []
+
+    def test_without_scope_the_user_companies_show(self):
+        data = get_user_context_data(self._connection())
+
+        assert (data["company_id"], data["company_name"]) == (1, "My Company")
+        assert [c["id"] for c in data["allowed_companies"]] == [1, 2, 3]
+
+    def test_get_current_context_passes_the_scope(self):
+        import asyncio
+
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", allowed_companies=[3]
+        )
+        handler = OdooToolHandler(MagicMock(), self._connection(), MagicMock(), config)
+
+        result = asyncio.run(handler._handle_get_current_context_tool())
+
+        assert (result.company_id, result.company_name) == (3, "Other Co")

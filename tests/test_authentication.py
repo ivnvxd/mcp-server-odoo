@@ -3,6 +3,7 @@
 This module tests both API key and username/password authentication flows.
 """
 
+import io
 import json
 import os
 import urllib.error
@@ -99,6 +100,49 @@ class TestAuthentication:
 
         # Verify not authenticated
         assert not connection_api_key.is_authenticated
+
+    @patch("urllib.request.urlopen")
+    def test_api_key_403_shows_the_module_reason(self, mock_urlopen, connection_api_key):
+        """The module refuses a user outside the MCP User group with a 403 and a reason."""
+        body = json.dumps(
+            {
+                "success": False,
+                "error": {
+                    "message": "MCP access denied: user is not a member of the MCP User group.",
+                    "code": "E403",
+                },
+            }
+        ).encode("utf-8")
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            None, 403, "Forbidden", {}, io.BytesIO(body)
+        )
+
+        with pytest.raises(OdooConnectionError, match="not a member of the MCP User group"):
+            connection_api_key.authenticate("mcp")
+
+    @pytest.mark.parametrize("body", [None, b"<html>Forbidden</html>"])
+    @patch("urllib.request.urlopen")
+    def test_api_key_403_without_reason_names_the_status(
+        self, mock_urlopen, body, connection_api_key
+    ):
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            None, 403, "Forbidden", {}, io.BytesIO(body) if body is not None else None
+        )
+
+        with pytest.raises(OdooConnectionError, match="HTTP 403"):
+            connection_api_key.authenticate("mcp")
+
+    def test_password_403_fault_shows_the_module_reason(self, connection_password):
+        """The module gates common.authenticate on the MCP User group (fault 403)."""
+        mock_common = Mock()
+        mock_common.authenticate.side_effect = Fault(
+            403, "MCP access denied: user is not a member of the MCP User group."
+        )
+        connection_password._common_proxy = mock_common
+        connection_password._connected = True
+
+        with pytest.raises(OdooConnectionError, match="not a member of the MCP User group"):
+            connection_password.authenticate("mcp")
 
     def test_password_authentication_success(self, connection_password):
         """Test successful username/password authentication."""

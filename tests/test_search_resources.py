@@ -5,7 +5,7 @@ from unittest.mock import Mock
 from urllib.parse import quote
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcp_server_odoo.access_control import AccessControlError, AccessController
 from mcp_server_odoo.config import OdooConfig, load_config
@@ -43,8 +43,8 @@ def mock_access_controller():
 
 @pytest.fixture
 def mock_app():
-    """Create a mock FastMCP app."""
-    app = Mock(spec=FastMCP)
+    """Create a mock MCPServer app."""
+    app = Mock(spec=MCPServer)
     app.resource = Mock()
 
     # Store registered handlers
@@ -225,7 +225,7 @@ class TestSearchResource:
         assert "→ Next page:" in result
         assert "← Previous page:" in result
         # Navigation must reference the search_records tool, never an
-        # unroutable odoo://...?query URI (FastMCP cannot route query params)
+        # unroutable odoo://...?query URI (MCPServer cannot route query params)
         assert "search_records tool with offset=15" in result
         assert "search_records tool with offset=5" in result
         assert "odoo://res.partner/search?" not in result
@@ -506,7 +506,7 @@ class TestSearchResourceIntegration:
     async def test_search_real_partners(self, real_config, real_connection):
         """Test search with real Odoo connection."""
         # Setup real components
-        app = Mock(spec=FastMCP)
+        app = Mock(spec=MCPServer)
         app.resource = Mock()
         app._handlers = {}
 
@@ -535,7 +535,8 @@ class TestSearchResourceIntegration:
         try:
             result = await handler._handle_search(
                 "res.partner",
-                quote(json.dumps([["is_company", "=", True]])),  # Search for companies
+                # Top-level partners: Odoo 20 sets is_company only with a VAT
+                quote(json.dumps([["parent_id", "=", False]])),
                 "name,email,country_id",  # Specific fields
                 5,  # Limit
                 0,  # Offset
@@ -549,7 +550,7 @@ class TestSearchResourceIntegration:
         # Verify result structure
         assert "Search Results: res.partner" in result
         assert "Search criteria:" in result
-        assert "is_company = True" in result
+        assert "parent_id = False" in result
         assert "Fields: name, email, country_id" in result
         assert "Page 1 of" in result
 
