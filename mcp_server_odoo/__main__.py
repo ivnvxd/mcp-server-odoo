@@ -40,15 +40,21 @@ def main(argv: Optional[list[str]] = None) -> int:
   ODOO_DB            Odoo database name (auto-detected if not set)
   ODOO_YOLO          YOLO mode: off, read, or true (default: off)
                        off  — standard mode (requires Odoo MCP module)
-                       read — read-only via vanilla XML-RPC (no module needed)
-                       true — full read/write via vanilla XML-RPC
+                       read — read-only via vanilla XML-RPC, or JSON-2 on
+                              Odoo 19+ with an API key (no module needed)
+                       true — full read/write, same transports as read
   ODOO_LOCALE        Locale for formatting (e.g. en_US, de_DE)
+  ODOO_ALLOWED_COMPANIES  Company IDs to scope every call to (e.g. 1,3)
+  ODOO_RPC_TRANSPORT RPC protocol in YOLO mode: auto, xmlrpc or json2 (default: auto)
 
 Optional environment variables:
   ODOO_MCP_LOG_LEVEL       Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
   ODOO_MCP_LOG_JSON        Enable structured JSON log output (default: false)
   ODOO_MCP_LOG_FILE        Path for rotating log file (10 MB, 5 backups)
-  ODOO_MCP_DEFAULT_LIMIT   Default record limit (default: 10)
+  ODOO_MCP_LOG_FORMAT      Python logging format string for text logs
+  ODOO_MCP_SLOW_OPERATION_THRESHOLD_MS  Log operations slower than this
+                           many milliseconds as slow (default: 1000)
+  ODOO_MCP_DEFAULT_LIMIT   Default record limit (default: 25)
   ODOO_MCP_MAX_LIMIT       Maximum record limit (default: 100)
   ODOO_MCP_MAX_SMART_FIELDS Max fields in smart selection (default: 15)
   ODOO_MCP_TRANSPORT       Transport type: stdio or streamable-http (default: stdio)

@@ -12,10 +12,11 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .config import OdooConfig
 from .error_handling import ValidationError
+from .odoo_errors import http_error_message
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,10 @@ class AccessControlError(Exception):
     """Exception for access control failures."""
 
     pass
+
+
+class AccessControlModelNotFoundError(AccessControlError):
+    """The MCP module does not know the model (it is not installed)."""
 
 
 class AccessControlUnavailableError(AccessControlError):
@@ -44,33 +49,15 @@ def access_denied_message(error: Exception) -> str:
     The MCP module's own refusals are self-labelling ("Access denied: your
     user is not authorized for MCP..."), so the unconditional prefix the
     handlers used produced "Access denied: Access denied: ...". Prefix only
-    when the message does not already open with it.
+    when the message does not already open with it. A model the module does
+    not know is not an access problem and gets no prefix.
     """
     message = str(error).strip()
-    if message.lower().startswith("access denied"):
+    if isinstance(error, AccessControlModelNotFoundError) or message.lower().startswith(
+        "access denied"
+    ):
         return message
     return f"Access denied: {message}"
-
-
-def _http_error_message(error: urllib.error.HTTPError) -> Optional[str]:
-    """Extract the MCP module's own error message from an HTTPError body.
-
-    The module answers failures with
-    ``{"success": false, "error": {"message": ..., "code": ...}}``. Reading
-    that message keeps its diagnosis ("Model 'x' is not enabled for MCP
-    access.") instead of replacing it with a generic one.
-
-    Returns None when the body is missing, unreadable, not that shape, or
-    carries a blank message — the caller then falls back to its own wording.
-    The body can only be consumed once, so this is called at most once per
-    error.
-    """
-    try:
-        payload = json.loads(error.read().decode("utf-8"))
-        message = payload.get("error", {}).get("message")
-    except Exception:
-        return None
-    return message.strip() if isinstance(message, str) and message.strip() else None
 
 
 @dataclass
@@ -319,9 +306,15 @@ class AccessController:
                 # not enabled for MCP access."); a generic message here sends
                 # users hunting a credential problem that does not exist.
                 raise AccessControlError(
-                    _http_error_message(e) or "Access denied to MCP endpoints"
+                    http_error_message(e) or "Access denied to MCP endpoints"
                 ) from e
             elif e.code == 404:
+                # The module answers an unknown model with its own 404 message
+                # ("Model 'x' not found in Odoo instance."). A 404 without it
+                # means the endpoint itself is missing.
+                message = http_error_message(e)
+                if message:
+                    raise AccessControlModelNotFoundError(message) from e
                 raise AccessControlUnavailableError(f"Endpoint not found: {endpoint}") from e
             else:
                 raise AccessControlUnavailableError(f"HTTP error {e.code}: {e.reason}") from e
@@ -520,9 +513,11 @@ class AccessController:
 
             return True, None
 
-        except AccessControlUnavailableError:
+        except (AccessControlUnavailableError, AccessControlModelNotFoundError):
             # Infrastructure failure — propagate so callers report a
-            # connection problem (retryable), not a permission denial
+            # connection problem (retryable), not a permission denial. A model
+            # the module does not know propagates too, so that it is not
+            # reported as "Access denied".
             raise
         except AccessControlError as e:
             logger.error(f"Access control check failed: {e}")
@@ -606,6 +601,11 @@ def check_domain_balance(domain: List[Any], path: str = "domain") -> None:
             # Odoo prepends an implicit "&" for a flat sequence of terms.
             expected = 1
         if isinstance(token, (list, tuple)):
+            if len(token) != 3:
+                raise ValidationError(
+                    f"Invalid domain condition {list(token)!r} at {path}[{index}]: a "
+                    "condition has three parts, ['field', 'operator', value]"
+                )
             expected -= 1
         elif token == "!":
             # Unary: consumes one expression and yields one.
@@ -623,66 +623,240 @@ def check_domain_balance(domain: List[Any], path: str = "domain") -> None:
         )
 
 
-def attachment_scope_domain(
-    config: OdooConfig, access_controller: "AccessController"
-) -> Optional[List[Any]]:
-    """Domain restricting ir.attachment rows to MCP-accessible res_models.
+# Models whose rows belong to a document of another model, mapped to the
+# domain path that names that model. Enabling one of them must not expose the
+# rows of every model: an attachment carries url and index_content (the
+# extracted document text), a message its body, a tracking value the old and
+# new values of a tracked field. A tracking value or a notification belongs
+# to the document of its message.
+DOCUMENT_LINKS: Dict[str, str] = {
+    "ir.attachment": "res_model",
+    "mail.message": "model",
+    "mail.mail": "model",
+    "mail.followers": "res_model",
+    "mail.activity": "res_model",
+    "mail.tracking.value": "mail_message_id.model",
+    "mail.notification": "mail_message_id.model",
+}
 
-    An attachment row exposes more than a payload: `res_model`, `url` and
-    `index_content` (the extracted document TEXT). Gating only the binary
-    readers would leave the allowlist sidestep open for metadata, so searches
-    and reads of ir.attachment are scoped here instead of post-filtering rows
-    — a domain keeps `search_count` and the pagination math consistent with
-    what is actually returned.
+
+# How the gates name a row of a DOCUMENT_LINKS model in a refusal
+DOCUMENT_NOUNS: Dict[str, str] = {
+    "ir.attachment": "attachment",
+    "mail.message": "message",
+    "mail.mail": "email",
+    "mail.followers": "follower",
+    "mail.activity": "activity",
+    "mail.tracking.value": "tracking value",
+    "mail.notification": "notification",
+}
+
+
+def document_scope_domain(
+    model: str,
+    config: OdooConfig,
+    access_controller: "AccessController",
+    operation: str = "read",
+) -> Optional[List[Any]]:
+    """Domain restricting a DOCUMENT_LINKS model to MCP-accessible owners.
+
+    Searches and reads of these models are scoped here instead of
+    post-filtering rows: a domain keeps `search_count` and the pagination math
+    consistent with what is actually returned.
 
     Lives here rather than beside its callers: the tool and resource handlers
     both need it, and an allowlist-derived domain belongs with the allowlist.
 
-    Scoped to models the caller may READ, not merely ones that are enabled:
-    the two are separate endpoints, and an enabled-but-unreadable model whose
-    attachments were admitted here would sidestep `validate_model_access`.
+    Scoped to owner models that allow `operation`, not merely ones that are
+    enabled: the two are separate endpoints, and an enabled-but-unreadable
+    model whose rows were admitted here would sidestep
+    `validate_model_access`.
 
     Fails CLOSED, like every other gate on this path: an unreadable allowlist
     propagates as AccessControlError so the caller sees a retryable "could not
     verify access" instead of an unscoped result set. Swallowing the error
     would silently disable the scope on every surface at once, which is the
-    one outcome a security control must not have. Returns None only when
-    scoping genuinely does not apply — YOLO mode allows every model.
+    one outcome a security control must not have. Returns None when scoping
+    does not apply: YOLO mode allows every model, and other models have no
+    owner.
 
     Raises:
         AccessControlError: If the enabled-model listing or a per-model
-            read permission cannot be retrieved.
+            permission cannot be retrieved.
     """
-    if config.is_yolo_enabled:
+    link = DOCUMENT_LINKS.get(model)
+    if config.is_yolo_enabled or not link:
         return None
     enabled = access_controller.get_enabled_models()
     names = []
     for entry in enabled:
-        model = entry.get("model")
-        if not model:
+        owner = entry.get("model")
+        if not owner:
             continue
-        # Enablement and READ permission are different endpoints (/mcp/models
-        # vs /mcp/models/{model}/access), so an enabled model may still be
-        # unreadable — and admitting it here would expose exactly the
-        # attachment metadata the gate exists to withhold.
+        # Enablement and the per-operation permission are different endpoints
+        # (/mcp/models vs /mcp/models/{model}/access), so an enabled model may
+        # still refuse the operation, and admitting it here would expose
+        # exactly the rows the gate exists to withhold.
         operations = entry.get("operations") or {}
         if operations:
-            # Newer MCP modules ship the flag in the listing itself — free.
-            if operations.get("read"):
-                names.append(model)
+            # Newer MCP modules ship the flags in the listing itself — free.
+            if operations.get(operation):
+                names.append(owner)
             continue
         # Older modules return only {model, name}. Neither default is safe:
-        # True admits attachments the caller cannot read, False hides ones it
-        # can — so resolve it. The per-model cache is shared with list_models,
-        # so this is usually already warm; an unresolvable permission raises
+        # True admits rows the caller cannot reach, False hides ones it can,
+        # so resolve it. The per-model cache is shared with list_models, so
+        # this is usually already warm; an unresolvable permission raises
         # AccessControlError and fails closed like the listing above.
-        if access_controller.get_model_permissions(model).can_read:
-            names.append(model)
+        if access_controller.get_model_permissions(owner).can_perform(operation):
+            names.append(owner)
     if not names:
-        # Standard mode with nothing enabled: only standalone attachments can
-        # qualify. Contradictory state (the ir.attachment gate already passed),
+        # Standard mode with nothing enabled: only rows without an owner can
+        # qualify. Contradictory state (the model's own gate already passed),
         # but the fail-closed reading is the safe one.
-        return [("res_model", "=", False)]
-    # Standalone attachments (no res_model) stay governed by the
-    # ir.attachment gate alone, exactly as the payload readers treat them.
-    return ["|", ("res_model", "=", False), ("res_model", "in", names)]
+        return [(link, "=", False)]
+    # Rows without an owner (a standalone attachment) stay governed by the
+    # model's own gate alone, exactly as the payload readers treat them.
+    return ["|", (link, "=", False), (link, "in", names)]
+
+
+def document_owners(
+    connection: Any, model: str, record_ids: Iterable[int]
+) -> List[Tuple[int, Optional[str]]]:
+    """Return (id, owner model) for each existing row of a DOCUMENT_LINKS model.
+
+    Blocking. A tracking value or a notification belongs to the owner of its
+    message, so that one extra read follows the message. Archived rows count:
+    an archived attachment still holds its document.
+    """
+    link = DOCUMENT_LINKS[model]
+    field = link.split(".")[0]
+    rows = connection.search_read(
+        model,
+        [["id", "in", list(record_ids)]],
+        [field],
+        context={"active_test": False},
+    )
+    if "." not in link:
+        return [(row["id"], row.get(field) or None) for row in rows]
+    message_ids = {}
+    for row in rows:
+        value = row.get(field)
+        if value:
+            message_ids[row["id"]] = value[0] if isinstance(value, (list, tuple)) else value
+    owners = (
+        dict(document_owners(connection, "mail.message", set(message_ids.values())))
+        if message_ids
+        else {}
+    )
+    return [(row["id"], owners.get(message_ids.get(row["id"]))) for row in rows]
+
+
+def check_related_paths(
+    connection: Any,
+    access_controller: "AccessController",
+    config: OdooConfig,
+    model: str,
+    domain: Optional[Sequence[Any]] = None,
+    groupby: Optional[Sequence[str]] = None,
+    order: Optional[str] = None,
+) -> None:
+    """Refuse a read that reaches a model MCP refuses through a relation (blocking).
+
+    A condition such as ``user_ids.groups_id.name`` filters on res.groups, and
+    an ``any`` sub-domain or a condition on an x2many by name does the same,
+    while the allowlist was only asked about the model searched. A client that
+    cannot read res.groups could still test its values one guess at a time.
+    Grouping by an x2many lists the names of the related records, which record
+    reads withhold for a model that is not readable. Every relation a path
+    passes through must allow reads. A many2one at the end of a path stays
+    allowed: record reads show its name too. Unknown fields are left to Odoo,
+    which refuses them.
+    """
+    if config.is_yolo_enabled:
+        return
+    walker = _PathWalker(connection, access_controller)
+    if domain:
+        walker.domain(model, domain)
+    for spec in groupby or ():
+        if isinstance(spec, str):
+            name = spec.split(":")[0].strip()
+            end = walker.walk(model, name, "grouping by")
+            if end and end.get("type") in ("one2many", "many2many"):
+                walker.require(end.get("relation"), name, "grouping by")
+    for term in (order or "").split(","):
+        words = term.split()
+        name = words[0].split(":")[0] if words else ""
+        if name and not name.startswith("__"):
+            walker.walk(model, name, "ordering by")
+
+
+class _PathWalker:
+    def __init__(self, connection: Any, access_controller: "AccessController"):
+        self.connection = connection
+        self.access_controller = access_controller
+
+    def domain(self, model: str, domain: Sequence[Any]) -> None:
+        for leaf in domain:
+            if not (isinstance(leaf, (list, tuple)) and len(leaf) == 3):
+                continue
+            path, operator, value = leaf
+            if not isinstance(path, str):
+                continue
+            end = self.walk(model, path, "the condition on")
+            if not end:
+                continue
+            relation = end.get("relation")
+            if end.get("type") not in ("many2one", "one2many", "many2many") or not relation:
+                continue
+            if operator in ("any", "not any"):
+                self.require(relation, path, "the condition on")
+                if isinstance(value, (list, tuple)):
+                    self.domain(relation, value)
+            elif end.get("type") != "many2one" and not _ids_only(value):
+                # A name on an x2many runs a name search on the related model
+                self.require(relation, path, "the condition on")
+
+    def walk(self, model: str, path: str, usage: str) -> Optional[Dict[str, Any]]:
+        """Check each relation a dotted path passes through; return the last field."""
+        current = model
+        segments = path.split(".")
+        for index, segment in enumerate(segments):
+            try:
+                fields = self.connection.fields_get(current)
+            except Exception:
+                return None  # Odoo answers the condition itself
+            meta = fields.get(segment) if isinstance(fields, dict) else None
+            if not isinstance(meta, dict):
+                return None
+            if index == len(segments) - 1:
+                return meta
+            relation = meta.get("relation")
+            if not relation:
+                return None  # A path into a properties or json field
+            self.require(relation, path, usage)
+            current = relation
+        return None
+
+    def require(self, relation: Optional[str], path: str, usage: str) -> None:
+        if not relation:
+            return
+        try:
+            self.access_controller.validate_model_access(relation, "read")
+        except AccessControlUnavailableError:
+            raise
+        except AccessControlError as e:
+            raise ValidationError(
+                f"Access denied: {usage} '{path}' reads {relation}, which is not accessible via MCP"
+            ) from e
+
+
+def _ids_only(value: Any) -> bool:
+    """Whether a condition value names records by id only (no name search)."""
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, int):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(isinstance(v, int) and not isinstance(v, bool) for v in value)
+    return False

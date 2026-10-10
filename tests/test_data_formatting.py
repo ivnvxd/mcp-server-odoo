@@ -17,6 +17,20 @@ class TestRecordFormatter:
         """Create a RecordFormatter instance."""
         return RecordFormatter("res.partner")
 
+    def test_a_false_boolean_reads_no(self, formatter):
+        """False on a boolean field is a value, not a missing one."""
+        record = {"id": 1, "name": "Archived", "active": False, "is_company": True}
+        fields_metadata = {
+            "active": {"type": "boolean", "string": "Active"},
+            "is_company": {"type": "boolean", "string": "Is a Company"},
+        }
+
+        result = formatter.format_record(record, fields_metadata)
+
+        assert "  active: No" in result
+        assert "  is_company: Yes" in result
+        assert "Not set" not in result
+
     def test_format_simple_record(self, formatter):
         """Test formatting a simple record."""
         record = {
@@ -489,7 +503,7 @@ class TestDatasetFormatter:
         assert "Search criteria: is_company = True" in result
         assert "Showing records 1-2 of 50" in result
         assert "Fields: name, email" in result
-        assert "[1] Company A" in result
+        assert "[1] ID 1: Company A" in result
         assert "email: a@example.com" in result
 
     def test_format_empty_search_results(self, formatter):
@@ -518,8 +532,8 @@ class TestDatasetFormatter:
 
         assert "Page 2 of 3" in result
         assert "Showing records 11-20 of 30" in result
-        assert "[11] Record 11" in result
-        assert "[20] Record 20" in result
+        assert "[11] ID 11: Record 11" in result
+        assert "[20] ID 20: Record 20" in result
         assert "← Previous page: use the search_records tool with offset=0, limit=10" in result
         assert "→ Next page: use the search_records tool with offset=20, limit=10" in result
 
@@ -552,7 +566,7 @@ class TestDatasetFormatter:
 
         result = formatter.format_search_results(records, fields=["email", "phone", "is_company"])
 
-        assert "[1] Test Company" in result
+        assert "[1] ID 1: Test Company" in result
         assert "    email: test@example.com" in result
         assert "    phone: 123-456-7890" in result
         assert "    is_company: Yes" in result
@@ -825,6 +839,16 @@ class TestBinaryTypedNonPayloadValues:
             "a dict payload must not be advertised as a fetchable binary"
         )
         assert "amount_total" in result
+
+    def test_odoo_20_payload_dict_gets_a_uri_not_base64(self, formatter):
+        """Odoo 20 has no bin_size: a populated binary reads as {content, size}."""
+        content = "QUJD" * 600
+        record = {"id": 5, "name": "S0005", "image_1920": {"content": content, "size": 1800}}
+
+        result = formatter.format_record(record, {"image_1920": {"type": "binary"}})
+
+        assert "odoo://sale.order/record/5/image_1920" in result
+        assert content[:100] not in result
 
     def test_list_valued_binary_renders_value_not_uri(self, formatter):
         record = {"id": 5, "name": "S0005", "widget": [1, 2, 3]}

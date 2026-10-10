@@ -23,6 +23,10 @@ class SearchResult(BaseModel):
         default=None,
         description="Advisory note (e.g. credential-like fields withheld from an '__all__' read)",
     )
+    skipped_fields: Optional[List[str]] = Field(
+        default=None,
+        description="Fields left out of a default or '__all__' read because you cannot read them",
+    )
 
 
 # --- Get Record ---
@@ -69,6 +73,10 @@ class RecordResult(BaseModel):
             "Absent for large or unreadable relations; ids in 'record' stay unchanged."
         ),
     )
+    skipped_fields: Optional[List[str]] = Field(
+        default=None,
+        description="Fields left out of a default or '__all__' read because you cannot read them",
+    )
 
 
 # --- Get Fields ---
@@ -94,6 +102,9 @@ class FieldInfo(BaseModel):
     selection: Optional[List[List[Any]]] = Field(
         default=None, description="Selection options as [value, label] pairs"
     )
+    selection_more: Optional[int] = Field(
+        default=None, description="Number of selection options left out of a cut list"
+    )
 
 
 class FieldsResult(BaseModel):
@@ -102,6 +113,13 @@ class FieldsResult(BaseModel):
     model: str = Field(description="Odoo model name that was described")
     fields: List[FieldInfo] = Field(description="Field definitions, sorted by name")
     total: int = Field(description="Number of fields returned")
+    omitted: Optional[int] = Field(
+        default=None, description="Number of fields left out of the default view"
+    )
+    note: Optional[str] = Field(
+        default=None,
+        description="How to get the fields left out, and any unknown field or attribute names",
+    )
 
 
 # --- Get Current Context ---
@@ -246,6 +264,88 @@ class CreateResult(BaseModel):
     message: str = Field(description="Human-readable success message")
 
 
+# --- Create Records (Bulk) ---
+
+
+class BulkCreateResult(BaseModel):
+    """Result of creating several records in one call."""
+
+    success: bool = Field(description="Whether all records were created")
+    created_count: int = Field(description="Number of records created")
+    records: List[Dict[str, Any]] = Field(
+        description="id, display_name and url of each created record, in input order"
+    )
+    message: str = Field(description="Human-readable success message")
+
+
+# --- Read Attachment ---
+
+
+class ReadAttachmentResult(BaseModel):
+    """What read_attachment found in a file, and how it is returned."""
+
+    uri: str = Field(description="odoo:// URI of the file")
+    name: Optional[str] = Field(default=None, description="File name, when known")
+    mimetype: Optional[str] = Field(default=None, description="Mimetype, when known")
+    size: Optional[int] = Field(default=None, description="Size in bytes, when known")
+    kind: str = Field(
+        description=(
+            "'text' (file content), 'extracted_text' (text Odoo extracted from a PDF or "
+            "Office file), 'image' (an image block follows), 'url' (a link attachment), "
+            "or 'link' (only a download link)"
+        )
+    )
+    text: Optional[str] = Field(
+        default=None, description="The text, or the URL of a link attachment"
+    )
+    truncated: bool = Field(default=False, description="Whether the text was cut off")
+    download_url: str = Field(
+        description="Odoo download link for a person logged in to Odoo (not for the model)"
+    )
+    note: Optional[str] = Field(
+        default=None, description="Why only a link was returned, or how much text was cut off"
+    )
+
+
+# --- Upload Attachment ---
+
+
+class UploadAttachmentResult(BaseModel):
+    """Result of attaching a file to a record."""
+
+    success: bool = Field(description="Whether the attachment was created")
+    attachment_id: int = Field(description="ID of the new ir.attachment")
+    uri: str = Field(description="odoo://attachment/{id} resource URI that serves the file")
+    name: str = Field(description="File name of the attachment")
+    size: int = Field(description="Size of the file in bytes")
+    message: str = Field(description="Human-readable success message")
+
+
+# --- List Record Attachments ---
+
+
+class AttachmentInfo(BaseModel):
+    """One file attached to a record."""
+
+    id: int = Field(description="ID of the ir.attachment")
+    name: str = Field(description="File name")
+    mimetype: Optional[str] = Field(default=None, description="Mimetype, e.g. application/pdf")
+    size: Optional[int] = Field(default=None, description="Size in bytes")
+    type: str = Field(description="'binary' for a stored file, 'url' for a link")
+    create_date: Optional[str] = Field(default=None, description="When it was attached (UTC)")
+    uri: str = Field(description="odoo://attachment/{id} resource URI that serves the file")
+
+
+class AttachmentListResult(BaseModel):
+    """Files attached to one record, newest first."""
+
+    model: str = Field(description="Model of the record")
+    record_id: int = Field(description="ID of the record")
+    attachments: List[AttachmentInfo] = Field(description="Attached files, newest first")
+    total: int = Field(description="Number of files attached to the record")
+    note: Optional[str] = Field(default=None, description="Set when the list is cut off")
+
+
 # --- Update Record ---
 
 
@@ -255,6 +355,18 @@ class UpdateResult(BaseModel):
     success: bool = Field(description="Whether the record was updated successfully")
     record: Dict[str, Any] = Field(description="Essential fields of the updated record")
     url: str = Field(description="Direct URL to the record in Odoo web interface")
+    message: str = Field(description="Human-readable success message")
+
+
+# --- Update Records (Bulk) ---
+
+
+class BulkUpdateResult(BaseModel):
+    """Result of updating multiple existing records in one call."""
+
+    success: bool = Field(description="Whether all records were updated successfully")
+    updated_count: int = Field(description="Number of records updated")
+    records: List[Dict[str, Any]] = Field(description="Essential fields of each updated record")
     message: str = Field(description="Human-readable success message")
 
 

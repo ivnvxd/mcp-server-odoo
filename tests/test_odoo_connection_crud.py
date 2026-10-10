@@ -15,6 +15,7 @@ from mcp_server_odoo.config import OdooConfig
 from mcp_server_odoo.odoo_connection import (
     OdooConnection,
     OdooConnectionError,
+    OdooRequestFault,
     OdooValidationFault,
 )
 
@@ -158,7 +159,7 @@ class TestCreate:
             1, "Access denied on res.partner"
         )
 
-        with pytest.raises(OdooConnectionError, match="Operation failed"):
+        with pytest.raises(OdooConnectionError, match="Odoo error"):
             conn.create("res.partner", {"name": "Fail"})
 
 
@@ -301,7 +302,7 @@ class TestSearchRead:
             1, "Access denied on res.partner"
         )
 
-        with pytest.raises(OdooConnectionError, match="Operation failed"):
+        with pytest.raises(OdooConnectionError, match="Odoo error"):
             conn.search_read("res.partner", [])
 
 
@@ -355,6 +356,71 @@ class TestExecuteKwErrorHandling:
 
         kwargs = conn._object_proxy.execute_kw.call_args[0][6]
         assert kwargs["context"]["lang"] == "de_DE"
+
+    def test_allowed_companies_injection(self, connected_connection):
+        """execute_kw should inject allowed_company_ids into context when configured."""
+        conn = connected_connection
+        conn.config.allowed_companies = [1, 3]
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.search("res.partner", [])
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert kwargs["context"]["allowed_company_ids"] == [1, 3]
+
+    def test_allowed_companies_refuses_a_wider_caller_context(self, connected_connection):
+        """Company scoping is a guardrail: caller-provided values must not widen it."""
+        conn = connected_connection
+        conn.config.allowed_companies = [1]
+
+        with pytest.raises(OdooValidationFault, match=r"Companies \[2, 3\] are outside"):
+            conn.execute_kw(
+                "res.partner", "search", [[]], {"context": {"allowed_company_ids": [1, 2, 3]}}
+            )
+        conn._object_proxy.execute_kw.assert_not_called()
+
+    def test_allowed_companies_keeps_a_caller_subset(self, connected_connection):
+        conn = connected_connection
+        conn.config.allowed_companies = [1, 3]
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.execute_kw("res.partner", "search", [[]], {"context": {"allowed_company_ids": [3]}})
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert kwargs["context"]["allowed_company_ids"] == [3]
+
+    def test_unscoped_call_carries_no_company_limit(self, connected_connection):
+        conn = connected_connection
+        conn.config.allowed_companies = [1, 3]
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.execute_kw("res.users", "read", [[2], ["company_ids"]], {}, scoped=False)
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert "allowed_company_ids" not in kwargs.get("context", {})
+
+    def test_allowed_companies_context_is_copied(self, connected_connection):
+        """Mutating the injected context must not corrupt the shared config."""
+        conn = connected_connection
+        conn.config.allowed_companies = [1, 3]
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.search("res.partner", [])
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        kwargs["context"]["allowed_company_ids"].append(99)
+        assert conn.config.allowed_companies == [1, 3]
+
+    def test_allowed_companies_not_injected_when_unset(self, connected_connection):
+        """Without configuration, context must not carry allowed_company_ids."""
+        conn = connected_connection
+        conn.config.allowed_companies = None
+        conn._object_proxy.execute_kw.return_value = []
+
+        conn.search("res.partner", [])
+
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert "allowed_company_ids" not in kwargs.get("context", {})
 
     def test_marshal_none_fault_returns_none(self, connected_connection):
         """Odoo's "cannot marshal None" fault is translated to a None return.
@@ -514,15 +580,27 @@ class TestExecuteKwErrorHandling:
         assert not isinstance(exc_info.value, OdooValidationFault)
         assert "timeout" in str(exc_info.value)
 
-    def test_generic_fault_stays_connection_error(self, connected_connection):
-        """A fault without business-error markers keeps the historical
-        connection-flavored 'Operation failed' wrapping."""
+    def test_module_wrapper_text_is_dropped(self, connected_connection):
+        """Older MCP modules wrap every exception as 'Internal Server Error in ...'."""
+        conn = connected_connection
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            500, "Internal Server Error in Invalid leaf ('name', 'like2', 'x')"
+        )
+
+        with pytest.raises(OdooRequestFault) as exc_info:
+            conn.execute_kw("res.partner", "search", [[]], {})
+
+        assert str(exc_info.value) == "Odoo error: Invalid leaf ('name', 'like2', 'x')"
+
+    def test_generic_fault_is_an_odoo_error(self, connected_connection):
+        """A fault without business-error markers is an Odoo error, not a
+        connection error: Odoo answered."""
         conn = connected_connection
         conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
             1, "RuntimeError: something unexpected broke"
         )
 
-        with pytest.raises(OdooConnectionError, match="Operation failed") as exc_info:
+        with pytest.raises(OdooRequestFault, match="Odoo error: RuntimeError") as exc_info:
             conn.execute_kw("res.partner", "search", [[]], {})
 
         assert not isinstance(exc_info.value, OdooValidationFault)
@@ -569,42 +647,85 @@ class TestFaultCodeClassification:
         [(2, "RPC_FAULT_CODE_WARNING"), (4, "RPC_FAULT_CODE_ACCESS_ERROR")],
     )
     def test_business_codes_surface_without_connection_prefix(self, code, label):
-        from mcp_server_odoo.odoo_connection import _raise_for_fault
+        from mcp_server_odoo.odoo_errors import raise_for_fault
 
         fault = xmlrpc.client.Fault(code, "You cannot create recursive Partner hierarchies.")
         with pytest.raises(OdooValidationFault) as exc:
-            _raise_for_fault(fault)
+            raise_for_fault(fault)
 
         message = str(exc.value)
         assert message == "You cannot create recursive Partner hierarchies."
         assert "Operation failed" not in message, f"{label} must not read as a transport error"
         assert "Connection error" not in message
 
+    @pytest.mark.parametrize(
+        "code,text",
+        [
+            (
+                400,
+                "The call names a database this endpoint does not serve. Select the "
+                "database through the host name or the X-Odoo-Database header.",
+            ),
+            (403, "MCP access denied: user is not a member of the MCP User group."),
+            (429, "Rate limit exceeded. Please try again later."),
+        ],
+    )
+    def test_mcp_module_codes_keep_the_module_text(self, code, text):
+        """The MCP module's proxy sends 400/403/429 with an explanation for the user."""
+        from mcp_server_odoo.odoo_errors import raise_for_fault
+
+        with pytest.raises(OdooValidationFault) as exc:
+            raise_for_fault(xmlrpc.client.Fault(code, text))
+
+        assert str(exc.value) == text
+
+    @pytest.mark.parametrize(
+        "fault",
+        [
+            xmlrpc.client.Fault(4, "You are not allowed to access 'Journal Item' records."),
+            xmlrpc.client.Fault(
+                500,
+                "Traceback (most recent call last):\n"
+                '  File "/opt/odoo/odoo/models.py", line 3720, in read\n'
+                "odoo.exceptions.AccessError: You are not allowed to read.",
+            ),
+        ],
+        ids=["code", "heuristic"],
+    )
+    def test_business_fault_keeps_its_code(self, fault):
+        """The read path tells an AccessError (4) apart by the code."""
+        from mcp_server_odoo.odoo_errors import raise_for_fault
+
+        with pytest.raises(OdooValidationFault) as exc:
+            raise_for_fault(fault)
+
+        assert exc.value.fault_code == fault.faultCode
+
     def test_access_denied_code_stays_connection_flavored(self):
         """faultCode 3 is a rejected login — auth setup, not a record rule."""
-        from mcp_server_odoo.odoo_connection import _raise_for_fault
+        from mcp_server_odoo.odoo_errors import raise_for_fault
 
         fault = xmlrpc.client.Fault(3, "Access Denied")
         with pytest.raises(OdooConnectionError) as exc:
-            _raise_for_fault(fault)
+            raise_for_fault(fault)
         assert not isinstance(exc.value, OdooValidationFault)
         assert "Operation failed" in str(exc.value)
 
     def test_application_error_code_stays_connection_flavored(self):
-        from mcp_server_odoo.odoo_connection import _raise_for_fault
+        from mcp_server_odoo.odoo_errors import raise_for_fault
 
         fault = xmlrpc.client.Fault(1, "Traceback (most recent call last):\nValueError: boom")
         with pytest.raises(OdooConnectionError) as exc:
-            _raise_for_fault(fault)
+            raise_for_fault(fault)
         assert not isinstance(exc.value, OdooValidationFault)
 
     def test_non_integer_fault_code_falls_back_to_string_routing(self):
         """Legacy /xmlrpc/1 sends string fault codes — must not crash."""
-        from mcp_server_odoo.odoo_connection import _raise_for_fault
+        from mcp_server_odoo.odoo_errors import raise_for_fault
 
         fault = xmlrpc.client.Fault("warning -- MissingError", "gone")
         with pytest.raises(OdooConnectionError):
-            _raise_for_fault(fault)
+            raise_for_fault(fault)
 
 
 class TestLogRedactionUsesCentralDetector:
@@ -635,3 +756,47 @@ class TestLogRedactionUsesCentralDetector:
 
         out = _redact_values({"max_tokens": 4096, "sort_key": "name", "commit_hash": "abc"})
         assert out == {"max_tokens": 4096, "sort_key": "name", "commit_hash": "abc"}
+
+
+class TestCheckAllowedCompanies:
+    """At startup each ODOO_ALLOWED_COMPANIES id must be a company of the user."""
+
+    def test_no_rpc_when_unset(self, connected_connection):
+        connected_connection.config.allowed_companies = None
+
+        connected_connection.check_allowed_companies()
+
+        connected_connection._object_proxy.execute_kw.assert_not_called()
+
+    def test_companies_of_the_user_pass(self, connected_connection):
+        conn = connected_connection
+        conn.config.allowed_companies = [3, 1]
+        conn._object_proxy.execute_kw.return_value = [{"id": 2, "company_ids": [1, 2, 3]}]
+
+        conn.check_allowed_companies()
+
+        # read without the scoping: with a foreign id Odoo refuses the read itself
+        kwargs = conn._object_proxy.execute_kw.call_args[0][6]
+        assert "allowed_company_ids" not in kwargs.get("context", {})
+
+    def test_a_foreign_company_is_refused(self, connected_connection):
+        conn = connected_connection
+        conn.config.allowed_companies = [1, 9]
+        conn._object_proxy.execute_kw.return_value = [{"id": 2, "company_ids": [2, 1]}]
+
+        with pytest.raises(
+            OdooConnectionError, match=r"cannot access: 9\. The user.s companies are 1, 2\."
+        ):
+            conn.check_allowed_companies()
+
+    def test_a_refused_read_skips_the_check(self, connected_connection, caplog):
+        """Standard mode: the MCP module may not allow res.users."""
+        conn = connected_connection
+        conn.config.allowed_companies = [1]
+        conn._object_proxy.execute_kw.side_effect = xmlrpc.client.Fault(
+            403, "Model res.users is not enabled for MCP access"
+        )
+
+        conn.check_allowed_companies()
+
+        assert "ODOO_ALLOWED_COMPANIES" in caplog.text

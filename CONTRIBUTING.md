@@ -136,12 +136,12 @@ Describe the use case and motivation. Explain how the feature would benefit user
 A quick orientation for navigating the codebase:
 
 ```
-__main__.py → OdooConfig → OdooMCPServer → OdooConnection → FastMCP
+__main__.py → OdooConfig → OdooMCPServer → OdooConnection → MCPServer
 ```
 
 | Module | Responsibility |
 |--------|---------------|
-| `server.py` | Orchestrates startup, registers handlers on FastMCP |
+| `server.py` | Orchestrates startup, registers handlers on MCPServer |
 | `config.py` | `OdooConfig` dataclass from env vars, singleton via `get_config()` |
 | `odoo_connection.py` | XML-RPC proxies, auth, CRUD convenience methods, caching |
 | `tools.py` | MCP tool handlers (search, get, create, update, delete, list) |
@@ -153,7 +153,7 @@ __main__.py → OdooConfig → OdooMCPServer → OdooConnection → FastMCP
 | `error_handling.py` | Centralized error types and handler |
 | `error_sanitizer.py` | Strips sensitive data from error messages |
 
-The server operates in two modes: **Standard** (requires the Odoo MCP module with `/mcp/` endpoints) and **YOLO** (connects directly to `/xmlrpc/` endpoints, no module needed).
+The server operates in two modes: **Standard** (requires the Odoo MCP module with `/mcp/` endpoints) and **YOLO** (connects directly to `/xmlrpc/` endpoints, or to `/json/2` on Odoo 19 and later with an API key; no module needed).
 
 ## License
 

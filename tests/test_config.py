@@ -30,7 +30,7 @@ class TestOdooConfig:
         assert config.uses_api_key is True
         assert config.uses_credentials is False
         assert config.log_level == "INFO"
-        assert config.default_limit == 10
+        assert config.default_limit == 25
         assert config.max_limit == 100
 
     def test_valid_config_with_credentials(self):
@@ -117,6 +117,40 @@ class TestLoadConfig:
         assert config.log_level == "DEBUG"
         assert config.default_limit == 20
         assert config.max_limit == 200
+
+    def test_load_config_allowed_companies(self, monkeypatch):
+        """Test parsing of ODOO_ALLOWED_COMPANIES into a list of ints."""
+        monkeypatch.setenv("ODOO_URL", "http://test.odoo.com")
+        monkeypatch.setenv("ODOO_API_KEY", "env-api-key")
+        monkeypatch.setenv("ODOO_ALLOWED_COMPANIES", "1, 4")
+
+        config = load_config()
+
+        assert config.allowed_companies == [1, 4]
+
+    def test_load_config_allowed_companies_unset(self, monkeypatch):
+        """ODOO_ALLOWED_COMPANIES absent or empty means no company scoping."""
+        monkeypatch.setenv("ODOO_URL", "http://test.odoo.com")
+        monkeypatch.setenv("ODOO_API_KEY", "env-api-key")
+        monkeypatch.delenv("ODOO_ALLOWED_COMPANIES", raising=False)
+
+        assert load_config().allowed_companies is None
+
+        monkeypatch.setenv("ODOO_ALLOWED_COMPANIES", "")
+        assert load_config().allowed_companies is None
+
+        # Only separators/whitespace parses to nothing usable -> unset
+        monkeypatch.setenv("ODOO_ALLOWED_COMPANIES", " , ")
+        assert load_config().allowed_companies is None
+
+    def test_load_config_allowed_companies_invalid(self, monkeypatch):
+        """Non-integer entries in ODOO_ALLOWED_COMPANIES are rejected."""
+        monkeypatch.setenv("ODOO_URL", "http://test.odoo.com")
+        monkeypatch.setenv("ODOO_API_KEY", "env-api-key")
+        monkeypatch.setenv("ODOO_ALLOWED_COMPANIES", "1,main")
+
+        with pytest.raises(ValueError, match="comma-separated list of integer IDs"):
+            load_config()
 
     def test_load_config_from_env_file(self, monkeypatch):
         """Test loading configuration from .env file."""
@@ -342,13 +376,52 @@ class TestYoloMode:
         )
         assert config.is_yolo_enabled is True
 
-        # YOLO mode without proper auth - should fail
+        # XML-RPC needs a username with the API key
         with pytest.raises(ValueError, match="YOLO mode requires"):
             OdooConfig(
                 url="http://localhost:8069",
                 api_key="test-key",  # Missing username
                 yolo_mode="read",
+                rpc_transport="xmlrpc",
             )
+
+        # JSON-2 reads the user from the key, so "auto" and "json2" take it alone
+        for transport in ("auto", "json2"):
+            config = OdooConfig(
+                url="http://localhost:8069",
+                api_key="test-key",
+                yolo_mode="read",
+                rpc_transport=transport,
+            )
+            assert config.username is None
+
+    def test_rpc_transport(self, monkeypatch):
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_API_KEY", "test-key")
+        monkeypatch.setenv("ODOO_YOLO", "read")
+        monkeypatch.delenv("ODOO_RPC_TRANSPORT", raising=False)
+        assert load_config().rpc_transport == "auto"
+
+        monkeypatch.setenv("ODOO_RPC_TRANSPORT", " JSON2 ")
+        assert load_config().rpc_transport == "json2"
+
+        monkeypatch.setenv("ODOO_RPC_TRANSPORT", "grpc")
+        with pytest.raises(ValueError, match="Invalid ODOO_RPC_TRANSPORT: grpc"):
+            load_config()
+
+    def test_json2_needs_an_api_key(self):
+        with pytest.raises(ValueError, match="json2 needs ODOO_API_KEY"):
+            OdooConfig(
+                url="http://localhost:8069",
+                username="admin",
+                password="admin",
+                yolo_mode="read",
+                rpc_transport="json2",
+            )
+
+    def test_json2_is_refused_in_standard_mode(self):
+        with pytest.raises(ValueError, match="json2 needs ODOO_YOLO=read or true"):
+            OdooConfig(url="http://localhost:8069", api_key="k", rpc_transport="json2")
 
     def test_yolo_mode_from_env(self, monkeypatch):
         """Test loading YOLO mode from environment variables."""

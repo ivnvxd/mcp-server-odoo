@@ -7,24 +7,44 @@ actions like creating, updating, or deleting records.
 
 import asyncio
 import base64
+import binascii
+import html
 import json
 import re
+import time
 import xmlrpc.client
 from ast import literal_eval as _parse_python_literal
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Union
+from typing import (
+    Annotated,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.types import ToolAnnotations
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
+from pydantic import BeforeValidator, WithJsonSchema
 
 from .access_control import (
+    DOCUMENT_LINKS,
+    DOCUMENT_NOUNS,
     AccessControlError,
     AccessController,
     AccessControlUnavailableError,
     access_denied_message,
-    attachment_scope_domain,
     check_domain_balance,
+    check_related_paths,
+    document_owners,
+    document_scope_domain,
 )
+from .binary_reads import read_without_binary_payloads, uses_odoo_20_binaries
 from .config import OdooConfig, max_offset_for
 from .error_handling import (
     MCPPermissionError,
@@ -33,16 +53,24 @@ from .error_handling import (
 )
 from .error_sanitizer import ErrorSanitizer
 from .field_security import is_sensitive_field_name, strip_sensitive_fields, withheld_note
+from .file_types import inline_image_type, is_inline_image_type, is_text_mimetype
 from .formatters import MAX_RELATED_ITEMS
+from .json_values import scrub_json_fields
 from .logging_config import get_logger, perf_logger
 from .odoo_connection import (
+    ACCESS_ERROR_FAULT_CODE,
     XMLRPC_MAX_INT,
     OdooConnection,
     OdooConnectionError,
+    OdooRequestFault,
     OdooValidationFault,
+    context_kwargs,
 )
 from .schemas import (
     AggregateResult,
+    AttachmentListResult,
+    BulkCreateResult,
+    BulkUpdateResult,
     CallModelMethodResult,
     CompanyInfo,
     CreateResult,
@@ -53,13 +81,24 @@ from .schemas import (
     FieldsResult,
     ModelsResult,
     PostMessageResult,
+    ReadAttachmentResult,
     RecordResult,
     RelatedSummary,
     ResourceTemplatesResult,
     SearchResult,
     UpdateResult,
+    UploadAttachmentResult,
 )
-from .uri_schema import BINARY_FIELD_TYPES, URIValidationError, build_binary_uri
+from .uri_schema import (
+    ATTACHMENT_CONTENT_FIELDS,
+    ATTACHMENT_URI_PATTERN,
+    BINARY_FIELD_TYPES,
+    BINARY_FIELD_URI_PATTERN,
+    URIValidationError,
+    build_attachment_uri,
+    build_binary_uri,
+    is_binary_payload_dict,
+)
 from .user_context import (
     context_unavailable_text,
     format_user_context,
@@ -140,6 +179,38 @@ _BLOCKED_METHOD_CALLS = frozenset(
 # these ORM data-access primitives.
 _BLOCKED_PRIVILEGED_METHOD_NAMES = frozenset({"run", "method_direct_trigger"})
 
+_NESTED_VERBS = {"create": "create", "write": "change", "unlink": "delete"}
+
+
+def _nested_operations(command: Any, field_type: str) -> Tuple[str, ...]:
+    """The operations an x2many command performs on the related model.
+
+    0 creates, 1 updates and 2 deletes a related record. On a one2many, 4
+    (link) sets the related record's inverse field, a write, and 3 (unlink),
+    5 (clear) and 6 (set) clear it, or delete the record when the inverse
+    field is ondelete='cascade' (Odoo's One2many.write_real). The ondelete
+    rule is not in fields_get, so both are required. On a many2many, 3 to 6
+    change only the relation table: a write on the parent, already checked.
+    """
+    if command == 0:
+        return ("create",)
+    if command == 1:
+        return ("write",)
+    if command == 2:
+        return ("unlink",)
+    if field_type == "one2many":
+        if command == 4:
+            return ("write",)
+        if command in (3, 5, 6):
+            return ("write", "unlink")
+    return ()
+
+
+def _plain_scalar(value: Any) -> bool:
+    """A value no many2one check is needed for: a number, a boolean or None."""
+    return value is None or isinstance(value, (bool, int, float))
+
+
 # List results from call_model_method are truncated to this many items
 # (matches the search max limit) so a method returning a huge list cannot
 # blow up the response.
@@ -171,6 +242,36 @@ _MAX_JSON_PARAM_BYTES = 1_000_000
 # Real domains sit at 2-4 levels (`[("id", "in", [1, 2])]` is 3), so this
 # ceiling is far above anything legitimate.
 _MAX_PARAM_NESTING = 32
+
+
+def _double_encoded_hint(parsed: Any) -> str:
+    """Hint for a JSON string that decoded to another string: it was encoded twice."""
+    if isinstance(parsed, str):
+        return " (the value was JSON-encoded twice; send the list or object itself)"
+    return ""
+
+
+def _odoo16_group_order(order: str, aggregates: List[str]) -> str:
+    """Rewrite an aggregate ``order`` for Odoo 16's ``read_group``.
+
+    Odoo 16 names an aggregate column by its bare field, so it refuses
+    ``list_price:sum desc`` as an invalid field and takes ``list_price desc``.
+    It cannot order by the group count at all. Odoo 17 takes both forms.
+    """
+    terms = []
+    for term in order.split(","):
+        parts = term.split()
+        if not parts:
+            continue
+        if parts[0] == "__count":
+            raise ValidationError(
+                "Odoo 16 cannot order groups by __count. Order by a groupby key or an "
+                "aggregate, or sort the returned groups yourself."
+            )
+        if parts[0] in aggregates:
+            parts[0] = parts[0].split(":", 1)[0]
+        terms.append(" ".join(parts))
+    return ", ".join(terms)
 
 
 def _nesting_depth(raw: str) -> int:
@@ -222,6 +323,22 @@ CURATED_FIELD_ATTRIBUTES = (
     "selection",
 )
 
+# get_fields without field_names returns the top value fields plus the
+# structure fields, and cuts long selection lists (res.partner's tz has ~500
+# values)
+MAX_SCHEMA_FIELDS = 60
+SELECTION_OPTIONS_CAP = 20
+_STRUCTURE_FIELD_TYPES = ("one2many", "many2many", *BINARY_FIELD_TYPES, "html")
+
+# Attributes the schema-relevance score reads; fetched for the curated view
+# even when the caller did not ask for them, and removed again before returning
+_SCHEMA_SCORING_ATTRIBUTES = ("type", "required", "store", "related")
+
+
+def _skipped_fields_note(skipped: List[str]) -> str:
+    """Note naming the fields a bulk read left out because Odoo refused them."""
+    return f"Left out {len(skipped)} field(s) that you cannot read: {', '.join(skipped)}."
+
 
 def _withheld_fields_note(withheld: List[str]) -> str:
     """Note explaining that credential-like fields were withheld from a bulk read.
@@ -230,6 +347,160 @@ def _withheld_fields_note(withheld: List[str]) -> str:
     surface); this wrapper only adds the tools-side 'fields' parameter hint.
     """
     return f"{withheld_note(withheld)} (use the 'fields' parameter)."
+
+
+MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 3 // 4 - 64 * 1024
+"""Largest decoded file upload_attachment accepts. The SDK refuses HTTP request
+bodies over 4 MiB (413) before any tool runs; base64 grows the payload by 4/3,
+and 64 KiB is left for the JSON-RPC envelope."""
+
+# Aggregate functions that need a specific field type. Odoo checks only the
+# function name, so name:sum reaches SQL and fails there as an internal error.
+# The other functions (max, min, count, array_agg, ...) take any column.
+_TYPED_AGGREGATES = {
+    "sum": ("integer", "float", "monetary"),
+    "avg": ("integer", "float", "monetary"),
+    "bool_and": ("boolean",),
+    "bool_or": ("boolean",),
+}
+
+# How long the fields a bulk read had to leave out stay known: the lifetime of
+# the fields_get cache (PerformanceManager.cache_fields)
+UNREADABLE_FIELDS_TTL = 3600
+
+# read_attachment caps: what goes into the model's context, and the largest
+# text file fetched to fill it (beyond that only a link is returned)
+READ_TEXT_MAX_CHARS = 100_000
+READ_TEXT_MAX_BYTES = 1024 * 1024
+READ_IMAGE_MAX_BYTES = 256 * 1024
+_TEXT_TOO_LARGE = f"The text file is over {READ_TEXT_MAX_BYTES // (1024 * 1024)} MB, the limit for reading it here."
+_IMAGE_TOO_LARGE = (
+    f"The image is over {READ_IMAGE_MAX_BYTES // 1024} KB, the limit for returning it as an image."
+)
+
+# Documents whose text Odoo extracts into ir.attachment.index_content
+_EXTRACTED_TEXT_MIMETYPES = (
+    "application/pdf",
+    "application/msword",
+    "application/rtf",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.",
+    "application/vnd.oasis.opendocument.",
+)
+
+MAX_BATCH_RECORDS = 100
+"""Cap on records per create_records/update_records call, to bound the blast
+radius of a single bulk write under YOLO mode (no per-model MCP-side write
+approval)."""
+
+
+def _refuse_bool(value: Any) -> Any:
+    """Refuse a boolean id. Pydantic reads True as 1 and False as 0, so
+    record_id=true would silently act on record 1. Digit strings stay valid."""
+    if isinstance(value, bool):
+        raise ValueError("an id must be an integer, not a boolean")
+    return value
+
+
+RecordId = Annotated[int, BeforeValidator(_refuse_bool)]
+
+
+# Domain operators that take a sub-domain as their value; Odoo 17 added them
+_SUB_DOMAIN_OPERATORS = ("any", "not any")
+
+
+def _uses_sub_domain_operators(domain: Any) -> bool:
+    """Whether a parsed domain has an 'any' or 'not any' condition.
+
+    The top level is enough: '|' and '&' are prefix operators, so a domain is a
+    flat list, and a sub-domain can only sit inside an 'any' condition.
+    """
+    if not isinstance(domain, (list, tuple)):
+        return False
+    for term in domain:
+        if isinstance(term, (list, tuple)) and len(term) == 3:
+            operator = term[1]
+            if isinstance(operator, str) and operator.strip().lower() in _SUB_DOMAIN_OPERATORS:
+                return True
+    return False
+
+
+def _wrap_bare_string(value: Any) -> Any:
+    """A bare string is a list of one: "partner_id" is ["partner_id"]."""
+    return [value] if isinstance(value, str) else value
+
+
+def _lower_case(value: Any) -> Any:
+    return value.lower() if isinstance(value, str) else value
+
+
+# The parameters below advertise a typed schema (strict clients reject a bare
+# {} or a union of types), but validate as Any: the handlers keep parsing a
+# JSON or Python-literal string, and their error text names the problem.
+Domain = Annotated[
+    Optional[Any],
+    WithJsonSchema(
+        {
+            "anyOf": [{"type": "array", "items": {}}, {"type": "null"}],
+            "description": (
+                "Odoo domain: a list of conditions [field, operator, value], joined by "
+                "'&' (the default), '|' or '!'. Example: [[\"is_company\", \"=\", true]]. "
+                "The 'any' and 'not any' operators, which take a sub-domain as value, need "
+                "Odoo 17 or later."
+            ),
+        }
+    ),
+]
+FieldNames = Annotated[
+    Optional[Any],
+    WithJsonSchema({"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]}),
+]
+ArgumentList = Annotated[
+    Optional[Any], WithJsonSchema({"anyOf": [{"type": "array", "items": {}}, {"type": "null"}]})
+]
+KeywordArguments = Annotated[
+    Optional[Any],
+    WithJsonSchema({"anyOf": [{"type": "object", "additionalProperties": True}, {"type": "null"}]}),
+]
+StringList = Annotated[Optional[List[str]], BeforeValidator(_wrap_bare_string)]
+
+# Context keys a tool call may set. They choose which data a call sees, not
+# what a write does: default_*, tracking_disable and similar keys would change
+# business behavior without showing in the tool's arguments (issue #129).
+CALL_CONTEXT_KEYS = ("lang", "tz", "active_test", "allowed_company_ids")
+
+CallContext = Annotated[
+    Optional[Any],
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "lang": {"type": "string"},
+                        "tz": {"type": "string"},
+                        "active_test": {"type": "boolean"},
+                        "allowed_company_ids": {"type": "array", "items": {"type": "integer"}},
+                    },
+                    "additionalProperties": False,
+                },
+                {"type": "null"},
+            ],
+            "description": (
+                "Odoo context for this call. allowed_company_ids sets the companies, and "
+                "the first one is the active company: company-dependent fields such as "
+                "standard_price read and write its value. lang and tz set the language "
+                "and timezone. active_test=false includes archived records in searches."
+            ),
+        }
+    ),
+]
+
+
+def _with_context(call_context: Optional[Dict[str, Any]], **fixed: Any) -> Dict[str, Any]:
+    """The caller's context with the tool's own keys over it."""
+    return {**(call_context or {}), **fixed}
 
 
 def _validate_record_id(record_id: int, label: str = "record ID") -> None:
@@ -337,7 +608,7 @@ class OdooToolHandler:
 
     def __init__(
         self,
-        app: FastMCP,
+        app: MCPServer,
         connection: OdooConnection,
         access_controller: AccessController,
         config: OdooConfig,
@@ -345,7 +616,7 @@ class OdooToolHandler:
         """Initialize tool handler.
 
         Args:
-            app: FastMCP application instance
+            app: MCPServer application instance
             connection: Odoo connection instance
             access_controller: Access control instance
             config: Odoo configuration instance
@@ -354,9 +625,152 @@ class OdooToolHandler:
         self.connection = connection
         self.access_controller = access_controller
         self.config = config
+        # (model, requested field names, companies) -> (time found, names Odoo refused)
+        self._unreadable_fields: Dict[
+            Tuple[str, Tuple[str, ...], Tuple[int, ...]], Tuple[float, List[str]]
+        ] = {}
+        # Codes of the active languages, read on Odoo 16 and 17 (see _check_lang)
+        self._active_langs: Optional[Set[str]] = None
 
         # Register tools
         self._register_tools()
+        self._install_argument_check()
+
+    def _check_lang(self, lang: str) -> None:
+        """Refuse a context lang that Odoo has not installed (blocking).
+
+        Odoo 18 and later refuse it themselves, and take en_US always. Odoo 16
+        and 17 ignore it, so a write would land in the default language and
+        replace that value. The installed codes are cached and read again once
+        for an unknown code. When they cannot be read at all, the lang is
+        refused: Odoo would not refuse it.
+        """
+        major = self.connection.get_major_version()
+        if not isinstance(major, int) or major >= 18 or lang == "en_US":
+            return
+        if self._active_langs is None or lang not in self._active_langs:
+            self._active_langs = self._installed_langs()
+        if self._active_langs is None:
+            raise ValidationError(
+                f"Cannot check that language '{lang}' is installed: this user cannot read "
+                "res.partner or res.lang. Odoo 16 and 17 would write the default language "
+                "instead, so leave context.lang out or enable one of these models for MCP."
+            )
+        if lang not in self._active_langs:
+            raise ValidationError(
+                f"Language '{lang}' is not installed in Odoo. Installed: "
+                f"{', '.join(sorted(self._active_langs))}."
+            )
+
+    def _installed_langs(self) -> Optional[Set[str]]:
+        """Codes of the installed languages, or None when Odoo refuses both reads (blocking).
+
+        The selection of res.partner.lang lists exactly the installed
+        languages, and fields_get works where the MCP module does not enable
+        res.lang itself. Not the cached fields_get: a language installed since
+        must show.
+        """
+        try:
+            fields = self.connection.execute_kw(
+                "res.partner", "fields_get", [["lang"]], {"attributes": ["selection"]}
+            )
+            lang_field = fields.get("lang") if isinstance(fields, dict) else None
+            selection = (lang_field or {}).get("selection")
+            if selection:
+                return {code for code, _ in selection}
+        except OdooValidationFault as e:
+            logger.debug(f"Could not read the languages from res.partner: {e}")
+        try:
+            rows = self.connection.search_read("res.lang", [["active", "=", True]], ["code"])
+        except OdooValidationFault as e:
+            logger.debug(f"Could not read the active languages: {e}")
+            return None
+        return {row["code"] for row in rows}
+
+    def _call_context(self, context: Any) -> Optional[Dict[str, Any]]:
+        """Validate a tool's ``context`` argument (blocking: it may read the
+        user's companies and the active languages). Returns None when there is none."""
+        if context is None or context == {}:
+            return None
+        if not isinstance(context, dict):
+            raise ValidationError('context must be an object, for example {"lang": "de_DE"}.')
+        unknown = sorted(set(context) - set(CALL_CONTEXT_KEYS))
+        if unknown:
+            hint = (
+                " Use allowed_company_ids: its first ID is the active company."
+                if "company_id" in unknown
+                else ""
+            )
+            raise ValidationError(
+                f"Unknown context key(s): {', '.join(unknown)}. "
+                f"Allowed keys: {', '.join(CALL_CONTEXT_KEYS)}.{hint}"
+            )
+        for key in ("lang", "tz"):
+            if key in context and (not isinstance(context[key], str) or not context[key].strip()):
+                raise ValidationError(f"context.{key} must be a non-empty string.")
+        if "active_test" in context and not isinstance(context["active_test"], bool):
+            raise ValidationError("context.active_test must be true or false.")
+        if "lang" in context:
+            self._check_lang(context["lang"])
+        if "allowed_company_ids" in context:
+            companies = context["allowed_company_ids"]
+            if (
+                not isinstance(companies, list)
+                or not companies
+                or any(isinstance(c, bool) or not isinstance(c, int) or c < 1 for c in companies)
+            ):
+                raise ValidationError(
+                    "context.allowed_company_ids must be a non-empty list of company IDs."
+                )
+            if self.config.allowed_companies:
+                limit, source = self.config.allowed_companies, "ODOO_ALLOWED_COMPANIES"
+            else:
+                limit, source = self.connection.user_company_ids(), "the user's companies"
+            outside = [c for c in companies if limit is not None and c not in limit]
+            if outside:
+                raise ValidationError(
+                    f"Companies {outside} are outside {source} {sorted(limit or [])}."
+                )
+        return dict(context)
+
+    def _check_domain_operators(self, domain: List[Any]) -> None:
+        """Refuse 'any' and 'not any' before Odoo 17 (the version is cached).
+
+        Odoo 16 has no such operator and fails with "unhashable type: 'list'",
+        which reads as a connection error. A dotted path does the same there.
+        """
+        major = self.connection.get_major_version()
+        if isinstance(major, int) and major < 17 and _uses_sub_domain_operators(domain):
+            raise ValidationError(
+                f"The 'any' and 'not any' operators need Odoo 17 or later; this server runs "
+                f"Odoo {major}. Use a dotted path instead, for example "
+                '[["child_ids.email", "!=", false]].'
+            )
+
+    def _install_argument_check(self) -> None:
+        """Refuse tool arguments the tool does not take, by name.
+
+        The SDK (mcp 2.2) drops unknown arguments without a word, so a
+        misspelled parameter (limt, filter) silently runs with the defaults.
+        tools/call goes through the app's public call_tool(); a wrapper on the
+        app instance checks the names against the tool's input schema first.
+        """
+        app = self.app
+        call_tool = app.call_tool
+
+        async def checked_call_tool(name, arguments, context=None):
+            tool = app._tool_manager.get_tool(name)
+            if tool is not None and arguments:
+                known = list(tool.parameters.get("properties", {}))
+                unknown = sorted(set(arguments) - set(known))
+                if unknown:
+                    raise ValidationError(
+                        f"Unknown argument(s) for {name}: {', '.join(unknown)}. "
+                        f"Valid arguments: {', '.join(known)}."
+                    )
+            return await call_tool(name, arguments, context)
+
+        app.call_tool = checked_call_tool  # ty: ignore[invalid-assignment]
 
     def _format_datetime(self, value: str) -> str:
         """Format datetime values to ISO 8601 with timezone."""
@@ -546,6 +960,7 @@ class OdooToolHandler:
             "code",
             "ref",
             "number",
+            "price",
         ]
         if any(pattern in field_name.lower() for pattern in business_patterns):
             score += 60
@@ -569,6 +984,35 @@ class OdooToolHandler:
             return 0
 
         return max(score, 0)
+
+    def _schema_default_fields(self, fields_info: Dict[str, Dict[str, Any]]) -> List[str]:
+        """Fields for the get_fields default view.
+
+        The top MAX_SCHEMA_FIELDS value fields by read importance, every
+        structure field (x2many, binary, html), and the essential fields. The
+        read score drops structure fields because their values are heavy, but
+        in a schema they are the model's shape (order_line, invoice_line_ids).
+        Ranked against value fields they fall out on large models, so they
+        skip the cap. The technical and credential-name exclusions still apply,
+        scored under a value type. A deliberate divergence from the reference
+        in-process implementation, which ranks them inside the cap.
+        """
+        scored = []
+        structure = []
+        for name, info in fields_info.items():
+            if info.get("type") in _STRUCTURE_FIELD_TYPES:
+                if self._score_field_importance(name, dict(info, type="char")) > 0:
+                    structure.append(name)
+                continue
+            score = self._score_field_importance(name, info)
+            if score > 0:
+                scored.append((name, score))
+        scored.sort(key=lambda item: (-item[1], item[0]))
+        selected = [name for name, _ in scored[:MAX_SCHEMA_FIELDS]] + structure
+        for name in ("id", "name", "display_name", "active"):
+            if name in fields_info and name not in selected:
+                selected.append(name)
+        return selected
 
     def _get_smart_default_fields(self, model: str) -> Optional[List[str]]:
         """Get smart default fields for a model using field importance scoring.
@@ -596,9 +1040,10 @@ class OdooToolHandler:
             max_fields = self.config.max_smart_fields
             selected_fields = [field_name for field_name, _ in field_scores[:max_fields]]
 
-            # Ensure essential fields are always included
+            # Ensure essential fields are always included, and the parent of a
+            # hierarchy: without it the children of a record cannot be told apart
             essential_fields = ["id", "name", "display_name", "active"]
-            for field in essential_fields:
+            for field in [*essential_fields, "parent_id"]:
                 if field in fields_info and field not in selected_fields:
                     selected_fields.append(field)
 
@@ -623,6 +1068,147 @@ class OdooToolHandler:
             logger.warning(f"Could not determine default fields for {model}: {e}")
             # Return None to indicate we should get all fields
             return None
+
+    def _read_bulk(
+        self,
+        model: str,
+        ids: List[int],
+        fields: Optional[List[str]],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """read_without_binary_payloads for a bulk field selection (smart
+        defaults or every field), leaving out the fields Odoo refuses (blocking).
+
+        A computed field can read a model the user cannot access (the
+        accounting totals on a contact), and then the whole read fails with an
+        AccessError. The fields that fail are left out, and their names are
+        returned. They are cached per model, field list and companies for
+        UNREADABLE_FIELDS_TTL; the server runs as one uid, so the key needs no
+        user. An explicit field list does not come here: it keeps the error.
+        ``context`` is the caller's context, used by every read here.
+        """
+        companies = tuple(
+            (context or {}).get("allowed_company_ids") or self.config.allowed_companies or ()
+        )
+        key = (model, tuple(fields) if fields is not None else (), companies)
+        found_at, skipped = self._unreadable_fields.get(key, (0.0, []))
+        if time.monotonic() - found_at > UNREADABLE_FIELDS_TTL:
+            skipped = []
+
+        def every_name() -> List[str]:
+            return fields if fields is not None else list(self.connection.fields_get(model))
+
+        try:
+            to_read = [name for name in every_name() if name not in skipped] if skipped else fields
+            return (
+                read_without_binary_payloads(self.connection, model, ids, to_read, context),
+                skipped,
+            )
+        except OdooValidationFault as e:
+            if e.fault_code != ACCESS_ERROR_FAULT_CODE or not ids:
+                raise
+            error = e
+
+        # A refusal of the record itself (a record rule, a company the user
+        # does not have) fails a read of only "id" too: no field to leave out
+        probe_context = _with_context(context, bin_size=True)
+        try:
+            self.connection.read(model, [ids[0]], ["id"], probe_context)
+        except OdooValidationFault as e:
+            if e.fault_code == ACCESS_ERROR_FAULT_CODE:
+                raise error from None
+            raise
+
+        names = every_name()
+        # Binaries stay out of the probe: on Odoo 20 a read returns their content
+        binary_names = self._binary_field_names(model)
+        probe_names = [name for name in names if name not in binary_names]
+        skipped = self._find_unreadable_fields(model, ids[0], probe_names, probe_context)
+        readable = [name for name in names if name not in skipped]
+        if not skipped or not readable:
+            # Not a field the user cannot read: the record itself, for example
+            raise error
+        self._unreadable_fields[key] = (time.monotonic(), skipped)
+        logger.info(f"Leaving out fields of {model} that the user cannot read: {skipped}")
+        return (
+            read_without_binary_payloads(self.connection, model, ids, readable, context),
+            skipped,
+        )
+
+    def _find_unreadable_fields(
+        self,
+        model: str,
+        record_id: int,
+        names: List[str],
+        context: Dict[str, Any],
+    ) -> List[str]:
+        """The names whose read of one record fails with an AccessError (blocking).
+
+        Halves the list on each failure, so k refused fields among n cost about
+        2·k·log2(n) reads instead of n. One record is enough: the failure comes
+        from model access, not from the record.
+        """
+        if not names:
+            return []
+        try:
+            self.connection.read(model, [record_id], names, context)
+            return []
+        except OdooValidationFault as e:
+            if e.fault_code != ACCESS_ERROR_FAULT_CODE:
+                raise
+        if len(names) == 1:
+            return list(names)
+        middle = len(names) // 2
+        return self._find_unreadable_fields(
+            model, record_id, names[:middle], context
+        ) + self._find_unreadable_fields(model, record_id, names[middle:], context)
+
+    def _check_field_names(self, model: str, names: Iterable[str]) -> None:
+        """Refuse unknown field names before a read or write (blocking).
+
+        Odoo 19 and later answer an unknown field in write() with a bare
+        KeyError, and the Odoo 20 MCP module hides every such error as
+        "Internal server error". fields_get also leaves out the fields the user's groups
+        cannot see, so the message names both causes. Without field metadata
+        the write goes to Odoo unchecked.
+        """
+        try:
+            known = self.connection.fields_get(model)
+        except Exception as e:
+            logger.debug(f"Could not get field metadata for {model}; write unchecked: {e}")
+            return
+        if not isinstance(known, dict) or not known:
+            return
+        unknown = sorted({name for name in names if name not in known})
+        if unknown:
+            raise ValidationError(
+                f"Invalid field {', '.join(repr(name) for name in unknown)} on {model}: "
+                "it does not exist, or this user cannot see it"
+            )
+
+    def _check_aggregate_types(self, model: str, aggregates: List[str]) -> None:
+        """Refuse an aggregate whose function does not fit the field type (blocking).
+
+        Unknown fields and functions are left to Odoo, which refuses them with
+        a clear message.
+        """
+        typed = [
+            spec
+            for spec in aggregates
+            if isinstance(spec, str) and spec.partition(":")[2] in _TYPED_AGGREGATES
+        ]
+        if not typed:
+            return
+        fields_info = self.connection.fields_get(model)
+        for spec in typed:
+            name, _, function = spec.partition(":")
+            field_type = (fields_info.get(name) or {}).get("type")
+            allowed = _TYPED_AGGREGATES[function]
+            if field_type is not None and field_type not in allowed:
+                raise ValidationError(
+                    f"Aggregate '{spec}' needs a field of type {', '.join(allowed)}. "
+                    f"'{name}' is a {field_type} field."
+                )
 
     def _binary_field_names(self, model: str) -> Set[str]:
         """Names of binary/image fields on ``model``.
@@ -666,29 +1252,27 @@ class OdooToolHandler:
         Reads pass ``bin_size=True`` so populated binaries arrive as truthy
         size placeholders (e.g. ``"12.5 KB"``) — the full bytes are fetched
         only on ``resources/read`` of the swapped URI. Empty binaries stay
-        ``False``. ``ir.attachment.datas`` gets the attachment-specific
-        ``odoo://attachment/{id}`` URI so its stored mimetype and
-        ``type='url'`` handling apply on read.
+        ``False``. An ``ir.attachment`` content field (``datas``; ``raw`` and
+        ``db_datas`` on Odoo 20, which removed ``datas``) gets the
+        attachment-specific ``odoo://attachment/{id}`` URI so its stored
+        mimetype and ``type='url'`` handling apply on read.
 
         Only keys already present in ``record`` are touched — a caller that
         requested ``fields=['name', 'type']`` must never gain an unrequested
         ``datas`` key. A ``type='url'`` attachment stores its payload as a
-        URL, so ``datas`` is ``False``; that falsy ``datas`` is still swapped,
-        but only when the record carries BOTH ``type`` and ``datas`` keys and
+        URL, so its content field is ``False``; that falsy value is still
+        swapped, but only when the record carries the ``type`` key and
         ``type == 'url'`` — the attachment resource serves the URL as
         ``text/uri-list``. Empty binary attachments (``type='binary'``,
         ``datas=False``) correctly stay ``False``; when ``type`` was not read,
-        the url-vs-empty split is unknowable, so a falsy ``datas`` is left
+        the url-vs-empty split is unknowable, so a falsy content field is left
         as-is.
         """
         rid = record_id if record_id is not None else record.get("id")
         if not isinstance(rid, int) or rid <= 0:
             return
         url_attachment = (
-            model == "ir.attachment"
-            and "type" in record
-            and "datas" in record
-            and record.get("type") == "url"
+            model == "ir.attachment" and "type" in record and record.get("type") == "url"
         )
         for name in binary_names:
             if name not in record:
@@ -702,7 +1286,11 @@ class OdooToolHandler:
             # for a URI would both drop data the caller explicitly asked for
             # and advertise a URI whose read fails ("Unexpected binary value
             # type: dict"), so any non-string payload passes through untouched.
-            if not (isinstance(value, str) and value) and not (name == "datas" and url_attachment):
+            # The one dict that IS a payload is Odoo 20's {content, size}
+            # shape, which a server without bin_size returns for every
+            # populated binary.
+            is_payload = (isinstance(value, str) and value) or is_binary_payload_dict(value)
+            if not is_payload and not (name in ATTACHMENT_CONTENT_FIELDS and url_attachment):
                 continue
             try:
                 record[name] = build_binary_uri(model, rid, name)
@@ -714,7 +1302,7 @@ class OdooToolHandler:
                 logger.debug(f"No binary URI for {model}.{name}; leaving value unchanged")
 
     def _resolve_related_summaries(
-        self, model: str, record: Dict[str, Any]
+        self, model: str, record: Dict[str, Any], context: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, List[RelatedSummary]]]:
         """Resolve display names for small x2many collections (inline preview).
 
@@ -760,7 +1348,9 @@ class OdooToolHandler:
             attempted += 1
             try:
                 self.access_controller.validate_model_access(relation, "read")
-                related = self.connection.read(relation, ids, ["display_name"])
+                related = self.connection.read(
+                    relation, ids, ["display_name"], **context_kwargs(context)
+                )
             except Exception as e:
                 logger.debug(f"Skipping related summary for {model}.{name}: {e}")
                 continue
@@ -773,26 +1363,50 @@ class OdooToolHandler:
             ]
         return summaries or None
 
-    async def _gate_attachment_target(self, res_model: Any, label: str) -> None:
-        """Refuse an ir.attachment operation aimed at an inaccessible model."""
+    async def _gate_document_target(
+        self, res_model: Any, label: str, operation: str = "read"
+    ) -> None:
+        await asyncio.to_thread(self._check_document_target, res_model, label, operation)
+
+    async def _gate_document_records(
+        self, model: str, record_ids: Sequence[int], operation: str = "read"
+    ) -> None:
+        await asyncio.to_thread(self._check_document_records, model, record_ids, operation)
+
+    async def _gate_document_values(self, model: str, values: Dict[str, Any], verb: str) -> None:
+        await asyncio.to_thread(self._check_document_values, model, values, verb)
+
+    def _check_document_target(self, res_model: Any, label: str, operation: str = "read") -> None:
+        """Refuse an operation on an attachment or message whose owner refuses it (blocking).
+
+        ``operation`` is the one checked on the owner: ``read`` for reads,
+        ``write`` for creating, changing, moving or deleting the row, as Odoo
+        itself requires write access to the document for those.
+        """
         if not res_model or res_model == "ir.attachment":
             return
         try:
-            await asyncio.to_thread(self.access_controller.validate_model_access, res_model, "read")
+            self.access_controller.validate_model_access(res_model, operation)
         except AccessControlUnavailableError:
             # Checked before AccessControlError, its base: "could not verify"
             # is an outage, not a denial, and must stay retryable.
             raise
         except AccessControlError as e:
-            raise MCPPermissionError(
-                f"Access denied: {label} '{res_model}', which is not accessible via MCP"
-            ) from e
+            reason = (
+                "which is not accessible via MCP"
+                if operation == "read"
+                else "which MCP does not allow to be changed"
+            )
+            raise MCPPermissionError(f"Access denied: {label} '{res_model}', {reason}") from e
 
-    async def _gate_attachment_records(self, record_ids: Sequence[int]) -> None:
-        """Refuse ir.attachment rows whose res_model is not accessible.
+    def _check_document_records(
+        self, model: str, record_ids: Sequence[int], operation: str = "read", prefix: str = ""
+    ) -> None:
+        """Refuse rows of a DOCUMENT_LINKS model whose owner refuses ``operation`` (blocking).
 
-        The row carries `url` and `index_content` (the extracted document
-        text), so metadata reads need the same gate the payload readers use.
+        The rows carry more than a payload (an attachment's url and
+        index_content, a message's body), so metadata reads need the same gate
+        the payload readers use.
 
         Applied to WRITES as well as reads. Ungated, `update_record` on an
         attachment could repoint `res_model` from an excluded model to an
@@ -800,19 +1414,259 @@ class OdooToolHandler:
         not merely an inconsistency — while `delete_record` would reach
         documents hanging off models deliberately left out of the allowlist.
         """
-        if not record_ids:
+        if model not in DOCUMENT_LINKS or not record_ids:
             return
-        rows = await asyncio.to_thread(
-            self.connection.search_read,
-            "ir.attachment",
-            [["id", "in", list(record_ids)]],
-            ["res_model"],
-            context={"active_test": False},
+        noun = DOCUMENT_NOUNS.get(model, model)
+        for record_id, owner in document_owners(self.connection, model, record_ids):
+            self._check_document_target(owner, f"{prefix}{noun} {record_id} belongs to", operation)
+
+    def _check_document_values(
+        self, model: str, values: Dict[str, Any], verb: str, prefix: str = ""
+    ) -> None:
+        """Refuse values that would attach a DOCUMENT_LINKS row to a refusing owner (blocking)."""
+        link = DOCUMENT_LINKS.get(model)
+        if not link:
+            return
+        noun = DOCUMENT_NOUNS.get(model, model)
+        if "." in link:
+            # A tracking value or a notification belongs to its message's owner
+            field = link.split(".")[0]
+            if values.get(field):
+                self._check_document_records("mail.message", [values[field]], "write", prefix)
+        elif model == "mail.activity":
+            # res_model is a read-only related field; the owner is set
+            # through res_model_id, an ir.model id
+            model_id = values.get("res_model_id")
+            if model_id:
+                try:
+                    rows = self.connection.search_read(
+                        "ir.model", [["id", "=", model_id]], ["model"]
+                    )
+                except (OdooValidationFault, OdooRequestFault) as e:
+                    raise MCPPermissionError(
+                        f"Access denied: cannot check which model res_model_id {model_id} "
+                        "is, because ir.model is not readable via MCP"
+                    ) from e
+                if rows:
+                    self._check_document_target(
+                        rows[0].get("model"), f"{prefix}{noun} would be {verb}", "write"
+                    )
+        elif link in values:
+            self._check_document_target(values[link], f"{prefix}{noun} would be {verb}", "write")
+
+    def _check_nested_documents(
+        self, comodel: str, field_type: str, command: Sequence[Any], label: str
+    ) -> None:
+        """Owner checks for a nested command on attachments or messages (blocking).
+
+        ``[1, id, {...}]`` and ``[2, id]`` act on the row with that id wherever
+        it belongs, not only on the rows of the parent, so a partner's
+        message_ids could change a message of a model MCP refuses. On a
+        one2many, a link (4), an unlink (3) and a set (6) reparent the rows they
+        name, a move. A nested create or update that names an owner is checked
+        like a top-level one.
+        """
+        op = command[0]
+        ids: List[int] = []
+        if op in (1, 2) or (field_type == "one2many" and op in (3, 4)):
+            if (
+                len(command) > 1
+                and isinstance(command[1], int)
+                and not isinstance(command[1], bool)
+            ):
+                ids = [command[1]]
+        elif op == 6 and field_type == "one2many" and len(command) > 2:
+            if isinstance(command[2], (list, tuple)):
+                ids = [i for i in command[2] if isinstance(i, int) and not isinstance(i, bool)]
+        if ids:
+            self._check_document_records(comodel, ids, "write", f"{label}: ")
+        if op in (0, 1) and len(command) > 2 and isinstance(command[2], dict):
+            verb = "attached to" if op == 0 else "moved to"
+            self._check_document_values(comodel, command[2], verb, f"{label}: ")
+
+    async def _gate_writes(
+        self,
+        model: str,
+        vals_list: Sequence[Dict[str, Any]],
+        record_ids: Sequence[int] = (),
+        paths: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Refuse a create or update that reaches a model MCP refuses.
+
+        The allowlist is checked on the model a tool names. Two things reach
+        other models from there: the owner of an attachment or a message
+        (both the current owner of ``record_ids`` and a new one in the
+        values), and the nested commands in x2many values. ``paths`` names
+        each entry of ``vals_list`` in a refusal (``records[1]``); the
+        default is ``values``. The many2one values are checked in every mode.
+        """
+        labels = list(paths) if paths else ["values"] * len(vals_list)
+        for values, path in zip(vals_list, labels, strict=True):
+            await asyncio.to_thread(self._check_many2one_values, model, values, path)
+        if self.config.is_yolo_enabled:
+            # Every model is open, and the nested walk must not fail closed
+            # where fields_get does not answer
+            return
+        if model in DOCUMENT_LINKS:
+            # Both directions. Gating the CURRENT owner stops the escalation:
+            # repoint an excluded model's row at an allowed one and the read
+            # gate would then wave it through. Gating the NEW owner stops
+            # planting.
+            await self._gate_document_records(model, record_ids, "write")
+            verb = "moved to" if record_ids else "attached to"
+            for values in vals_list:
+                await self._gate_document_values(model, values, verb)
+        for values, path in zip(vals_list, labels, strict=True):
+            await asyncio.to_thread(self._check_nested_writes, model, values, path)
+
+    def _check_many2one_values(self, model: str, values: Dict[str, Any], path: str) -> None:
+        """Refuse a many2one value that is not a record id (blocking).
+
+        Reads return a many2one as ``[id, "name"]``, so a client easily sends
+        that pair, a dict or a name back. Odoo 16 to 18 fail with a database
+        error ("can't adapt type 'list'"), and Odoo 19 empties the field
+        without an error. The values of nested create and update commands are
+        checked the same way. Without field metadata nothing is checked here:
+        the write goes to Odoo, which refuses an unknown field itself.
+        """
+        if all(_plain_scalar(v) for v in values.values()):
+            return
+        try:
+            fields = self.connection.fields_get(model)
+        except Exception as e:
+            logger.debug(f"Could not get field metadata for {model}; values unchecked: {e}")
+            return
+        if not isinstance(fields, dict):
+            return
+        for name, value in values.items():
+            meta = fields.get(name)
+            if not isinstance(meta, dict):
+                continue
+            relation = meta.get("relation")
+            if meta.get("type") == "many2one":
+                if (
+                    value is None
+                    or value is False
+                    or (isinstance(value, int) and not isinstance(value, bool))
+                ):
+                    continue
+                hint = ""
+                if isinstance(value, (list, tuple)) and value and isinstance(value[0], int):
+                    hint = f" Pass {value[0]}, not the [id, name] pair a read returns."
+                elif isinstance(value, dict) and isinstance(value.get("id"), int):
+                    hint = f" Pass {value['id']}."
+                elif isinstance(value, str):
+                    hint = f" Find the id with search_records on {relation} first."
+                raise ValidationError(
+                    f"Invalid value for {path}.{name}: it links to {relation} and takes a "
+                    f"record id or false, got {value!r}.{hint}"
+                )
+            if (
+                meta.get("type") in ("one2many", "many2many")
+                and relation
+                and isinstance(value, (list, tuple))
+            ):
+                for command in value:
+                    if (
+                        isinstance(command, (list, tuple))
+                        and len(command) > 2
+                        and command[0] in (0, 1)
+                        and isinstance(command[2], dict)
+                    ):
+                        self._check_many2one_values(relation, command[2], f"{path}.{name}")
+
+    def _check_nested_writes(self, model: str, values: Dict[str, Any], path: str) -> None:
+        """Refuse x2many commands that act on a model MCP refuses (blocking).
+
+        A write on res.partner with ``user_ids: [[0, 0, {...}]]`` creates a
+        res.users row, and ``[[1, id, {...}]]`` changes one, while the
+        allowlist was only asked about res.partner. Each command is checked as
+        the operation it is on the related model, and the values of a nested
+        create or update are walked the same way. Fails closed: without field
+        metadata the nested commands cannot be checked, so they are refused.
+        """
+        candidates = [
+            (name, value)
+            for name, value in values.items()
+            if isinstance(value, (list, tuple)) and value
+        ]
+        if not candidates:
+            return
+        try:
+            fields = self.connection.fields_get(model)
+        except Exception as e:
+            raise ValidationError(
+                f"Could not check the related records in {path} on {model}: {e}"
+            ) from e
+        for name, commands in candidates:
+            meta = fields.get(name) if isinstance(fields, dict) else None
+            if not isinstance(meta, dict):
+                continue  # An unknown field is refused by _check_field_names
+            field_type = meta.get("type")
+            comodel = meta.get("relation")
+            if field_type not in ("one2many", "many2many") or not comodel:
+                continue
+            for command in commands:
+                if isinstance(command, bool):
+                    continue
+                if isinstance(command, int):
+                    # A plain id list replaces the set. On a one2many that
+                    # reparents the related records, a write on them.
+                    if field_type == "one2many":
+                        self._require_nested(comodel, "write", f"{path}.{name}")
+                        self._check_document_records(
+                            comodel, [command], "write", f"{path}.{name}: "
+                        )
+                    continue
+                if not isinstance(command, (list, tuple)) or not command:
+                    continue
+                for operation in _nested_operations(command[0], field_type):
+                    self._require_nested(
+                        comodel, operation, f"{path}.{name}", removal=command[0] in (3, 5, 6)
+                    )
+                if comodel in DOCUMENT_LINKS:
+                    self._check_nested_documents(comodel, field_type, command, f"{path}.{name}")
+                if command[0] in (0, 1) and len(command) > 2 and isinstance(command[2], dict):
+                    self._check_nested_writes(comodel, command[2], f"{path}.{name}")
+
+    def _require_nested(
+        self, comodel: str, operation: str, label: str, removal: bool = False
+    ) -> None:
+        """Raise MCPPermissionError if ``operation`` on ``comodel`` is refused (blocking)."""
+        try:
+            self.access_controller.validate_model_access(comodel, operation)
+        except AccessControlUnavailableError:
+            raise
+        except AccessControlError as e:
+            verb = "change or delete" if removal else _NESTED_VERBS[operation]
+            reason = str(e).strip().rstrip(".")
+            if reason.lower().startswith("access denied: "):
+                reason = reason[len("access denied: ") :]
+            hint = ""
+            if removal and operation == "unlink":
+                # Only useful when the related record itself can be changed
+                try:
+                    self.access_controller.validate_model_access(comodel, "write")
+                    hint = f" To detach a record, set its own link field on {comodel} instead."
+                except AccessControlUnavailableError:
+                    raise
+                except AccessControlError:
+                    pass
+            raise MCPPermissionError(
+                f"Access denied: {label} would {verb} {comodel} records. {reason}.{hint}"
+            ) from e
+
+    def _check_related_paths(
+        self,
+        model: str,
+        domain: Optional[Sequence[Any]] = None,
+        groupby: Optional[Sequence[str]] = None,
+        order: Optional[str] = None,
+    ) -> None:
+        """See access_control.check_related_paths (blocking)."""
+        check_related_paths(
+            self.connection, self.access_controller, self.config, model, domain, groupby, order
         )
-        for row in rows:
-            await self._gate_attachment_target(
-                row.get("res_model"), f"attachment {row.get('id')} belongs to"
-            )
 
     def _parse_domain_input(self, domain: Optional[Any]) -> List[Any]:
         """Coerce a domain parameter into an Odoo domain list.
@@ -858,7 +1712,9 @@ class OdooToolHandler:
                 ) from e
 
         if not isinstance(parsed, list):
-            raise ValidationError(f"Domain must be a list, got {type(parsed).__name__}")
+            raise ValidationError(
+                f"Domain must be a list, got {type(parsed).__name__}{_double_encoded_hint(parsed)}"
+            )
         _check_xmlrpc_int_bounds(parsed, "domain")
         check_domain_balance(parsed)
 
@@ -866,58 +1722,63 @@ class OdooToolHandler:
         return parsed
 
     async def _ctx_info(self, ctx, message: str):
-        """Send info to MCP client context if available."""
-        if ctx:
-            try:
-                await ctx.info(message)
-            except Exception:
-                logger.debug(f"Failed to send ctx info: {message}")
+        """Log a step message on the server.
+
+        Under mcp 1.x this also reached the client as a log notification.
+        mcp 2.x deprecates client logging (SEP-2577), so the step messages
+        stay in the server log. ``ctx`` is kept for the call sites.
+        """
+        logger.debug(message)
 
     async def _ctx_warning(self, ctx, message: str):
-        """Send warning to MCP client context if available."""
-        if ctx:
-            try:
-                await ctx.warning(message)
-            except Exception:
-                logger.debug(f"Failed to send ctx warning: {message}")
+        """Log a cautionary step message on the server (see ``_ctx_info``)."""
+        logger.info(message)
 
     def _register_tools(self):
-        """Register all tool handlers with FastMCP."""
+        """Register all tool handlers with the MCPServer."""
 
         @self.app.tool(
             title="Search Records",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=True,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
             ),
         )
         async def search_records(
             model: str,
-            domain: Optional[Any] = None,
-            fields: Optional[Any] = None,
+            domain: Domain = None,
+            fields: FieldNames = None,
             limit: Optional[int] = None,
             offset: int = 0,
             order: Optional[str] = None,
+            context: CallContext = None,
             ctx: Optional[Context] = None,
         ) -> SearchResult:
-            """Search for records in an Odoo model.
+            """Search for records in an Odoo model. This is the main read tool.
+
+            To read many known records, pass [["id", "in", ids]] as the domain in
+            one call, not one get_record call per ID. Prefer one call with a
+            larger limit over many small pages. For counts and per-group totals,
+            use aggregate_records.
+
+            Binary fields (images, files) come back as odoo:// URIs; read one with
+            read_attachment.
 
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
                 domain: Odoo domain filter - can be:
                     - A list: [['is_company', '=', True]]
-                    - A JSON string: "[['is_company', '=', true]]"
                     - None: returns all records (default)
+                    The 'any' and 'not any' sub-domain operators need Odoo 17+.
                 fields: Field selection options - can be:
                     - None (default): Returns smart selection of common fields
                     - A list: ["field1", "field2", ...] - Returns only specified fields
-                    - A JSON string: '["field1", "field2"]' - Parsed to list
                     - An empty list []: Treated like None (smart defaults)
-                    - ["__all__"] or '["__all__"]': Returns ALL fields (warning: may be slow)
-                limit: Maximum number of records to return. Omit to use the
-                    server-configured default (ODOO_MCP_DEFAULT_LIMIT). Capped
+                    - ["__all__"]: Returns ALL fields (warning: may be slow)
+                limit: Maximum number of records to return. Omit it or pass 0
+                    for the server-configured default (ODOO_MCP_DEFAULT_LIMIT). Capped
                     at ODOO_MCP_MAX_LIMIT.
                 offset: Number of records to skip (capped at 1000 pages of
                     `limit`, min 10000 — narrow the domain or use `order`
@@ -928,29 +1789,32 @@ class OdooToolHandler:
                 Search results with records, total count, and pagination info
             """
             result = await self._handle_search_tool(
-                model, domain, fields, limit, offset, order, ctx
+                model, domain, fields, limit, offset, order, ctx, context=context
             )
             return SearchResult(**result)
 
         @self.app.tool(
             title="Get Record",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def get_record(
             model: str,
-            record_id: int,
+            record_id: RecordId,
             fields: Optional[List[str]] = None,
+            context: CallContext = None,
             ctx: Optional[Context] = None,
         ) -> RecordResult:
             """Get a specific record by ID with smart field selection.
 
             This tool supports selective field retrieval to optimize performance and response size.
             By default, returns a smart selection of commonly-used fields based on the model's field metadata.
+            Binary fields (images, files) come back as odoo:// URIs; read one with read_attachment.
+            To read several records, use search_records with [["id", "in", ids]] in one call.
 
             Args:
                 model: The Odoo model name (e.g., 'res.partner')
@@ -962,8 +1826,8 @@ class OdooToolHandler:
                     - ["__all__"]: Returns ALL fields (warning: can be very large)
 
             Workflow for field discovery:
-            1. To see all available fields for a model, use the resource:
-               read("odoo://res.partner/fields")
+            1. To see the fields of a model, call get_fields:
+               get_fields("res.partner")
             2. Then request specific fields:
                get_record("res.partner", 1, fields=["name", "email", "phone"])
 
@@ -981,15 +1845,17 @@ class OdooToolHandler:
                 Record data with requested fields. When using smart defaults,
                 includes metadata with field statistics.
             """
-            return await self._handle_get_record_tool(model, record_id, fields, ctx)
+            return await self._handle_get_record_tool(
+                model, record_id, fields, ctx, context=context
+            )
 
         @self.app.tool(
             title="Get Fields",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def get_fields(
@@ -1004,9 +1870,12 @@ class OdooToolHandler:
 
             Args:
                 model: Technical model name (e.g. 'res.partner').
-                field_names: Restrict the result to these field names.
-                    Omit to describe every field on the model. An empty
-                    list [] is treated like omitting it (all fields).
+                field_names: Restrict the result to these field names, or
+                    ["__all__"] for every field on the model. Omit for the
+                    60 most relevant value fields (many2one included) plus
+                    every one2many, many2many, file and HTML field, with
+                    selection lists cut at 20 values;
+                    an empty list [] is treated like omitting it.
                 attributes: Which field attributes to return. Omit for the
                     curated default set (type, string, required, readonly,
                     relation, selection); an empty list [] is treated like
@@ -1022,10 +1891,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="Get Current Context",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def get_current_context(ctx: Optional[Context] = None) -> CurrentContextResult:
@@ -1045,14 +1914,18 @@ class OdooToolHandler:
         @self.app.tool(
             title="List Models",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def list_models(ctx: Optional[Context] = None) -> ModelsResult:
             """List all models enabled for MCP access with their allowed operations.
+
+            In YOLO mode every model is listed; Odoo 19 and later leave out the
+            abstract ones, earlier versions list mixins too. The allowed
+            operations, the same for every model, are in yolo_mode.operations.
 
             Returns:
                 List of models with their technical names, display names,
@@ -1064,10 +1937,10 @@ class OdooToolHandler:
         @self.app.tool(
             title="List Resource Templates",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=False,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
             ),
         )
         async def list_resource_templates(ctx: Optional[Context] = None) -> ResourceTemplatesResult:
@@ -1086,15 +1959,16 @@ class OdooToolHandler:
         @self.app.tool(
             title="Create Record",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=False,
-                openWorldHint=True,
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=True,
             ),
         )
         async def create_record(
             model: str,
             values: Dict[str, Any],
+            context: CallContext = None,
             ctx: Optional[Context] = None,
         ) -> CreateResult:
             """Create a new record in an Odoo model.
@@ -1106,22 +1980,54 @@ class OdooToolHandler:
             Returns:
                 Created record details with ID, URL, and confirmation.
             """
-            result = await self._handle_create_record_tool(model, values, ctx)
+            result = await self._handle_create_record_tool(model, values, ctx, context=context)
             return CreateResult(**result)
+
+        @self.app.tool(
+            title="Create Records (Bulk)",
+            annotations=ToolAnnotations(
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=True,
+            ),
+        )
+        async def create_records(
+            model: str,
+            records: List[Dict[str, Any]],
+            context: CallContext = None,
+            ctx: Optional[Context] = None,
+        ) -> BulkCreateResult:
+            """Create several records of the same model in one call.
+
+            Use this instead of calling create_record in a loop: one RPC
+            round-trip and one transaction, so either every record is created
+            or none is. At most 100 records per call; split larger batches.
+
+            Args:
+                model: The Odoo model name (e.g., 'res.partner')
+                records: Field values of each new record (max 100)
+
+            Returns:
+                id, display_name and url of each created record, in input order.
+            """
+            result = await self._handle_create_records_tool(model, records, ctx, context=context)
+            return BulkCreateResult(**result)
 
         @self.app.tool(
             title="Update Record",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=True,
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
             ),
         )
         async def update_record(
             model: str,
-            record_id: int,
+            record_id: RecordId,
             values: Dict[str, Any],
+            context: CallContext = None,
             ctx: Optional[Context] = None,
         ) -> UpdateResult:
             """Update an existing record.
@@ -1134,21 +2040,78 @@ class OdooToolHandler:
             Returns:
                 Updated record details with confirmation.
             """
-            result = await self._handle_update_record_tool(model, record_id, values, ctx)
+            result = await self._handle_update_record_tool(
+                model, record_id, values, ctx, context=context
+            )
             return UpdateResult(**result)
+
+        @self.app.tool(
+            title="Update Records (Bulk)",
+            annotations=ToolAnnotations(
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
+            ),
+        )
+        async def update_records(
+            model: str,
+            record_ids: Optional[List[RecordId]] = None,
+            values: Optional[Dict[str, Any]] = None,
+            updates: Optional[List[Dict[str, Any]]] = None,
+            context: CallContext = None,
+            ctx: Optional[Context] = None,
+        ) -> BulkUpdateResult:
+            """Update several existing records of the same model in one call.
+
+            Use this instead of calling update_record in a loop — one RPC
+            round-trip instead of N. Use exactly one of the two forms:
+
+            - record_ids + values: apply the same values to every record.
+            - updates: [{"id": 7, "values": {...}}, ...] — different values per
+              record, written in one transaction (Odoo 19 and later; in
+              standard mode only if the Odoo MCP module allows it).
+
+            Capped at 100 distinct records per call; for larger batches, split
+            into multiple update_records calls. Archived records can be updated
+            (e.g. values={"active": true}).
+
+            Args:
+                model: The Odoo model name (e.g., 'res.partner')
+                record_ids: The record IDs to update (max 100), with values
+                values: Field values to apply to every record in record_ids
+                updates: Per-record values, each {"id": <int>, "values": {...}}
+
+            Returns:
+                Updated record details (id, display_name) for every record,
+                with confirmation.
+            """
+            if updates is not None:
+                if record_ids is not None or values is not None:
+                    raise ValidationError("Use either record_ids with values, or updates, not both")
+                result = await self._handle_update_records_each_tool(
+                    model, updates, ctx, context=context
+                )
+            else:
+                if record_ids is None or values is None:
+                    raise ValidationError("Provide record_ids with values, or updates")
+                result = await self._handle_update_records_tool(
+                    model, record_ids, values, ctx, context=context
+                )
+            return BulkUpdateResult(**result)
 
         @self.app.tool(
             title="Delete Record",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=True,
-                idempotentHint=False,
-                openWorldHint=False,
+                read_only_hint=False,
+                destructive_hint=True,
+                idempotent_hint=False,
+                open_world_hint=False,
             ),
         )
         async def delete_record(
             model: str,
-            record_id: int,
+            record_id: RecordId,
             ctx: Optional[Context] = None,
         ) -> DeleteResult:
             """Delete a record.
@@ -1166,18 +2129,20 @@ class OdooToolHandler:
         @self.app.tool(
             title="Post Message",
             annotations=ToolAnnotations(
-                readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=False,
-                openWorldHint=True,
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=True,
             ),
         )
         async def post_message(
             model: str,
-            record_id: int,
+            record_id: RecordId,
             body: str,
-            subtype: Literal["note", "comment"] = "note",
-            message_type: Literal["comment", "notification"] = "comment",
+            subtype: Annotated[Literal["note", "comment"], BeforeValidator(_lower_case)] = "note",
+            message_type: Annotated[
+                Literal["comment", "notification"], BeforeValidator(_lower_case)
+            ] = "comment",
             partner_ids: Optional[List[int]] = None,
             attachment_ids: Optional[List[int]] = None,
             body_is_html: bool = False,
@@ -1187,8 +2152,8 @@ class OdooToolHandler:
             """Post a message to an Odoo record's chatter (mail.thread).
 
             ``subtype="note"`` (default) is an internal log; ``subtype="comment"``
-            notifies followers. Set ``body_is_html=True`` for HTML markup
-            (Odoo 17+ escapes str bodies otherwise).
+            notifies followers. Set ``body_is_html=True`` for HTML markup;
+            otherwise the body is plain text and its markup is escaped.
 
             Args:
                 model: Odoo model name (e.g., 'res.partner')
@@ -1198,7 +2163,7 @@ class OdooToolHandler:
                 message_type: 'comment' (default) or 'notification'
                 partner_ids: Optional list of res.partner IDs to additionally notify
                 attachment_ids: Optional list of existing ir.attachment IDs to link
-                body_is_html: Treat body as HTML rather than plain text (Odoo 17+)
+                body_is_html: Treat body as HTML rather than plain text
                 subject: Optional message subject line
 
             Returns:
@@ -1219,22 +2184,128 @@ class OdooToolHandler:
             return PostMessageResult(**result)
 
         @self.app.tool(
+            title="Read Attachment",
+            annotations=ToolAnnotations(
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
+            ),
+        )
+        async def read_attachment(
+            uri: Optional[str] = None,
+            attachment_id: Optional[RecordId] = None,
+            ctx: Optional[Context] = None,
+        ) -> Annotated[CallToolResult, ReadAttachmentResult]:
+            """Read a file: an attachment, or a binary field such as an image.
+
+            Pass exactly one of uri or attachment_id. The uri is an odoo://
+            URI from a tool result: odoo://attachment/{id} or
+            odoo://{model}/record/{id}/{field}. What comes back depends on
+            the file:
+
+            - text files up to 1 MB: their text, cut at 100,000 characters
+            - PDF and Office files: the text Odoo extracted from them (only
+              with Odoo's attachment_indexation module), else a download link
+            - PNG, JPEG, GIF and WebP images up to 256 KB: the image itself
+            - anything else: a download link for a person logged in to Odoo
+
+            Args:
+                uri: odoo:// URI of the file
+                attachment_id: ID of an ir.attachment
+
+            Returns:
+                The file's text or image, or a download link.
+            """
+            return await self._handle_read_attachment_tool(uri, attachment_id, ctx)
+
+        @self.app.tool(
+            title="List Record Attachments",
+            annotations=ToolAnnotations(
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
+            ),
+        )
+        async def list_record_attachments(
+            model: str,
+            record_id: RecordId,
+            ctx: Optional[Context] = None,
+        ) -> AttachmentListResult:
+            """List the files attached to a record, newest first.
+
+            Each entry carries an odoo://attachment/{id} URI that serves the
+            file. Files behind binary fields (e.g. image_1920) are not listed;
+            get_record returns those as URIs.
+
+            Args:
+                model: The model of the record (e.g., 'res.partner')
+                record_id: The record whose attachments to list
+
+            Returns:
+                id, name, mimetype, size, type, create_date and uri of each file.
+            """
+            result = await self._handle_list_record_attachments_tool(model, record_id, ctx)
+            return AttachmentListResult(**result)
+
+        @self.app.tool(
+            title="Upload Attachment",
+            annotations=ToolAnnotations(
+                read_only_hint=False,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=True,
+            ),
+        )
+        async def upload_attachment(
+            model: str,
+            record_id: RecordId,
+            name: str,
+            data: str,
+            mimetype: Optional[str] = None,
+            ctx: Optional[Context] = None,
+        ) -> UploadAttachmentResult:
+            """Attach a file to a record (an ir.attachment on it).
+
+            The file must be plain base64 (no "data:..." prefix), at most about
+            2.9 MB after decoding. Odoo detects the mimetype from the content
+            when it is not given. To show the file in the record's chatter,
+            pass the returned attachment_id to post_message(attachment_ids=...).
+
+            Args:
+                model: The model of the record (e.g., 'res.partner')
+                record_id: The record to attach the file to
+                name: File name, e.g. 'contract.pdf'
+                data: File content, base64-encoded
+                mimetype: Optional mimetype, e.g. 'application/pdf'
+
+            Returns:
+                The new attachment's id and its odoo://attachment/{id} URI.
+            """
+            result = await self._handle_upload_attachment_tool(
+                model, record_id, name, data, mimetype, ctx
+            )
+            return UploadAttachmentResult(**result)
+
+        @self.app.tool(
             title="Aggregate Records",
             annotations=ToolAnnotations(
-                readOnlyHint=True,
-                destructiveHint=False,
-                idempotentHint=True,
-                openWorldHint=True,
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
             ),
         )
         async def aggregate_records(
             model: str,
-            groupby: Optional[List[str]] = None,
-            aggregates: Optional[List[str]] = None,
-            domain: Optional[Any] = None,
+            groupby: StringList = None,
+            aggregates: StringList = None,
+            domain: Domain = None,
             order: Optional[str] = None,
             limit: Optional[int] = None,
             offset: int = 0,
+            context: CallContext = None,
             ctx: Optional[Context] = None,
         ) -> AggregateResult:
             """Aggregate records server-side via Odoo's grouping methods.
@@ -1261,13 +2332,17 @@ class OdooToolHandler:
                     Examples: ``["amount_total:sum"]``, ``["__count"]``.
                     ``["id:count"]`` works on Odoo 17+ only — use
                     ``__count`` for a row count on every version.
+                    Before Odoo 19, only one aggregate per field (not both
+                    ``amount_total:sum`` and ``amount_total:avg``).
                     If omitted or empty, defaults to ``["__count"]`` so each
                     group carries a count. Pass ``["__count", "amount_total:sum"]``
                     to get both.
-                domain: Odoo domain filter — list, JSON string, or None.
+                domain: Odoo domain filter, a list, or None for every record.
+                    The 'any' and 'not any' sub-domain operators need Odoo 17+.
                 order: Sort expression over groupby keys / aggregates,
                     e.g. ``"date_order:month"`` or ``"amount_total:sum desc"``.
-                limit: Maximum number of groups. Defaults to
+                    Odoo 16 cannot order by ``__count``.
+                limit: Maximum number of groups. Omitted or 0, it is
                     ``ODOO_MCP_DEFAULT_LIMIT``; capped at ``ODOO_MCP_MAX_LIMIT``.
                 offset: Number of groups to skip (capped at 1000 pages of
                     ``limit``, min 10000).
@@ -1302,7 +2377,7 @@ class OdooToolHandler:
                 aggregate_records("res.partner", domain=[["is_company", "=", True]])
             """
             result = await self._handle_aggregate_records_tool(
-                model, groupby, aggregates, domain, order, limit, offset, ctx
+                model, groupby, aggregates, domain, order, limit, offset, ctx, context=context
             )
             return AggregateResult(**result)
 
@@ -1313,17 +2388,17 @@ class OdooToolHandler:
             @self.app.tool(
                 title="Call Model Method",
                 annotations=ToolAnnotations(
-                    readOnlyHint=False,
-                    destructiveHint=True,
-                    idempotentHint=False,
-                    openWorldHint=True,
+                    read_only_hint=False,
+                    destructive_hint=True,
+                    idempotent_hint=False,
+                    open_world_hint=True,
                 ),
             )
             async def call_model_method(
                 model: str,
                 method: str,
-                arguments: Optional[Union[List[Any], str]] = None,
-                keyword_arguments: Optional[Union[Dict[str, Any], str]] = None,
+                arguments: ArgumentList = None,
+                keyword_arguments: KeywordArguments = None,
                 ctx: Optional[Context] = None,
             ) -> CallModelMethodResult:
                 """Call a public Odoo model method via XML-RPC execute_kw.
@@ -1346,11 +2421,13 @@ class OdooToolHandler:
                     model: Technical model name (e.g. ``account.move``).
                     method: Public Python identifier. Dotted, dashed, whitespace,
                         and ``_``-prefixed names are rejected.
-                    arguments: Positional argument list for ``execute_kw``, as a
-                        list or JSON-string. For recordset methods, the first
+                    arguments: Positional argument list for ``execute_kw``.
+                        For recordset methods, the first
                         element is typically the list of ids: ``[[42]]`` runs on
-                        id 42. Defaults to ``[]``.
-                    keyword_arguments: Optional dict (or JSON-object string) of
+                        id 42. Defaults to ``[]``. Over JSON-2 it can hold only
+                        that id list; pass every other argument in
+                        keyword_arguments, by parameter name.
+                    keyword_arguments: Optional dict of
                         keyword arguments for ``execute_kw`` (e.g. ``{"context": {...}}``).
 
                 Returns:
@@ -1374,6 +2451,7 @@ class OdooToolHandler:
         offset: int,
         order: Optional[str],
         ctx=None,
+        context: Any = None,
     ) -> Dict[str, Any]:
         """Handle search tool request."""
         try:
@@ -1384,20 +2462,25 @@ class OdooToolHandler:
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
+                call_context = await asyncio.to_thread(self._call_context, context)
                 parsed_domain = self._parse_domain_input(domain)
-                if model == "ir.attachment":
-                    # Scope to accessible res_models — an attachment row
-                    # carries url and index_content (the extracted document
-                    # text), so the allowlist gate must cover metadata, not
-                    # only payloads. Appended, not prefixed with an explicit
-                    # "&": Odoo normalizes a flat sequence of expressions
+                self._check_domain_operators(parsed_domain)
+                await asyncio.to_thread(
+                    self._check_related_paths, model, parsed_domain, None, order
+                )
+                if model in DOCUMENT_LINKS:
+                    # Scope to accessible owners: an attachment row carries
+                    # url and index_content (the extracted document text), a
+                    # message its body, so the allowlist gate must cover
+                    # metadata, not only payloads. Appended, not prefixed with
+                    # an explicit "&": Odoo normalizes a flat sequence of expressions
                     # with implicit ANDs, whereas a hand-written "&" would
                     # bind only the first term of a multi-leaf domain. That
                     # normalization only holds for a balanced caller domain,
                     # which _parse_domain_input has already enforced — an
                     # unbalanced one would capture this scope as an operand.
                     scope = await asyncio.to_thread(
-                        attachment_scope_domain, self.config, self.access_controller
+                        document_scope_domain, model, self.config, self.access_controller
                     )
                     if scope:
                         parsed_domain = list(parsed_domain) + scope
@@ -1412,6 +2495,7 @@ class OdooToolHandler:
                         if not isinstance(parsed_fields, list):
                             raise ValidationError(
                                 f"Fields must be a list, got {type(parsed_fields).__name__}"
+                                f"{_double_encoded_hint(parsed_fields)}"
                             )
                     except (json.JSONDecodeError, RecursionError):
                         # RecursionError: see _parse_domain_input — deeply
@@ -1424,6 +2508,7 @@ class OdooToolHandler:
                             if not isinstance(parsed_fields, list):
                                 raise ValidationError(
                                     f"Fields must be a list, got {type(parsed_fields).__name__}"
+                                    f"{_double_encoded_hint(parsed_fields)}"
                                 )
                         except (ValueError, SyntaxError, RecursionError) as e:
                             raise ValidationError(
@@ -1431,7 +2516,9 @@ class OdooToolHandler:
                             ) from e
 
                 # Set defaults
-                if limit is None or limit <= 0:
+                if limit is not None and limit < 0:
+                    raise ValidationError(f"limit must be 0 or more, got {limit}")
+                if not limit:
                     limit = self.config.default_limit
                 elif limit > self.config.max_limit:
                     limit = self.config.max_limit
@@ -1439,6 +2526,9 @@ class OdooToolHandler:
                 _validate_offset(offset, limit)
 
                 # Search for records
+                # The call context goes to the search, the count and the read:
+                # allowed_company_ids changes which records the rules let
+                # through, so total must count the same set as the page
                 record_ids = await asyncio.to_thread(
                     self.connection.search,
                     model,
@@ -1446,6 +2536,7 @@ class OdooToolHandler:
                     limit=limit,
                     offset=offset,
                     order=order,
+                    **context_kwargs(call_context),
                 )
 
                 # Always count. Inferring "a short page holds every match"
@@ -1456,7 +2547,10 @@ class OdooToolHandler:
                 # stopped pagination early; search_count returns the true
                 # accessible count (verified: 86 == len(unlimited search)).
                 total_count = await asyncio.to_thread(
-                    self.connection.search_count, model, parsed_domain
+                    self.connection.search_count,
+                    model,
+                    parsed_domain,
+                    **context_kwargs(call_context),
                 )
                 # No progress notifications — see CLAUDE.md "MCP context conventions".
                 await self._ctx_info(ctx, f"Found {total_count} records")
@@ -1485,19 +2579,29 @@ class OdooToolHandler:
                     )
                     logger.debug(f"Fetching all fields for {model} search")
 
-                # Read records. bin_size: binary fields come back as size
-                # placeholders instead of full base64 blobs — populated ones
-                # are swapped for odoo:// resource URIs below.
+                # Read records without binary payloads (see read_without_binary_payloads);
+                # populated binaries are swapped for odoo:// URIs below.
                 records = []
                 withheld_fields: Set[str] = set()
+                skipped_fields: List[str] = []
+                explicit_fields = bool(parsed_fields) and parsed_fields != ["__all__"]
+                if explicit_fields:
+                    await asyncio.to_thread(self._check_field_names, model, parsed_fields)
                 if record_ids:
-                    records = await asyncio.to_thread(
-                        self.connection.read,
-                        model,
-                        record_ids,
-                        fields_to_fetch,
-                        {"bin_size": True},
-                    )
+                    if explicit_fields:
+                        # An explicit field list keeps an AccessError
+                        records = await asyncio.to_thread(
+                            read_without_binary_payloads,
+                            self.connection,
+                            model,
+                            record_ids,
+                            fields_to_fetch,
+                            call_context,
+                        )
+                    else:
+                        records, skipped_fields = await asyncio.to_thread(
+                            self._read_bulk, model, record_ids, fields_to_fetch, call_context
+                        )
                     if fields_to_fetch is None:
                         # Bulk all-fields read (["__all__"] or smart-default
                         # fallback): strip credential-like fields; an explicit
@@ -1517,6 +2621,7 @@ class OdooToolHandler:
                     if binary_names:
                         for record in records:
                             self._replace_binary_values(model, record, binary_names)
+                    await asyncio.to_thread(scrub_json_fields, self.connection, model, records)
                     # Process datetime fields in each record
                     records = await asyncio.to_thread(
                         lambda: [self._process_record_dates(record, model) for record in records]
@@ -1525,15 +2630,19 @@ class OdooToolHandler:
                     records = [_json_safe(record) for record in records]
                 await self._ctx_info(ctx, f"Returning {len(records)} records")
 
+                notes = []
+                if withheld_fields:
+                    notes.append(_withheld_fields_note(sorted(withheld_fields)))
+                if skipped_fields:
+                    notes.append(_skipped_fields_note(skipped_fields))
                 return {
                     "records": records,
                     "total": total_count,
                     "limit": limit,
                     "offset": offset,
                     "model": model,
-                    "note": (
-                        _withheld_fields_note(sorted(withheld_fields)) if withheld_fields else None
-                    ),
+                    "note": " ".join(notes) or None,
+                    "skipped_fields": skipped_fields or None,
                 }
 
         except ValidationError:
@@ -1542,7 +2651,7 @@ class OdooToolHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise ValidationError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             raise ValidationError(f"Connection error: {e}") from e
@@ -1557,6 +2666,7 @@ class OdooToolHandler:
         record_id: int,
         fields: Optional[List[str]],
         ctx=None,
+        context: Any = None,
     ) -> RecordResult:
         """Handle get record tool request."""
         try:
@@ -1564,8 +2674,8 @@ class OdooToolHandler:
                 _validate_record_id(record_id)
 
                 await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
-                if model == "ir.attachment":
-                    await self._gate_attachment_records([record_id])
+                call_context = await asyncio.to_thread(self._call_context, context)
+                await self._gate_document_records(model, [record_id])
                 await self._ctx_info(ctx, f"Getting {model}/{record_id}...")
 
                 if not self.connection.is_authenticated:
@@ -1606,13 +2716,25 @@ class OdooToolHandler:
                 else:
                     # Specific fields requested
                     logger.debug(f"Fetching specific fields for {model}: {fields}")
+                    await asyncio.to_thread(self._check_field_names, model, fields)
 
-                # Read the record. bin_size: binary fields come back as size
-                # placeholders instead of full base64 blobs — populated ones
-                # are swapped for odoo:// resource URIs below.
-                records = await asyncio.to_thread(
-                    self.connection.read, model, [record_id], fields_to_fetch, {"bin_size": True}
-                )
+                # Read the record without binary payloads (see read_without_binary_payloads);
+                # populated binaries are swapped for odoo:// URIs below.
+                # An explicit field list keeps an AccessError.
+                skipped_fields: List[str] = []
+                if field_selection_method == "explicit":
+                    records = await asyncio.to_thread(
+                        read_without_binary_payloads,
+                        self.connection,
+                        model,
+                        [record_id],
+                        fields_to_fetch,
+                        call_context,
+                    )
+                else:
+                    records, skipped_fields = await asyncio.to_thread(
+                        self._read_bulk, model, [record_id], fields_to_fetch, call_context
+                    )
 
                 if not records:
                     raise ValidationError(f"Record not found: {model} with ID {record_id}")
@@ -1630,11 +2752,12 @@ class OdooToolHandler:
                 binary_names = await asyncio.to_thread(self._binary_field_names, model)
                 if binary_names:
                     self._replace_binary_values(model, record, binary_names, record_id=record_id)
+                await asyncio.to_thread(scrub_json_fields, self.connection, model, [record])
 
                 # Inline preview: resolve display names for small x2many
                 # collections (ids in the record stay untouched)
                 related_summaries = await asyncio.to_thread(
-                    self._resolve_related_summaries, model, record
+                    self._resolve_related_summaries, model, record, call_context
                 )
 
                 # Process datetime fields in the record
@@ -1661,7 +2784,7 @@ class OdooToolHandler:
                     if field_selection_method == "all_fields_fallback":
                         note = "All fields returned (smart field selection unavailable)."
                     else:
-                        note = f"Limited fields returned for performance. Use fields=['__all__'] for all fields or see odoo://{model}/fields for available fields."
+                        note = "Limited fields returned for performance. Use fields=['__all__'] for all fields or get_fields for the available fields."
                     metadata = FieldSelectionMetadata(
                         fields_returned=len(record),
                         field_selection_method=field_selection_method,
@@ -1669,12 +2792,19 @@ class OdooToolHandler:
                         note=note,
                     )
 
-                # Surface withheld credential-like fields (bulk paths only).
-                # Local name deliberately differs from the module-level
-                # field_security.withheld_note import — shadowing it here
-                # would hide the helper for the rest of this function.
-                if withheld_fields:
-                    withheld_message = _withheld_fields_note(withheld_fields)
+                # Surface withheld credential-like fields and refused fields
+                # (bulk paths only). Local name deliberately differs from the
+                # module-level field_security.withheld_note import — shadowing
+                # it here would hide the helper for the rest of this function.
+                withheld_message = " ".join(
+                    note
+                    for note in (
+                        _withheld_fields_note(withheld_fields) if withheld_fields else "",
+                        _skipped_fields_note(skipped_fields) if skipped_fields else "",
+                    )
+                    if note
+                )
+                if withheld_message:
                     if metadata is not None:
                         metadata.note = (
                             f"{metadata.note} {withheld_message}"
@@ -1690,7 +2820,10 @@ class OdooToolHandler:
                         )
 
                 return RecordResult(
-                    record=record, metadata=metadata, related_summaries=related_summaries
+                    record=record,
+                    metadata=metadata,
+                    related_summaries=related_summaries,
+                    skipped_fields=skipped_fields or None,
                 )
 
         except ValidationError:
@@ -1698,7 +2831,7 @@ class OdooToolHandler:
         except NotFoundError as e:
             raise ValidationError(str(e)) from e
         except MCPPermissionError as e:
-            # _gate_attachment_records' denial. Without this it would reach the
+            # _gate_document_records' denial. Without this it would reach the
             # generic handler below: logged as an unexpected failure and its
             # actionable "belongs to <model>" text replaced by a generic one.
             raise ValidationError(str(e)) from e
@@ -1706,7 +2839,7 @@ class OdooToolHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise ValidationError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             raise ValidationError(f"Connection error: {e}") from e
@@ -1738,21 +2871,70 @@ class OdooToolHandler:
                 selected_attributes = (
                     list(attributes) if attributes else list(CURATED_FIELD_ATTRIBUTES)
                 )
+                show_all = bool(field_names) and "__all__" in field_names
+                explicit_names = list(field_names) if field_names and not show_all else None
+                curated = not explicit_names and not show_all
+                request_attributes = selected_attributes
+                if curated:
+                    request_attributes = selected_attributes + [
+                        a for a in _SCHEMA_SCORING_ATTRIBUTES if a not in selected_attributes
+                    ]
                 # field_names go server-side as fields_get's allfields
-                # filter; unknown names are silently omitted by Odoo
-                # ([] ≡ omitted here too: no filter, every field returned).
+                # filter; unknown names are silently omitted by Odoo.
                 fields_metadata = await asyncio.to_thread(
-                    self.connection.fields_get,
-                    model,
-                    selected_attributes,
-                    list(field_names) if field_names else None,
+                    self.connection.fields_get, model, request_attributes, explicit_names
                 )
+
+                omitted = 0
+                capped = False
+                if curated:
+                    keep = set(self._schema_default_fields(fields_metadata))
+                    omitted = len(fields_metadata) - len(keep)
+                    fields_metadata = {
+                        name: {k: v for k, v in meta.items() if k in selected_attributes}
+                        for name, meta in fields_metadata.items()
+                        if name in keep
+                    }
+                    for meta in fields_metadata.values():
+                        selection = meta.get("selection")
+                        if selection and len(selection) > SELECTION_OPTIONS_CAP:
+                            meta["selection_more"] = len(selection) - SELECTION_OPTIONS_CAP
+                            meta["selection"] = selection[:SELECTION_OPTIONS_CAP]
+                            capped = True
 
                 fields = [
                     FieldInfo(**{"name": name, **meta})
                     for name, meta in sorted(fields_metadata.items())
                 ]
-                return FieldsResult(model=model, fields=fields, total=len(fields))
+                notes = []
+                if omitted:
+                    notes.append(
+                        f"Showing {len(fields)} of {len(fields) + omitted} "
+                        'fields. Pass field_names=[...] for specific fields or ["__all__"] '
+                        "for the complete schema."
+                    )
+                if capped:
+                    notes.append(
+                        f"Selection lists over {SELECTION_OPTIONS_CAP} values are cut "
+                        "(see selection_more); name the field in field_names to get every value."
+                    )
+                # Odoo leaves out unknown names and attributes without a word
+                unknown = [n for n in explicit_names or [] if n not in fields_metadata]
+                if unknown:
+                    notes.append(f"{model} has no field named {', '.join(unknown)}.")
+                if attributes and fields_metadata:
+                    absent = [
+                        a for a in attributes if not any(a in m for m in fields_metadata.values())
+                    ]
+                    if absent:
+                        notes.append(f"No field has the attribute {', '.join(absent)}.")
+                return FieldsResult(
+                    model=model,
+                    fields=fields,
+                    total=len(fields),
+                    omitted=omitted or None,
+                    note=" ".join(notes) or None,
+                )
 
         except ValidationError:
             raise
@@ -1760,7 +2942,7 @@ class OdooToolHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise ValidationError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             raise ValidationError(f"Connection error: {e}") from e
@@ -1782,7 +2964,9 @@ class OdooToolHandler:
         with perf_logger.track_operation("tool_get_current_context"):
             await self._ctx_info(ctx, "Reading current session context...")
             try:
-                data = await asyncio.to_thread(get_user_context_data, self.connection)
+                data = await asyncio.to_thread(
+                    get_user_context_data, self.connection, self.config.allowed_companies
+                )
             except Exception as e:
                 logger.warning(f"Could not read user context, returning UTC guidance only: {e}")
                 return CurrentContextResult(text=context_unavailable_text(str(e)))
@@ -1811,6 +2995,10 @@ class OdooToolHandler:
                         domain = [
                             "&",
                             ("transient", "=", False),
+                            "&",
+                            # Abstract models hold no records; Odoo 19 and later
+                            # flag them, earlier versions only by name
+                            ("model", "not in", ["base", "_unknown"]),
                             "|",
                             (
                                 "model",
@@ -1839,6 +3027,12 @@ class OdooToolHandler:
                             "!",
                             ("model", "=like", "base.%"),
                         ]
+
+                        ir_model_fields = await asyncio.to_thread(
+                            self.connection.fields_get, "ir.model"
+                        )
+                        if "abstract" in ir_model_fields:
+                            domain = ["&", ("abstract", "=", False), *domain]
 
                         # Query models from database, capped at
                         # MAX_LISTED_MODELS (context-flood guard for
@@ -1889,7 +3083,7 @@ class OdooToolHandler:
                             "enabled": True,
                             "level": self.config.yolo_mode,  # "read" or "true"
                             "description": mode_desc,
-                            "warning": "🚨 All models accessible without MCP security!",
+                            "warning": "All models are accessible without MCP security.",
                             "operations": yolo_operations,
                         }
 
@@ -2050,7 +3244,7 @@ class OdooToolHandler:
                 },
                 {
                     "uri_template": "odoo://{model}/search",
-                    "description": "Search records with default settings (first 10 records)",
+                    "description": "Search records with default settings (the first ODOO_MCP_DEFAULT_LIMIT records, 25 by default)",
                     "parameters": {
                         "model": "Odoo model name",
                     },
@@ -2122,6 +3316,7 @@ class OdooToolHandler:
         model: str,
         values: Dict[str, Any],
         ctx=None,
+        context: Any = None,
     ) -> Dict[str, Any]:
         """Handle create record tool request."""
         try:
@@ -2133,6 +3328,7 @@ class OdooToolHandler:
 
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
+                call_context = await asyncio.to_thread(self._call_context, context)
 
                 # Validate required fields
                 if not values:
@@ -2143,22 +3339,25 @@ class OdooToolHandler:
                 # fail cleanly before any RPC.
                 _check_xmlrpc_int_bounds(values, "values")
 
-                if model == "ir.attachment":
-                    # Planting a document on a model left out of the allowlist
-                    # is the write-side of the same sidestep the read gate
-                    # closes.
-                    await self._gate_attachment_target(
-                        values.get("res_model"), "attachment would be attached to"
-                    )
+                # Planting a document on a model left out of the allowlist is
+                # the write-side of the same sidestep the read gate closes
+                await self._gate_writes(model, [values])
 
-                record_id = await asyncio.to_thread(self.connection.create, model, values)
+                await asyncio.to_thread(self._check_field_names, model, values)
+                record_id = await asyncio.to_thread(
+                    self.connection.create, model, values, **context_kwargs(call_context)
+                )
 
                 # display_name only — universal and cheap; get_record for more.
                 essential_fields = ["id", "display_name"]
 
                 # Read only the essential fields
                 records = await asyncio.to_thread(
-                    self.connection.read, model, [record_id], essential_fields
+                    self.connection.read,
+                    model,
+                    [record_id],
+                    essential_fields,
+                    **context_kwargs(call_context),
                 )
                 if not records:
                     raise ValidationError(
@@ -2186,7 +3385,7 @@ class OdooToolHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise ValidationError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             raise ValidationError(f"Connection error: {e}") from e
@@ -2195,12 +3394,104 @@ class OdooToolHandler:
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to create record: {sanitized_msg}") from e
 
+    async def _handle_create_records_tool(
+        self,
+        model: str,
+        records: List[Dict[str, Any]],
+        ctx=None,
+        context: Any = None,
+    ) -> Dict[str, Any]:
+        """Handle bulk create_records tool request."""
+        try:
+            with perf_logger.track_operation("tool_create_records", model=model):
+                if not records:
+                    raise ValidationError("No records provided")
+                if len(records) > MAX_BATCH_RECORDS:
+                    raise ValidationError(
+                        f"Too many records: {len(records)} provided, maximum "
+                        f"{MAX_BATCH_RECORDS} per call"
+                    )
+                for index, values in enumerate(records):
+                    if not isinstance(values, dict) or not values:
+                        raise ValidationError(
+                            f"Record {index}: provide a non-empty object of field values"
+                        )
+                    # Fail cleanly before any RPC — see create_record
+                    _check_xmlrpc_int_bounds(values, f"records[{index}]")
+
+                # One check for the whole batch, as update_records does
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, model, "create"
+                )
+                await self._ctx_info(ctx, f"Creating {len(records)} {model} record(s)...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+                call_context = await asyncio.to_thread(self._call_context, context)
+
+                await self._gate_writes(
+                    model, records, paths=[f"records[{i}]" for i in range(len(records))]
+                )
+
+                await asyncio.to_thread(
+                    self._check_field_names, model, {k for values in records for k in values}
+                )
+                record_ids = await asyncio.to_thread(
+                    self.connection.create_many, model, records, **context_kwargs(call_context)
+                )
+
+                # display_name only — universal and cheap; get_record for more.
+                rows = await asyncio.to_thread(
+                    self.connection.read,
+                    model,
+                    record_ids,
+                    ["id", "display_name"],
+                    **context_kwargs(call_context),
+                )
+                by_id = {row["id"]: row for row in rows}
+                processed = await asyncio.to_thread(
+                    lambda: [
+                        self._process_record_dates(by_id.get(rid, {"id": rid}), model)
+                        for rid in record_ids
+                    ]
+                )
+                created = [
+                    {**row, "url": self.connection.build_record_url(model, record_id)}
+                    for record_id, row in zip(record_ids, processed, strict=True)
+                ]
+
+                return {
+                    "success": True,
+                    "created_count": len(created),
+                    "records": created,
+                    "message": f"Successfully created {len(created)} {model} record(s)",
+                }
+
+        except ValidationError:
+            raise
+        except MCPPermissionError as e:
+            # Attachment-gate denial surfaced verbatim — see _handle_get_record_tool.
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except (OdooValidationFault, OdooRequestFault) as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in create_records tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to create records: {sanitized_msg}") from e
+
     async def _handle_update_record_tool(
         self,
         model: str,
         record_id: int,
         values: Dict[str, Any],
         ctx=None,
+        context: Any = None,
     ) -> Dict[str, Any]:
         """Handle update record tool request."""
         try:
@@ -2214,6 +3505,7 @@ class OdooToolHandler:
 
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
+                call_context = await asyncio.to_thread(self._call_context, context)
 
                 # Validate input
                 if not values:
@@ -2224,31 +3516,40 @@ class OdooToolHandler:
                 # fail cleanly before any RPC.
                 _check_xmlrpc_int_bounds(values, "values")
 
-                if model == "ir.attachment":
-                    # Both directions. Gating the CURRENT owner stops the
-                    # escalation: repoint an excluded model's attachment at an
-                    # allowed one and the read gate would then wave it through.
-                    # Gating the NEW owner stops planting.
-                    await self._gate_attachment_records([record_id])
-                    if "res_model" in values:
-                        await self._gate_attachment_target(
-                            values["res_model"], "attachment would be moved to"
-                        )
+                await self._gate_writes(model, [values], [record_id])
 
-                # Check if record exists (only fetch ID to verify existence)
-                existing = await asyncio.to_thread(self.connection.read, model, [record_id], ["id"])
-                if not existing:
+                # Check that the record exists. A read of only "id" cannot:
+                # Odoo 19 echoes {"id": x} back for a missing x. active_test=False
+                # so that an archived record can still be updated (unarchived).
+                existing_count = await asyncio.to_thread(
+                    self.connection.search_count,
+                    model,
+                    [["id", "=", record_id]],
+                    context=_with_context(call_context, active_test=False),
+                )
+                if not existing_count:
                     raise NotFoundError(f"Record not found: {model} with ID {record_id}")
+                await asyncio.to_thread(self._check_field_names, model, values)
 
                 # Update the record
-                success = await asyncio.to_thread(self.connection.write, model, [record_id], values)
+                success = await asyncio.to_thread(
+                    self.connection.write,
+                    model,
+                    [record_id],
+                    values,
+                    **context_kwargs(call_context),
+                )
 
                 # display_name only — universal and cheap; get_record for more.
                 essential_fields = ["id", "display_name"]
 
                 # Read only the essential fields
                 records = await asyncio.to_thread(
-                    self.connection.read, model, [record_id], essential_fields
+                    self.connection.read,
+                    model,
+                    [record_id],
+                    essential_fields,
+                    **context_kwargs(call_context),
                 )
                 if not records:
                     raise ValidationError(
@@ -2278,7 +3579,7 @@ class OdooToolHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise ValidationError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             raise ValidationError(f"Connection error: {e}") from e
@@ -2286,6 +3587,671 @@ class OdooToolHandler:
             logger.error(f"Error in update_record tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to update record: {sanitized_msg}") from e
+
+    async def _handle_update_records_tool(
+        self,
+        model: str,
+        record_ids: List[int],
+        values: Dict[str, Any],
+        ctx=None,
+        context: Any = None,
+    ) -> Dict[str, Any]:
+        """Handle bulk update_records tool request."""
+        try:
+            with perf_logger.track_operation("tool_update_records", model=model):
+                if not record_ids:
+                    raise ValidationError("No record IDs provided")
+                # A repeated id is one record: dedupe (order kept) before the
+                # cap, so the cap and the reported count are about records
+                record_ids = list(dict.fromkeys(record_ids))
+                if len(record_ids) > MAX_BATCH_RECORDS:
+                    raise ValidationError(
+                        f"Too many records: {len(record_ids)} provided, maximum "
+                        f"{MAX_BATCH_RECORDS} per call"
+                    )
+                for rid in record_ids:
+                    _validate_record_id(rid)
+
+                # One check for the whole batch — matches update_record's
+                # per-call (not per-record) access-control semantics.
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, model, "write"
+                )
+                await self._ctx_info(ctx, f"Updating {len(record_ids)} {model} record(s)...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+                call_context = await asyncio.to_thread(self._call_context, context)
+
+                if not values:
+                    raise ValidationError("No values provided for record update")
+
+                _check_xmlrpc_int_bounds(values, "values")
+
+                await self._gate_writes(model, [values], record_ids)
+
+                # Check every record exists before writing — a partial batch
+                # write with no rollback signal would be worse than failing
+                # up front and naming what's missing. Uses search(), not
+                # read(model, ids, ["id"]): reading only the id field never
+                # touches the table, so Odoo echoes it back for ids that
+                # don't exist instead of raising or omitting them.
+                # active_test=False: an archived record exists (and unarchiving
+                # one is a common bulk update).
+                existing_ids = set(
+                    await asyncio.to_thread(
+                        self.connection.search,
+                        model,
+                        [["id", "in", record_ids]],
+                        context=_with_context(call_context, active_test=False),
+                    )
+                )
+                missing_ids = [rid for rid in record_ids if rid not in existing_ids]
+                if missing_ids:
+                    raise NotFoundError(f"Record(s) not found: {model} with ID(s) {missing_ids}")
+                await asyncio.to_thread(self._check_field_names, model, values)
+
+                success = await asyncio.to_thread(
+                    self.connection.write, model, record_ids, values, **context_kwargs(call_context)
+                )
+
+                essential_fields = ["id", "display_name"]
+                records = await asyncio.to_thread(
+                    self.connection.read,
+                    model,
+                    record_ids,
+                    essential_fields,
+                    **context_kwargs(call_context),
+                )
+                if not records:
+                    raise ValidationError(
+                        f"Failed to read updated records: {model} with IDs {record_ids}"
+                    )
+
+                records = await asyncio.to_thread(
+                    lambda: [self._process_record_dates(rec, model) for rec in records]
+                )
+
+                return {
+                    "success": success,
+                    "updated_count": len(records),
+                    "records": records,
+                    "message": (f"Successfully updated {len(records)} {model} record(s)"),
+                }
+
+        except ValidationError:
+            raise
+        except NotFoundError as e:
+            raise ValidationError(str(e)) from e
+        except MCPPermissionError as e:
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except (OdooValidationFault, OdooRequestFault) as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in update_records tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to update records: {sanitized_msg}") from e
+
+    async def _handle_update_records_each_tool(
+        self,
+        model: str,
+        updates: List[Dict[str, Any]],
+        ctx=None,
+        context: Any = None,
+    ) -> Dict[str, Any]:
+        """Handle the per-record form of update_records (``web_save_multi``)."""
+        try:
+            with perf_logger.track_operation("tool_update_records_each", model=model):
+                if not updates:
+                    raise ValidationError("No updates provided")
+                if len(updates) > MAX_BATCH_RECORDS:
+                    raise ValidationError(
+                        f"Too many records: {len(updates)} provided, maximum "
+                        f"{MAX_BATCH_RECORDS} per call"
+                    )
+                ids: List[int] = []
+                vals_list: List[Dict[str, Any]] = []
+                for index, entry in enumerate(updates):
+                    record_id = entry.get("id") if isinstance(entry, dict) else None
+                    entry_values = entry.get("values") if isinstance(entry, dict) else None
+                    if (
+                        not isinstance(record_id, int)
+                        or isinstance(record_id, bool)
+                        or not isinstance(entry_values, dict)
+                        or not entry_values
+                    ):
+                        raise ValidationError(
+                            f'Update {index}: provide {{"id": <record id>, "values": {{...}}}}'
+                        )
+                    _validate_record_id(record_id)
+                    _check_xmlrpc_int_bounds(entry_values, f"updates[{index}].values")
+                    if record_id in ids:
+                        # Two value sets for one record: which one wins would be
+                        # an accident of order, so refuse instead of merging
+                        raise ValidationError(f"Record {record_id} appears more than once")
+                    ids.append(record_id)
+                    vals_list.append(entry_values)
+
+                # web_save_multi exists from Odoo 19; before it there is no
+                # atomic per-record write over RPC, and N separate writes can
+                # fail halfway. An unknown version is tried as is.
+                major = self.connection.get_major_version()
+                if isinstance(major, int) and major < 19:
+                    raise ValidationError(
+                        f"Different values per record need Odoo 19 or later (this is "
+                        f"Odoo {major}). Use update_record per record, or record_ids "
+                        f"with values for shared values."
+                    )
+
+                # One check for the whole batch, as the shared-values form does
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, model, "write"
+                )
+                await self._ctx_info(ctx, f"Updating {len(ids)} {model} record(s)...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+                call_context = await asyncio.to_thread(self._call_context, context)
+
+                await self._gate_writes(
+                    model, vals_list, ids, paths=[f"updates[{i}].values" for i in range(len(ids))]
+                )
+
+                # Name every missing id before writing anything; active_test=False
+                # so that archived records count (see the shared-values form)
+                existing_ids = set(
+                    await asyncio.to_thread(
+                        self.connection.search,
+                        model,
+                        [["id", "in", ids]],
+                        context=_with_context(call_context, active_test=False),
+                    )
+                )
+                missing_ids = [rid for rid in ids if rid not in existing_ids]
+                if missing_ids:
+                    raise NotFoundError(f"Record(s) not found: {model} with ID(s) {missing_ids}")
+                await asyncio.to_thread(
+                    self._check_field_names, model, {k for v in vals_list for k in v}
+                )
+
+                try:
+                    rows = await asyncio.to_thread(
+                        self.connection.web_save_multi,
+                        model,
+                        ids,
+                        vals_list,
+                        **context_kwargs(call_context),
+                    )
+                except OdooValidationFault as e:
+                    if not self.config.is_yolo_enabled and "web_save_multi" in str(e):
+                        raise ValidationError(
+                            f"{e} The Odoo MCP module on this server does not allow "
+                            "per-record values. Use update_record per record, or "
+                            "record_ids with values for shared values."
+                        ) from e
+                    raise
+                records = await asyncio.to_thread(
+                    lambda: [self._process_record_dates(row, model) for row in rows]
+                )
+
+                return {
+                    "success": True,
+                    "updated_count": len(records),
+                    "records": records,
+                    "message": f"Successfully updated {len(records)} {model} record(s)",
+                }
+
+        except ValidationError:
+            raise
+        except NotFoundError as e:
+            raise ValidationError(str(e)) from e
+        except MCPPermissionError as e:
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except (OdooValidationFault, OdooRequestFault) as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in update_records tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to update records: {sanitized_msg}") from e
+
+    async def _handle_read_attachment_tool(
+        self,
+        uri: Optional[str],
+        attachment_id: Optional[int],
+        ctx=None,
+    ) -> CallToolResult:
+        """Handle read attachment tool request.
+
+        Content goes through the app's own resources/read path, so the access
+        gates, the ODOO_MCP_MAX_BINARY_SIZE pre-flight and the Odoo 20 binary
+        handling are the resources' own. Only attachment metadata (incl. the
+        extracted index_content) is read here, under the same gate.
+        """
+        try:
+            with perf_logger.track_operation("tool_read_attachment"):
+                if (uri is None) == (attachment_id is None):
+                    raise ValidationError("Pass exactly one of uri or attachment_id")
+                if attachment_id is not None:
+                    _validate_record_id(attachment_id, "attachment ID")
+                    uri = build_attachment_uri(attachment_id)
+                assert uri is not None
+
+                base_url = self.config.url.rstrip("/")
+                field_match = BINARY_FIELD_URI_PATTERN.match(uri)
+                attachment_match = ATTACHMENT_URI_PATTERN.match(uri)
+                if attachment_match:
+                    attachment_id = int(attachment_match.group(1))
+                    _validate_record_id(attachment_id, "attachment ID")
+                    download_url = f"{base_url}/web/content/{attachment_id}?download=true"
+                    meta = await self._attachment_metadata(attachment_id)
+                elif field_match:
+                    model, record_id, field = field_match.groups()
+                    download_url = (
+                        f"{base_url}/web/content/{model}/{record_id}/{field}?download=true"
+                    )
+                    meta = await self._field_attachment_metadata(model, int(record_id), field)
+                else:
+                    raise ValidationError(
+                        "Pass an odoo://attachment/{id} or odoo://{model}/record/{id}/{field} URI"
+                    )
+                await self._ctx_info(ctx, f"Reading {uri}...")
+
+                result = {
+                    "uri": uri,
+                    # A field without a backing attachment is named after the field
+                    "name": meta.get("name") or (field_match.group(3) if field_match else None),
+                    "mimetype": meta.get("mimetype"),
+                    "size": meta.get("size"),
+                    "download_url": download_url,
+                }
+                mimetype = meta.get("mimetype") or ""
+                size = meta.get("size")
+
+                if meta.get("type") == "url":
+                    return self._attachment_result(
+                        {**result, "kind": "url", "text": meta.get("url") or ""}
+                    )
+                if mimetype.startswith(_EXTRACTED_TEXT_MIMETYPES):
+                    extracted = (meta.get("index_content") or "").strip()
+                    # Without attachment_indexation, Odoo 16-18 store the main
+                    # type ("application") as the index, not the document text
+                    if extracted and extracted != mimetype.split("/")[0]:
+                        return self._attachment_text_result(result, extracted, "extracted_text")
+                    return self._attachment_link_result(
+                        result,
+                        "Odoo extracted no text from this file. Odoo extracts PDF and "
+                        "Office text only with its attachment_indexation module.",
+                    )
+                if mimetype and is_text_mimetype(mimetype):
+                    if size is not None and size > READ_TEXT_MAX_BYTES:
+                        return self._attachment_link_result(result, _TEXT_TOO_LARGE)
+                elif mimetype.startswith("image/"):
+                    if not is_inline_image_type(mimetype):
+                        return self._attachment_link_result(
+                            result, f"{mimetype} images are returned as a link."
+                        )
+                    if size is not None and size > READ_IMAGE_MAX_BYTES:
+                        return self._attachment_link_result(result, _IMAGE_TOO_LARGE)
+                elif mimetype:
+                    return self._attachment_link_result(
+                        result, f"{mimetype} files are returned as a link."
+                    )
+
+                # Text, an image, or a field without metadata: read the content
+                contents = await self.app.read_resource(uri)
+                item = list(contents)[0]
+                content, mimetype = item.content, item.mime_type or mimetype
+                result["mimetype"] = mimetype
+                if isinstance(content, str):
+                    return self._attachment_text_result(result, content, "text")
+                result["size"] = len(content)
+                # The type of an image block comes from its bytes: a model API
+                # refuses a request whose image type is wrong or unsupported
+                image_type = inline_image_type(content)
+                if image_type and len(content) <= READ_IMAGE_MAX_BYTES:
+                    payload = base64.b64encode(content).decode("ascii")
+                    return self._attachment_result(
+                        {**result, "mimetype": image_type, "kind": "image"},
+                        ImageContent(type="image", data=payload, mime_type=image_type),
+                    )
+                if image_type:
+                    why = _IMAGE_TOO_LARGE
+                elif is_inline_image_type(mimetype):
+                    why = (
+                        f"The file is declared {mimetype}, but its content is not a PNG, JPEG, "
+                        "GIF or WebP image."
+                    )
+                elif mimetype.startswith("image/"):
+                    why = f"{mimetype} images are returned as a link."
+                else:
+                    why = f"{mimetype} files are returned as a link."
+                return self._attachment_link_result(result, why)
+
+        except ValidationError:
+            raise
+        except NotFoundError as e:
+            raise ValidationError(str(e)) from e
+        except MCPPermissionError as e:
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except (OdooValidationFault, OdooRequestFault) as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in read_attachment tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to read attachment: {sanitized_msg}") from e
+
+    async def _attachment_metadata(self, attachment_id: int) -> Dict[str, Any]:
+        """Name, mimetype, size, type, url and extracted text of an attachment (gated)."""
+        await asyncio.to_thread(
+            self.access_controller.validate_model_access, "ir.attachment", "read"
+        )
+        if not self.connection.is_authenticated:
+            raise ValidationError("Not authenticated with Odoo")
+        # Gate on the attached-to model before any metadata leaves Odoo
+        await self._gate_document_records("ir.attachment", [attachment_id])
+        rows = await asyncio.to_thread(
+            self.connection.search_read,
+            "ir.attachment",
+            [["id", "=", attachment_id]],
+            ["name", "mimetype", "file_size", "type", "url", "index_content"],
+            context={"active_test": False},
+        )
+        if not rows:
+            raise NotFoundError(f"Attachment not found: {attachment_id}")
+        row = rows[0]
+        # Odoo answers False for empty values
+        return {
+            **row,
+            "name": row.get("name") or None,
+            "mimetype": row.get("mimetype") or None,
+            "size": row.get("file_size") or None,
+        }
+
+    async def _field_attachment_metadata(
+        self, model: str, record_id: int, field: str
+    ) -> Dict[str, Any]:
+        """Metadata of the attachment that stores a binary field, if readable.
+
+        Empty when there is none (a plain column) or ir.attachment is not
+        accessible; the content read then decides by what comes back.
+        """
+        try:
+            await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
+            await asyncio.to_thread(
+                self.access_controller.validate_model_access, "ir.attachment", "read"
+            )
+            rows = await asyncio.to_thread(
+                self.connection.search_read,
+                "ir.attachment",
+                [
+                    ["res_model", "=", model],
+                    ["res_id", "=", record_id],
+                    ["res_field", "=", field],
+                ],
+                ["name", "mimetype", "file_size"],
+                limit=1,
+            )
+        except AccessControlError as e:
+            if isinstance(e, AccessControlUnavailableError):
+                raise
+            # The model itself must be readable; only ir.attachment may be off
+            await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
+            return {}
+        if not rows:
+            return {}
+        row = rows[0]
+        return {
+            "name": row.get("name"),
+            "mimetype": row.get("mimetype") or None,
+            "size": row.get("file_size") or None,
+        }
+
+    def _attachment_text_result(
+        self, result: Dict[str, Any], text: str, kind: str
+    ) -> CallToolResult:
+        truncated = len(text) > READ_TEXT_MAX_CHARS
+        fields = {
+            **result,
+            "kind": kind,
+            "text": text[:READ_TEXT_MAX_CHARS],
+            "truncated": truncated,
+        }
+        if truncated:
+            fields["note"] = (
+                f"Only the first {READ_TEXT_MAX_CHARS:,} of {len(text):,} characters are "
+                "returned. The download_url serves the whole file."
+            )
+        return self._attachment_result(fields)
+
+    def _attachment_link_result(self, result: Dict[str, Any], why: str) -> CallToolResult:
+        return self._attachment_result({**result, "kind": "link", "note": why})
+
+    @staticmethod
+    def _attachment_result(fields: Dict[str, Any], *blocks: Any) -> CallToolResult:
+        """Structured result plus the content blocks the model reads."""
+        structured = ReadAttachmentResult(**fields).model_dump(mode="json")
+        summary = {k: v for k, v in structured.items() if v is not None and k != "text"}
+        lines = [json.dumps(summary, indent=2)]
+        if structured.get("text"):
+            lines.append(structured["text"])
+        return CallToolResult(
+            content=[TextContent(type="text", text="\n\n".join(lines)), *blocks],
+            structured_content=structured,
+        )
+
+    async def _handle_list_record_attachments_tool(
+        self,
+        model: str,
+        record_id: int,
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle list record attachments tool request."""
+        try:
+            with perf_logger.track_operation("tool_list_record_attachments", model=model):
+                _validate_record_id(record_id)
+                if model == "ir.attachment":
+                    raise ValidationError("Pass the record the files are attached to")
+
+                # The record's model and ir.attachment both: an attachment row
+                # carries url and index_content (the extracted document text)
+                await asyncio.to_thread(self.access_controller.validate_model_access, model, "read")
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, "ir.attachment", "read"
+                )
+                await self._ctx_info(ctx, f"Listing attachments of {model}/{record_id}...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                exists = await asyncio.to_thread(
+                    self.connection.search_count,
+                    model,
+                    [["id", "=", record_id]],
+                    context={"active_test": False},
+                )
+                if not exists:
+                    raise NotFoundError(f"Record not found: {model} with ID {record_id}")
+
+                # res_field=False: attachments behind binary fields (images)
+                # are the field values, not files attached to the record
+                domain = [
+                    ["res_model", "=", model],
+                    ["res_id", "=", record_id],
+                    ["res_field", "=", False],
+                ]
+                total = await asyncio.to_thread(
+                    self.connection.search_count, "ir.attachment", domain
+                )
+                rows = await asyncio.to_thread(
+                    self.connection.search_read,
+                    "ir.attachment",
+                    domain,
+                    ["name", "mimetype", "file_size", "type", "create_date"],
+                    limit=self.config.max_limit,
+                    order="create_date desc, id desc",
+                )
+                rows = await asyncio.to_thread(
+                    lambda: [self._process_record_dates(row, "ir.attachment") for row in rows]
+                )
+                attachments = []
+                for row in rows:
+                    attachments.append(
+                        {
+                            "id": row["id"],
+                            "name": row.get("name") or "",
+                            "mimetype": row.get("mimetype") or None,
+                            "size": row.get("file_size") or None,
+                            "type": row.get("type") or "binary",
+                            "create_date": row.get("create_date") or None,
+                            "uri": build_attachment_uri(row["id"]),
+                        }
+                    )
+
+                return {
+                    "model": model,
+                    "record_id": record_id,
+                    "attachments": attachments,
+                    "total": total,
+                    "note": (
+                        f"Showing the newest {len(attachments)} of {total} attachments."
+                        if total > len(attachments)
+                        else None
+                    ),
+                }
+
+        except ValidationError:
+            raise
+        except NotFoundError as e:
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except (OdooValidationFault, OdooRequestFault) as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in list_record_attachments tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to list attachments: {sanitized_msg}") from e
+
+    async def _handle_upload_attachment_tool(
+        self,
+        model: str,
+        record_id: int,
+        name: str,
+        data: str,
+        mimetype: Optional[str] = None,
+        ctx=None,
+    ) -> Dict[str, Any]:
+        """Handle upload attachment tool request."""
+        try:
+            with perf_logger.track_operation("tool_upload_attachment", model=model):
+                _validate_record_id(record_id)
+                if model == "ir.attachment":
+                    raise ValidationError(
+                        "Attach the file to a business record, not to another attachment"
+                    )
+                if not name or not name.strip():
+                    raise ValidationError("Provide a file name")
+                if data.startswith("data:"):
+                    raise ValidationError(
+                        "Send the file as plain base64, without the 'data:...;base64,' prefix"
+                    )
+                try:
+                    raw = base64.b64decode(data, validate=True)
+                except (binascii.Error, ValueError) as e:
+                    raise ValidationError(f"'data' is not valid base64: {e}") from e
+                if not raw:
+                    raise ValidationError("The file is empty")
+                if len(raw) > MAX_UPLOAD_BYTES:
+                    raise ValidationError(
+                        f"The file is {len(raw):,} bytes, over the {MAX_UPLOAD_BYTES:,}-byte "
+                        f"limit for one upload"
+                    )
+
+                # Write access on the record the file goes to, and create
+                # access on ir.attachment (standard mode checks both models)
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, model, "write"
+                )
+                await asyncio.to_thread(
+                    self.access_controller.validate_model_access, "ir.attachment", "create"
+                )
+                await self._ctx_info(ctx, f"Attaching {name} to {model}/{record_id}...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                # res_id is a plain integer: Odoo would attach to a record
+                # that does not exist. active_test=False: archived ones do.
+                exists = await asyncio.to_thread(
+                    self.connection.search_count,
+                    model,
+                    [["id", "=", record_id]],
+                    context={"active_test": False},
+                )
+                if not exists:
+                    raise NotFoundError(f"Record not found: {model} with ID {record_id}")
+
+                # Odoo 20 removed ir.attachment.datas; raw takes the same base64 string
+                content_field = "raw" if uses_odoo_20_binaries(self.connection) else "datas"
+                values = {
+                    "name": name,
+                    "res_model": model,
+                    "res_id": record_id,
+                    content_field: data,
+                }
+                if mimetype:
+                    values["mimetype"] = mimetype
+                attachment_id = await asyncio.to_thread(
+                    self.connection.create, "ir.attachment", values
+                )
+
+                return {
+                    "success": True,
+                    "attachment_id": attachment_id,
+                    "uri": build_attachment_uri(attachment_id),
+                    "name": name,
+                    "size": len(raw),
+                    "message": f"Attached {name} to {model} record {record_id}",
+                }
+
+        except ValidationError:
+            raise
+        except NotFoundError as e:
+            raise ValidationError(str(e)) from e
+        except AccessControlUnavailableError as e:
+            raise ValidationError(f"Could not verify access (connection error): {e}") from e
+        except AccessControlError as e:
+            raise ValidationError(access_denied_message(e)) from e
+        except (OdooValidationFault, OdooRequestFault) as e:
+            raise ValidationError(str(e)) from e
+        except OdooConnectionError as e:
+            raise ValidationError(f"Connection error: {e}") from e
+        except Exception as e:
+            logger.error(f"Error in upload_attachment tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(f"Failed to upload attachment: {sanitized_msg}") from e
 
     async def _handle_delete_record_tool(
         self,
@@ -2306,10 +4272,9 @@ class OdooToolHandler:
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
 
-                if model == "ir.attachment":
-                    # Destroying a document behind an excluded model is at
-                    # least as serious as reading it.
-                    await self._gate_attachment_records([record_id])
+                # Deleting an attachment or a message changes its document,
+                # so its owner must allow writes, as Odoo itself requires
+                await self._gate_document_records(model, [record_id], "write")
 
                 # Check if record exists and get display info
                 existing = await asyncio.to_thread(
@@ -2344,7 +4309,7 @@ class OdooToolHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise ValidationError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             raise ValidationError(f"Connection error: {e}") from e
@@ -2392,10 +4357,40 @@ class OdooToolHandler:
                 if not body or not body.strip():
                     raise ValidationError("body must not be empty")
 
-                # message_post repoints the attachments it is handed onto the
-                # thread record, so handing it an excluded model's attachment
-                # would move that document somewhere readable.
-                await self._gate_attachment_records(attachment_ids or [])
+                # message_post links the attachments it is handed to the
+                # message (it moves only the user's pending composer uploads),
+                # so an excluded model's attachment would become readable
+                # from this record's chatter.
+                await self._gate_document_records("ir.attachment", attachment_ids or [])
+
+                # Odoo's own errors for a missing record or attachment name
+                # the user id and the raw recordset; say it like the other tools
+                existing_count = await asyncio.to_thread(
+                    self.connection.search_count,
+                    model,
+                    [["id", "=", record_id]],
+                    context={"active_test": False},
+                )
+                if not existing_count:
+                    raise ValidationError(f"Record not found: {model} with ID {record_id}")
+                if attachment_ids:
+                    found = await asyncio.to_thread(
+                        self.connection.search,
+                        "ir.attachment",
+                        [["id", "in", list(attachment_ids)]],
+                        context={"active_test": False},
+                    )
+                    missing = [i for i in attachment_ids if i not in set(found)]
+                    if missing:
+                        raise ValidationError(
+                            f"Attachment not found: {', '.join(map(str, missing))}"
+                        )
+
+                if not body_is_html:
+                    major = self.connection.get_major_version()
+                    if isinstance(major, int) and major < 17:
+                        # Odoo 16 stores a str body as HTML; 17 and later escape it
+                        body = html.escape(body)
 
                 # Build kwargs — omit partner_ids/attachment_ids when None
                 # (empty list means "clear all" in some Odoo contexts)
@@ -2457,7 +4452,7 @@ class OdooToolHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise ValidationError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             raise ValidationError(f"Connection error: {e}") from e
@@ -2481,6 +4476,7 @@ class OdooToolHandler:
         order: Optional[str],
         limit: int,
         offset: int,
+        context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Call legacy ``read_group`` and normalize its response shape.
 
@@ -2512,11 +4508,15 @@ class OdooToolHandler:
               it implicitly when ``lazy=False``).
             * ``order`` → ``orderby`` (omit entirely when ``None`` so
               read_group uses its default). Passed through verbatim; legacy
-              read_group expects a bare field/groupby key, so ordering by a
-              v19 aggregate expression (``"amount_total:sum desc"``) raises a
-              fault here that surfaces cleanly as a ValidationError.
+              Odoo 16 orders by an aggregate under its bare field name, so
+              ``"amount_total:sum desc"`` becomes ``"amount_total desc"``
+              there (see ``_odoo16_group_order``).
         """
-        # __count is implicit in read_group; passing it as a field raises a fault.
+        # __count is implicit in read_group (lazy=False), so it is dropped
+        # beside other aggregates. Alone it is sent as the only field:
+        # fields=[] makes Odoo 16 fail without a groupby (it cannot marshal
+        # the None it puts in the row) and aggregate every numeric field with
+        # one. fields=["__count"] works on 16, 17 and 18.
         fields_kwarg = [a for a in aggregates if a != "__count"]
 
         # read_group returns every aggregate under its BARE field name, so an
@@ -2558,16 +4558,27 @@ class OdooToolHandler:
             seen_fields[bare] = spec
 
         kwargs: Dict[str, Any] = {
-            "fields": fields_kwarg,
+            "fields": fields_kwarg or ["__count"],
             "groupby": groupby,
             "limit": limit,
             "offset": offset,
             "lazy": False,
         }
         if order is not None:
+            major = self.connection.get_major_version()
+            if isinstance(major, int) and major < 17:
+                order = _odoo16_group_order(order, fields_kwarg)
             kwargs["orderby"] = order
 
+        kwargs.update(context_kwargs(context))
         groups = self.connection.execute_kw(model, "read_group", [domain], kwargs)
+        if groups is None:
+            # Odoo 16 cannot marshal the None in the total row of an empty
+            # ungrouped read_group, and the connection reads that fault as a
+            # void return. Odoo 17 answers the row below.
+            if groupby:
+                return []
+            return [{"__count": 0, "__extra_domain": [], **dict.fromkeys(fields_kwarg, False)}]
 
         # Aggregate key rename: build a list of (bare_field, full_expr)
         # pairs to restore after read_group strips the operator suffix.
@@ -2606,6 +4617,7 @@ class OdooToolHandler:
         limit: Optional[int],
         offset: int,
         ctx=None,
+        context: Any = None,
     ) -> Dict[str, Any]:
         """Handle aggregate_records tool request."""
         try:
@@ -2616,6 +4628,7 @@ class OdooToolHandler:
 
                 if not self.connection.is_authenticated:
                     raise ValidationError("Not authenticated with Odoo")
+                call_context = await asyncio.to_thread(self._call_context, context)
 
                 # Omitted/empty groupby collapses to a single overall row —
                 # both dispatch paths support it natively (one bucket with
@@ -2624,9 +4637,13 @@ class OdooToolHandler:
                 groupby = list(groupby) if groupby else []
 
                 parsed_domain = self._parse_domain_input(domain)
-                if model == "ir.attachment":
+                self._check_domain_operators(parsed_domain)
+                await asyncio.to_thread(
+                    self._check_related_paths, model, parsed_domain, groupby, order
+                )
+                if model in DOCUMENT_LINKS:
                     scope = await asyncio.to_thread(
-                        attachment_scope_domain, self.config, self.access_controller
+                        document_scope_domain, model, self.config, self.access_controller
                     )
                     if scope:
                         # Appended, not "&"-prefixed — see the matching comment
@@ -2634,7 +4651,9 @@ class OdooToolHandler:
                         parsed_domain = list(parsed_domain) + scope
 
                 # Limit defaults & capping (mirror search_records)
-                if limit is None or limit <= 0:
+                if limit is not None and limit < 0:
+                    raise ValidationError(f"limit must be 0 or more, got {limit}")
+                if not limit:
                     limit = self.config.default_limit
                 elif limit > self.config.max_limit:
                     limit = self.config.max_limit
@@ -2645,6 +4664,7 @@ class OdooToolHandler:
                 # otherwise formatted_read_group returns only the groupby
                 # keys with no quantitative data, which defeats the tool.
                 effective_aggregates = aggregates if aggregates else ["__count"]
+                await asyncio.to_thread(self._check_aggregate_types, model, effective_aggregates)
 
                 # Peek one group past the page: the grouping methods offer no
                 # cheap "count of groups", so request limit+1 — an extra row
@@ -2688,6 +4708,7 @@ class OdooToolHandler:
                         order,
                         peek_limit,
                         offset,
+                        call_context,
                     )
                 else:
                     kwargs: Dict[str, Any] = {
@@ -2698,6 +4719,7 @@ class OdooToolHandler:
                     }
                     if order is not None:
                         kwargs["order"] = order
+                    kwargs.update(context_kwargs(call_context))
                     groups = await asyncio.to_thread(
                         self.connection.execute_kw,
                         model,
@@ -2737,7 +4759,7 @@ class OdooToolHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise ValidationError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             raise ValidationError(f"Connection error: {e}") from e
@@ -2765,7 +4787,10 @@ class OdooToolHandler:
                     f"Invalid arguments parameter. Expected JSON array, got: {value[:100]}"
                 ) from e
             if not isinstance(parsed, list):
-                raise ValidationError(f"arguments must be a list, got {type(parsed).__name__}")
+                raise ValidationError(
+                    f"arguments must be a list, got {type(parsed).__name__}"
+                    f"{_double_encoded_hint(parsed)}"
+                )
             return parsed
         raise ValidationError(
             f"arguments must be a list or JSON-string, got {type(value).__name__}"
@@ -2792,6 +4817,7 @@ class OdooToolHandler:
             if not isinstance(parsed, dict):
                 raise ValidationError(
                     f"keyword_arguments must be a dict, got {type(parsed).__name__}"
+                    f"{_double_encoded_hint(parsed)}"
                 )
             return parsed
         raise ValidationError(
@@ -2877,7 +4903,7 @@ class OdooToolHandler:
             raise ValidationError(f"Could not verify access (connection error): {e}") from e
         except AccessControlError as e:
             raise ValidationError(access_denied_message(e)) from e
-        except OdooValidationFault as e:
+        except (OdooValidationFault, OdooRequestFault) as e:
             raise ValidationError(str(e)) from e
         except OdooConnectionError as e:
             raise ValidationError(f"Connection error: {e}") from e
@@ -2888,15 +4914,15 @@ class OdooToolHandler:
 
 
 def register_tools(
-    app: FastMCP,
+    app: MCPServer,
     connection: OdooConnection,
     access_controller: AccessController,
     config: OdooConfig,
 ) -> OdooToolHandler:
-    """Register all Odoo tools with the FastMCP app.
+    """Register all Odoo tools with the MCPServer app.
 
     Args:
-        app: FastMCP application instance
+        app: MCPServer application instance
         connection: Odoo connection instance
         access_controller: Access control instance
         config: Odoo configuration instance

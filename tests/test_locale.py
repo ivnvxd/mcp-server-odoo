@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mcp_server_odoo.config import OdooConfig, load_config
-from mcp_server_odoo.odoo_connection import OdooConnection, OdooConnectionError
+from mcp_server_odoo.odoo_connection import (
+    OdooConnection,
+    OdooConnectionError,
+    OdooValidationFault,
+)
 
 
 @pytest.fixture
@@ -182,11 +186,11 @@ class TestLocaleInvalidFallback:
         mock_proxy = _make_connected(conn)
 
         # faultCode 1 = application error; codes 2/4 are Odoo's business
-        # classes and now surface without the "Operation failed" wrapping.
+        # classes and surface without the "Odoo error" label.
         fault = xmlrpc.client.Fault(1, "Some unrelated failure")
         mock_proxy.execute_kw.side_effect = fault
 
-        with pytest.raises(OdooConnectionError, match="Operation failed"):
+        with pytest.raises(OdooConnectionError, match="Odoo error"):
             conn.execute_kw("res.partner", "search", [[]], {})
 
         # Locale should NOT be disabled for unrelated faults
@@ -240,17 +244,23 @@ class TestLocaleConfig:
 class TestInvalidLangAttribution:
     """A caller-supplied bad lang must not disable ODOO_MCP_LOCALE process-wide."""
 
-    def test_caller_lang_failure_leaves_server_locale_intact(self, config_with_locale):
+    def test_caller_lang_failure_is_not_retried(self, config_with_locale):
+        """Retried without the lang, a write would land in the default language."""
         conn = OdooConnection(config_with_locale)
         mock_proxy = _make_connected(conn)
         mock_proxy.execute_kw.side_effect = [
             xmlrpc.client.Fault(2, "Invalid language code: xx_XX"),
-            [{"id": 1}],
+            True,
         ]
 
-        result = conn.execute_kw("res.partner", "search_read", [[]], {"context": {"lang": "xx_XX"}})
-
-        assert result == [{"id": 1}]
+        with pytest.raises(OdooValidationFault, match="Language .xx_XX. is not installed in Odoo"):
+            conn.execute_kw(
+                "product.template",
+                "write",
+                [[1], {"name": "Chaise"}],
+                {"context": {"lang": "xx_XX"}},
+            )
+        assert mock_proxy.execute_kw.call_count == 1
         assert conn.config.locale == "es_ES", "the configured locale was not at fault"
 
     def test_configured_locale_failure_still_disables_it(self, config_with_locale):
@@ -261,7 +271,56 @@ class TestInvalidLangAttribution:
             [{"id": 1}],
         ]
 
-        result = conn.execute_kw("res.partner", "search_read", [[]], {"context": {"lang": "es_ES"}})
+        result = conn.execute_kw("res.partner", "search_read", [[]], {})
 
         assert result == [{"id": 1}]
         assert conn.config.locale is None
+
+    def test_caller_lang_equal_to_the_locale_is_not_retried(self, config_with_locale):
+        """The caller asked for es_ES; a retry would write the default language."""
+        conn = OdooConnection(config_with_locale)
+        mock_proxy = _make_connected(conn)
+        mock_proxy.execute_kw.side_effect = [xmlrpc.client.Fault(2, "Invalid language code: es_ES")]
+
+        with pytest.raises(OdooValidationFault, match="Language .es_ES. is not installed in Odoo"):
+            conn.execute_kw(
+                "res.partner", "write", [[1], {"name": "x"}], {"context": {"lang": "es_ES"}}
+            )
+        assert mock_proxy.execute_kw.call_count == 1
+
+    def test_injected_locale_is_retried_after_another_call_disabled_it(self, config_with_locale):
+        """Two calls in flight both injected es_ES; the first to fail disables it."""
+        conn = OdooConnection(config_with_locale)
+        mock_proxy = _make_connected(conn)
+
+        def first_call(*args, **kwargs):
+            conn.config.locale = None  # the other call got there first
+            raise xmlrpc.client.Fault(2, "Invalid language code: es_ES")
+
+        calls = []
+
+        def proxy_call(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                return first_call()
+            return [{"id": 1}]
+
+        mock_proxy.execute_kw.side_effect = proxy_call
+
+        assert conn.execute_kw("res.partner", "search_read", [[]], {}) == [{"id": 1}]
+        assert len(calls) == 2
+
+    def test_the_retry_keeps_the_call_unscoped(self, config_with_locale):
+        """The read of the user's companies must stay unscoped after the locale retry."""
+        config_with_locale.allowed_companies = [1, 9]
+        conn = OdooConnection(config_with_locale)
+        mock_proxy = _make_connected(conn)
+        mock_proxy.execute_kw.side_effect = [
+            xmlrpc.client.Fault(2, "Invalid language code: es_ES"),
+            [{"id": 1, "company_ids": [1]}],
+        ]
+
+        conn.execute_kw("res.users", "read", [[1], ["company_ids"]], {}, scoped=False)
+
+        retry_kwargs = mock_proxy.execute_kw.call_args_list[1].args[-1]
+        assert "allowed_company_ids" not in retry_kwargs.get("context", {})

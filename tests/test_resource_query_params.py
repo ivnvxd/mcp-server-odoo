@@ -9,7 +9,7 @@ from unittest.mock import Mock
 from urllib.parse import quote
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcp_server_odoo.access_control import AccessController
 from mcp_server_odoo.config import OdooConfig
@@ -45,13 +45,13 @@ def mock_access_controller():
 
 @pytest.fixture
 def fastmcp_app():
-    """Create a real FastMCP app instance."""
-    return FastMCP(name="test-odoo-mcp")
+    """Create a real MCPServer app instance."""
+    return MCPServer(name="test-odoo-mcp")
 
 
 @pytest.fixture
 def resource_handler(fastmcp_app, mock_connection, mock_access_controller, mock_config):
-    """Create a resource handler instance with real FastMCP app."""
+    """Create a resource handler instance with real MCPServer app."""
     return OdooResourceHandler(fastmcp_app, mock_connection, mock_access_controller, mock_config)
 
 
@@ -194,7 +194,7 @@ class TestResourceQueryParameterHandling:
         assert "Active Record 1" in result
         assert "Showing records 1-3 of 50" in result
 
-    # Browse test removed - browse resource not supported due to FastMCP query parameter limitations
+    # Browse test removed - browse resource not supported due to MCPServer query parameter limitations
     # Use get_record multiple times or search_records tool instead
 
     @pytest.mark.asyncio
@@ -232,7 +232,7 @@ class TestResourceQueryParameterHandling:
 
 
 class TestResourceDomainBalance:
-    """The resource handlers append attachment_scope_domain()'s prefix-notation
+    """The resource handlers append document_scope_domain()'s prefix-notation
     result to the caller's domain exactly as the tool handlers do, so they need
     the same precondition: an unbalanced caller domain would take the scope's
     OR-subtree as its own operand and OR the allowlist away.
@@ -270,13 +270,13 @@ class TestResourceDomainBalance:
 
 
 class TestResourceRegistration:
-    """Test that resources are actually registered with the FastMCP app."""
+    """Test that resources are actually registered with the MCPServer app."""
 
     @pytest.mark.asyncio
-    async def test_resources_registered_with_fastmcp(self, resource_handler, fastmcp_app):
-        """Verify resources are registered by listing them from the FastMCP app."""
+    async def test_resources_registered_with_mcpserver(self, resource_handler, fastmcp_app):
+        """Verify resources are registered by listing them from the MCPServer app."""
         templates = await fastmcp_app.list_resource_templates()
-        template_uris = [t.uriTemplate for t in templates]
+        template_uris = [t.uri_template for t in templates]
         # The resource handler registers URI patterns during __init__
         assert any("record" in uri for uri in template_uris), (
             f"Expected a 'record' resource template, got: {template_uris}"
