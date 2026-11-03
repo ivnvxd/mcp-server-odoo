@@ -145,6 +145,87 @@ class TestUploadAttachment:
         connection.create.assert_not_called()
 
 
+class TestUploadAttachmentFilePath:
+    @pytest.fixture
+    def allowed(self, tmp_path):
+        d = tmp_path / "allowed"
+        d.mkdir()
+        return d
+
+    @pytest.fixture
+    def path_handler(self, connection, access, allowed):
+        config = OdooConfig(
+            url="http://localhost:8069", api_key="k", database="d", upload_dirs=[str(allowed)]
+        )
+        return OdooToolHandler(MagicMock(spec=MCPServer), connection, access, config)
+
+    async def test_reads_the_file_from_an_allowed_dir(self, path_handler, connection, allowed):
+        f = allowed / "a.pdf"
+        f.write_bytes(PDF)
+
+        result = await path_handler._handle_upload_attachment_tool(
+            "res.partner", 7, "a.pdf", file_path=str(f)
+        )
+
+        assert connection.create.call_args[0][1]["datas"] == PDF_B64
+        assert result["size"] == len(PDF)
+
+    async def test_disabled_without_allowlist(self, handler, tmp_path):
+        f = tmp_path / "a.pdf"
+        f.write_bytes(PDF)
+        with pytest.raises(ValidationError, match="disabled"):
+            await handler._handle_upload_attachment_tool(
+                "res.partner", 7, "a.pdf", file_path=str(f)
+            )
+
+    async def test_rejects_path_outside_allowlist(self, path_handler, tmp_path):
+        f = tmp_path / "secret.txt"
+        f.write_bytes(PDF)
+        with pytest.raises(ValidationError, match="outside"):
+            await path_handler._handle_upload_attachment_tool(
+                "res.partner", 7, "s.txt", file_path=str(f)
+            )
+
+    async def test_rejects_symlink_escape(self, path_handler, allowed, tmp_path):
+        target = tmp_path / "secret.txt"
+        target.write_bytes(PDF)
+        link = allowed / "link.txt"
+        link.symlink_to(target)
+        with pytest.raises(ValidationError, match="outside"):
+            await path_handler._handle_upload_attachment_tool(
+                "res.partner", 7, "l.txt", file_path=str(link)
+            )
+
+    async def test_rejects_traversal(self, path_handler, allowed, tmp_path):
+        (tmp_path / "secret.txt").write_bytes(PDF)
+        with pytest.raises(ValidationError, match="outside"):
+            await path_handler._handle_upload_attachment_tool(
+                "res.partner", 7, "s.txt", file_path=str(allowed / ".." / "secret.txt")
+            )
+
+    async def test_needs_exactly_one_source(self, path_handler, allowed):
+        f = allowed / "a.pdf"
+        f.write_bytes(PDF)
+        with pytest.raises(ValidationError, match="exactly one"):
+            await path_handler._handle_upload_attachment_tool("res.partner", 7, "a.pdf")
+        with pytest.raises(ValidationError, match="exactly one"):
+            await path_handler._handle_upload_attachment_tool(
+                "res.partner", 7, "a.pdf", PDF_B64, file_path=str(f)
+            )
+
+    async def test_rejects_directory_and_oversize(self, path_handler, allowed):
+        with pytest.raises(ValidationError, match="regular file"):
+            await path_handler._handle_upload_attachment_tool(
+                "res.partner", 7, "d", file_path=str(allowed)
+            )
+        big = allowed / "big.bin"
+        big.write_bytes(b"x" * (MAX_UPLOAD_BYTES + 1))
+        with pytest.raises(ValidationError, match="limit"):
+            await path_handler._handle_upload_attachment_tool(
+                "res.partner", 7, "big.bin", file_path=str(big)
+            )
+
+
 class TestListRecordAttachments:
     ROWS = [
         {

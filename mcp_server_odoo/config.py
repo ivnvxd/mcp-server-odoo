@@ -69,6 +69,11 @@ class OdooConfig:
     # client will follow them, so the ceiling is enforced rather than assumed.
     max_binary_size: int = 50 * 1024 * 1024
 
+    # Directories upload_attachment may read local files from (file_path).
+    # Empty = file_path is disabled. Only meaningful for the stdio transport,
+    # where the server runs on the same machine as the client.
+    upload_dirs: list[str] = field(default_factory=list)
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         if not self.url:
@@ -307,6 +312,11 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
             # Invalid value - will be caught by validation
             return yolo_env
 
+    # Helper function to parse the upload directory allowlist (os.pathsep separated)
+    def parse_upload_dirs() -> list[str]:
+        raw = os.getenv("ODOO_MCP_UPLOAD_DIRS", "").strip()
+        return [d.strip() for d in raw.split(os.pathsep) if d.strip()]
+
     # Helper function to parse allowed hosts
     def parse_allowed_hosts() -> list[str]:
         hosts = os.getenv("ODOO_MCP_ALLOWED_HOSTS", "").strip()
@@ -335,6 +345,7 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         enable_method_calls=get_bool_env("ODOO_MCP_ENABLE_METHOD_CALLS", False),
         allowed_hosts=parse_allowed_hosts(),
         max_binary_size=get_int_env("ODOO_MCP_MAX_BINARY_SIZE", 50 * 1024 * 1024),
+        upload_dirs=parse_upload_dirs(),
     )
 
     return config
