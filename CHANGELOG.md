@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`upload_attachment` `file_path`**: attach a large local file without inlining it as base64. The path must resolve (symlinks followed) inside a directory listed in `ODOO_MCP_UPLOAD_DIRS`; unset, `file_path` is disabled. Give exactly one of `data` or `file_path`. Meant for the stdio transport, where the server runs on the client's machine.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added

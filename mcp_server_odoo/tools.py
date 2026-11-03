@@ -15,6 +15,7 @@ import time
 import xmlrpc.client
 from ast import literal_eval as _parse_python_literal
 from datetime import datetime
+from pathlib import Path
 from typing import (
     Annotated,
     Any,
@@ -2262,14 +2263,17 @@ class OdooToolHandler:
             model: str,
             record_id: RecordId,
             name: str,
-            data: str,
+            data: Optional[str] = None,
             mimetype: Optional[str] = None,
+            file_path: Optional[str] = None,
             ctx: Optional[Context] = None,
         ) -> UploadAttachmentResult:
             """Attach a file to a record (an ir.attachment on it).
 
-            The file must be plain base64 (no "data:..." prefix), at most about
-            2.9 MB after decoding. Odoo detects the mimetype from the content
+            Give the file either as plain base64 in data (no "data:..." prefix)
+            or, for a large file on the server's own machine, as file_path (an
+            absolute path inside ODOO_MCP_UPLOAD_DIRS; disabled when unset).
+            At most about 2.9 MB after decoding. Odoo detects the mimetype from the content
             when it is not given. To show the file in the record's chatter,
             pass the returned attachment_id to post_message(attachment_ids=...).
 
@@ -2277,14 +2281,16 @@ class OdooToolHandler:
                 model: The model of the record (e.g., 'res.partner')
                 record_id: The record to attach the file to
                 name: File name, e.g. 'contract.pdf'
-                data: File content, base64-encoded
+                data: File content, base64-encoded (omit when using file_path)
                 mimetype: Optional mimetype, e.g. 'application/pdf'
+                file_path: Local file to read instead of data; must resolve
+                    inside ODOO_MCP_UPLOAD_DIRS
 
             Returns:
                 The new attachment's id and its odoo://attachment/{id} URI.
             """
             result = await self._handle_upload_attachment_tool(
-                model, record_id, name, data, mimetype, ctx
+                model, record_id, name, data, mimetype, ctx, file_path
             )
             return UploadAttachmentResult(**result)
 
@@ -4154,14 +4160,40 @@ class OdooToolHandler:
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to list attachments: {sanitized_msg}") from e
 
+    def _read_upload_file(self, file_path: str) -> bytes:
+        """Read a local file for upload, only from inside ODOO_MCP_UPLOAD_DIRS."""
+        if not self.config.upload_dirs:
+            raise ValidationError("file_path is disabled: set ODOO_MCP_UPLOAD_DIRS to enable it")
+        try:
+            path = Path(file_path).resolve(strict=True)  # follows symlinks
+        except (OSError, RuntimeError) as e:
+            raise ValidationError(f"Cannot read file_path: {e.__class__.__name__}") from e
+        roots = []
+        for d in self.config.upload_dirs:
+            try:
+                roots.append(Path(d).resolve(strict=True))
+            except OSError:
+                continue
+        if not any(path.is_relative_to(r) for r in roots):
+            raise ValidationError("file_path is outside the allowed upload directories")
+        if not path.is_file():
+            raise ValidationError("file_path is not a regular file")
+        if path.stat().st_size > MAX_UPLOAD_BYTES:
+            raise ValidationError(
+                f"The file is {path.stat().st_size:,} bytes, over the {MAX_UPLOAD_BYTES:,}-byte "
+                f"limit for one upload"
+            )
+        return path.read_bytes()
+
     async def _handle_upload_attachment_tool(
         self,
         model: str,
         record_id: int,
         name: str,
-        data: str,
+        data: Optional[str] = None,
         mimetype: Optional[str] = None,
         ctx=None,
+        file_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Handle upload attachment tool request."""
         try:
@@ -4173,14 +4205,20 @@ class OdooToolHandler:
                     )
                 if not name or not name.strip():
                     raise ValidationError("Provide a file name")
-                if data.startswith("data:"):
-                    raise ValidationError(
-                        "Send the file as plain base64, without the 'data:...;base64,' prefix"
-                    )
-                try:
-                    raw = base64.b64decode(data, validate=True)
-                except (binascii.Error, ValueError) as e:
-                    raise ValidationError(f"'data' is not valid base64: {e}") from e
+                if (data is None) == (file_path is None):
+                    raise ValidationError("Provide exactly one of 'data' or 'file_path'")
+                if file_path is not None:
+                    raw = await asyncio.to_thread(self._read_upload_file, file_path)
+                    data = base64.b64encode(raw).decode("ascii")
+                else:
+                    if data.startswith("data:"):
+                        raise ValidationError(
+                            "Send the file as plain base64, without the 'data:...;base64,' prefix"
+                        )
+                    try:
+                        raw = base64.b64decode(data, validate=True)
+                    except (binascii.Error, ValueError) as e:
+                        raise ValidationError(f"'data' is not valid base64: {e}") from e
                 if not raw:
                     raise ValidationError("The file is empty")
                 if len(raw) > MAX_UPLOAD_BYTES:
