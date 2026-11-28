@@ -62,6 +62,15 @@ METHOD_CALL_ALLOWLIST: Dict[str, set] = {
         "get_builder_reference",
         "create_draft_process_from_spec",
     },
+    # Fennek find-it methods (Foxlogik modules foxlogik_mcp_proxy,
+    # foxlogik_fennek_guide, foxlogik_fennek_guide_tours). They run as the
+    # pinned user and only return menus that user can see.
+    "ir.ui.menu": {
+        "fennek_find",
+        "fennek_describe_screen",
+        "fennek_show_me",
+        "fennek_log_lookup",
+    },
 }
 
 # Minimum model operation each allowlisted method requires, for access-control
