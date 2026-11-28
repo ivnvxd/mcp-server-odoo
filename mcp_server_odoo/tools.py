@@ -30,6 +30,7 @@ from .schema_guard import (
 )
 from .schemas import (
     AccessCheckResult,
+    AggregateResult,
     CallMethodResult,
     CreateResult,
     DefaultsResult,
@@ -84,6 +85,44 @@ DEFAULT_FIELD_ATTRIBUTES = [
     "help",
     "store",
 ]
+
+# Aggregate functions that need a specific field type. Odoo checks only the
+# function name, so name:sum reaches SQL and fails there as an internal error.
+# The other functions (max, min, count, array_agg, ...) take any column.
+_TYPED_AGGREGATES = {
+    "sum": ("integer", "float", "monetary"),
+    "avg": ("integer", "float", "monetary"),
+    "bool_and": ("boolean",),
+    "bool_or": ("boolean",),
+}
+
+# Metadata keys always preserved in normalized read_group output. Anything else
+# not in the requested groupby/aggregates is filtered out — read_group with an
+# empty ``fields=`` defaults to ALL aggregator fields on the model.
+_READ_GROUP_META_KEYS = frozenset({"__count", "__extra_domain", "__range", "__fold"})
+
+
+def _odoo16_group_order(order: str, aggregates: List[str]) -> str:
+    """Rewrite an aggregate ``order`` for Odoo 16's ``read_group``.
+
+    Odoo 16 names an aggregate column by its bare field, so it refuses
+    ``list_price:sum desc`` as an invalid field and takes ``list_price desc``.
+    It cannot order by the group count at all. Odoo 17 takes both forms.
+    """
+    terms = []
+    for term in order.split(","):
+        parts = term.split()
+        if not parts:
+            continue
+        if parts[0] == "__count":
+            raise ValidationError(
+                "Odoo 16 cannot order groups by __count. Order by a groupby key or an "
+                "aggregate, or sort the returned groups yourself."
+            )
+        if parts[0] in aggregates:
+            parts[0] = parts[0].split(":", 1)[0]
+        terms.append(" ".join(parts))
+    return ", ".join(terms)
 
 
 class OdooToolHandler:
@@ -1010,6 +1049,137 @@ class OdooToolHandler:
             )
             return AccessCheckResult(**result)
 
+        @self.app.tool(
+            title="Aggregate Records",
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=True,
+            ),
+        )
+        async def aggregate_records(
+            model: str,
+            groupby: Optional[Any] = None,
+            aggregates: Optional[Any] = None,
+            domain: Optional[Any] = None,
+            order: Optional[str] = None,
+            limit: Optional[int] = None,
+            offset: int = 0,
+            user_id: Optional[int] = None,
+            ctx: Optional[Context] = None,
+        ) -> AggregateResult:
+            """Aggregate records server-side via Odoo's grouping methods.
+
+            Use this tool whenever the question is "totals/counts/groupings",
+            not "list of records". It pushes the aggregation down to Odoo
+            instead of pulling raw records and reducing client-side.
+
+            Dispatches by Odoo version: ``formatted_read_group`` on 19+,
+            ``read_group`` on older versions with response-shape
+            normalization. Callers see the same response shape on every
+            supported version.
+
+            Args:
+                model: Odoo model name (e.g. 'sale.order')
+                groupby: Group expressions (list or JSON string). Field names,
+                    optionally with a granularity suffix for date/datetime
+                    fields (day, week, month, quarter, year):
+                    ``["date_order:month"]``, ``["partner_id"]``,
+                    ``["partner_id", "date_order:year"]``. Omit (or pass
+                    ``[]``) for a single overall-aggregate row — e.g. a
+                    filtered count via the default ``__count`` aggregate.
+                aggregates: Aggregate expressions of the form ``"field:operator"``
+                    (sum, avg, min, max, count, count_distinct, array_agg, ...).
+                    Examples: ``["amount_total:sum"]``, ``["__count"]``.
+                    Before Odoo 19, only one aggregate per field (not both
+                    ``amount_total:sum`` and ``amount_total:avg``), and not
+                    over a field that is also a groupby key.
+                    If omitted or empty, defaults to ``["__count"]``. Pass
+                    ``["__count", "amount_total:sum"]`` to get both.
+                domain: Odoo domain filter (list or JSON string), or None for
+                    every record.
+                order: Sort expression over groupby keys / aggregates,
+                    e.g. ``"date_order:month"`` or ``"amount_total:sum desc"``.
+                limit: Maximum number of groups. Omitted or 0, it is
+                    ``ODOO_MCP_DEFAULT_LIMIT``; capped at ``ODOO_MCP_MAX_LIMIT``.
+                offset: Number of groups to skip.
+                user_id: Optional Odoo user ID. When provided the aggregation
+                    runs under that user's security context (access rights and
+                    record rules apply, so totals only cover records that user
+                    can read). Ignored (clamped) when the session is pinned.
+
+            Drilldown: AND a group's ``__extra_domain`` with the ``domain``
+                you passed — ``search_records(model, domain=[*your_domain,
+                *group["__extra_domain"]])``.
+
+            Returns:
+                ``groups`` (each with the groupby keys, ``__count``, requested
+                aggregates and ``__extra_domain``), the echoed ``model``,
+                ``groupby`` and ``aggregates``, plus ``has_more`` and
+                ``next_hint`` for paging.
+
+            Examples:
+                aggregate_records("sale.order", groupby=["date_order:month"],
+                    aggregates=["amount_total:sum"],
+                    domain=[["state", "in", ["sale", "done"]]])
+                aggregate_records("res.partner", groupby=["country_id"])
+                aggregate_records("res.partner", domain=[["is_company", "=", True]])
+            """
+            result = await self._handle_aggregate_records_tool(
+                model,
+                groupby,
+                aggregates,
+                domain,
+                order,
+                limit,
+                offset,
+                ctx,
+                user_id=self._effective_user_id(user_id),
+            )
+            return AggregateResult(**result)
+
+    @staticmethod
+    def _parse_domain_input(domain: Optional[Any]) -> List[Any]:
+        """Coerce a domain argument (list, JSON string or Python literal) to a list."""
+        parsed_domain = []
+        if domain is not None:
+            if isinstance(domain, str):
+                # Parse string to list
+                try:
+                    # First try standard JSON parsing
+                    parsed_domain = json.loads(domain)
+                except json.JSONDecodeError:
+                    # If that fails, try converting single quotes to double quotes
+                    # This handles Python-style domain strings
+                    try:
+                        # Replace single quotes with double quotes for valid JSON
+                        # But be careful not to replace quotes inside string values
+                        json_domain = domain.replace("'", '"')
+                        # Also need to ensure Python True/False are lowercase for JSON
+                        json_domain = json_domain.replace("True", "true").replace("False", "false")
+                        parsed_domain = json.loads(json_domain)
+                    except json.JSONDecodeError as e:
+                        # If both attempts fail, try evaluating as Python literal
+                        try:
+                            import ast
+
+                            parsed_domain = ast.literal_eval(domain)
+                        except (ValueError, SyntaxError):
+                            raise ValidationError(
+                                f"Invalid domain parameter. Expected JSON array or Python list, got: {domain[:100]}..."
+                            ) from e
+
+                if not isinstance(parsed_domain, list):
+                    raise ValidationError(
+                        f"Domain must be a list, got {type(parsed_domain).__name__}"
+                    )
+                logger.debug(f"Parsed domain from string: {parsed_domain}")
+            else:
+                # Already a list
+                parsed_domain = domain
+        return parsed_domain
+
     async def _handle_search_tool(
         self,
         model: str,
@@ -1033,44 +1203,7 @@ class OdooToolHandler:
                     raise ValidationError("Not authenticated with Odoo")
 
                 # Handle domain parameter - can be string or list
-                parsed_domain = []
-                if domain is not None:
-                    if isinstance(domain, str):
-                        # Parse string to list
-                        try:
-                            # First try standard JSON parsing
-                            parsed_domain = json.loads(domain)
-                        except json.JSONDecodeError:
-                            # If that fails, try converting single quotes to double quotes
-                            # This handles Python-style domain strings
-                            try:
-                                # Replace single quotes with double quotes for valid JSON
-                                # But be careful not to replace quotes inside string values
-                                json_domain = domain.replace("'", '"')
-                                # Also need to ensure Python True/False are lowercase for JSON
-                                json_domain = json_domain.replace("True", "true").replace(
-                                    "False", "false"
-                                )
-                                parsed_domain = json.loads(json_domain)
-                            except json.JSONDecodeError as e:
-                                # If both attempts fail, try evaluating as Python literal
-                                try:
-                                    import ast
-
-                                    parsed_domain = ast.literal_eval(domain)
-                                except (ValueError, SyntaxError):
-                                    raise ValidationError(
-                                        f"Invalid domain parameter. Expected JSON array or Python list, got: {domain[:100]}..."
-                                    ) from e
-
-                        if not isinstance(parsed_domain, list):
-                            raise ValidationError(
-                                f"Domain must be a list, got {type(parsed_domain).__name__}"
-                            )
-                        logger.debug(f"Parsed domain from string: {parsed_domain}")
-                    else:
-                        # Already a list
-                        parsed_domain = domain
+                parsed_domain = self._parse_domain_input(domain)
 
                 # Handle fields parameter - can be string or list
                 parsed_fields = fields
@@ -2000,6 +2133,311 @@ class OdooToolHandler:
             logger.error(f"Error in call_method tool: {e}")
             sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
             raise ValidationError(f"Failed to call method: {sanitized_msg}") from e
+
+    # ------------------------------------------------------------------ #
+    # aggregate_records                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _execute_for(
+        self,
+        user_id: Optional[int],
+        model: str,
+        method: str,
+        args: List[Any],
+        kwargs: Dict[str, Any],
+    ) -> Any:
+        """Run a model method as ``user_id`` (pinned path) or as the service account."""
+        if user_id is not None:
+            return self.connection.execute_kw_as_user(user_id, model, method, args, kwargs)
+        return self.connection.execute_kw(model, method, args, kwargs)
+
+    @staticmethod
+    def _parse_string_list(value: Optional[Any], name: str) -> List[str]:
+        """Coerce a list-of-strings argument (list, JSON string or single name)."""
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("["):
+                try:
+                    value = json.loads(stripped)
+                except json.JSONDecodeError:
+                    try:
+                        import ast
+
+                        value = ast.literal_eval(stripped)
+                    except (ValueError, SyntaxError) as e:
+                        raise ValidationError(
+                            f"Invalid {name} parameter. Expected a JSON array of strings, "
+                            f"got: {value[:100]}"
+                        ) from e
+            else:
+                value = [stripped]
+        if not isinstance(value, (list, tuple)) or not all(isinstance(v, str) for v in value):
+            raise ValidationError(f"{name} must be a list of strings")
+        return [v for v in value if v]
+
+    def _check_aggregate_types(
+        self, model: str, aggregates: List[str], user_id: Optional[int] = None
+    ) -> None:
+        """Refuse an aggregate whose function does not fit the field type.
+
+        Unknown fields and functions are left to Odoo (or the field guard).
+        """
+        typed = [a for a in aggregates if a.partition(":")[2] in _TYPED_AGGREGATES]
+        if not typed:
+            return
+        fields_info = self._schema_for(model, user_id=user_id) or {}
+        for spec in typed:
+            name, _, function = spec.partition(":")
+            field_type = (fields_info.get(name) or {}).get("type")
+            allowed = _TYPED_AGGREGATES[function]
+            if field_type is not None and field_type not in allowed:
+                raise ValidationError(
+                    f"Aggregate '{spec}' needs a field of type {', '.join(allowed)}. "
+                    f"'{name}' is a {field_type} field."
+                )
+
+    def _call_read_group_normalized(
+        self,
+        model: str,
+        domain: List[Any],
+        groupby: List[str],
+        aggregates: List[str],
+        order: Optional[str],
+        limit: int,
+        offset: int,
+        user_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Call legacy ``read_group`` (Odoo < 19) and normalize to the v19 shape.
+
+        * ``__domain`` → ``__extra_domain``. Legacy ``read_group`` gives the
+          FULL domain (caller's AND group condition) where v19 gives only the
+          group condition; re-ANDing the caller's domain is idempotent, so the
+          documented drilldown contract holds on both.
+        * Aggregate keys: read_group keys values by the bare field name;
+          rename back to ``"field:op"``.
+        * Keep only requested groupby keys, aggregates and metadata keys.
+
+        Runs as ``user_id`` through the proxy when set (``read_group`` is on
+        foxlogik_mcp_proxy's allow-list), so Odoo's access check and record
+        rules apply to that user.
+        """
+        # __count is implicit in read_group (lazy=False). Alone it is sent as
+        # the only field: fields=[] aggregates every numeric field (and breaks
+        # Odoo 16 without a groupby); fields=["__count"] works on 16-18.
+        fields_kwarg = [a for a in aggregates if a != "__count"]
+
+        # read_group keys aggregates by BARE field name, so an aggregate over a
+        # groupby field collides with the group key and corrupts every bucket.
+        groupby_field_names = {g.split(":", 1)[0] for g in groupby}
+        collisions = sorted(
+            {a for a in fields_kwarg if ":" in a and a.split(":", 1)[0] in groupby_field_names}
+        )
+        if collisions:
+            raise ValidationError(
+                f"Cannot aggregate {', '.join(collisions)} over a field that is also a "
+                "groupby key on Odoo < 19: read_group returns both under the same key. "
+                "Drop the aggregate (the groupby key already identifies each group) or "
+                "aggregate a different field."
+            )
+
+        # Same root cause between two aggregates on one field.
+        seen_fields: Dict[str, str] = {}
+        for spec in fields_kwarg:
+            bare = spec.split(":", 1)[0]
+            if bare in seen_fields:
+                raise ValidationError(
+                    f"Cannot request both '{seen_fields[bare]}' and '{spec}' on Odoo < 19: "
+                    f"read_group returns both under the bare key '{bare}', so one would be "
+                    "dropped and the other mislabeled. Request one aggregate per field, or "
+                    "make a second call."
+                )
+            seen_fields[bare] = spec
+
+        kwargs: Dict[str, Any] = {
+            "fields": fields_kwarg or ["__count"],
+            "groupby": groupby,
+            "limit": limit,
+            "offset": offset,
+            "lazy": False,
+        }
+        if order is not None:
+            major = self.connection.get_major_version()
+            if isinstance(major, int) and major < 17:
+                order = _odoo16_group_order(order, fields_kwarg)
+            kwargs["orderby"] = order
+
+        groups = self._execute_for(user_id, model, "read_group", [domain], kwargs)
+        if groups is None:
+            # Odoo 16 cannot marshal the None in the total row of an empty
+            # ungrouped read_group; Odoo 17 answers the row below.
+            if groupby:
+                return []
+            return [{"__count": 0, "__extra_domain": [], **dict.fromkeys(fields_kwarg, False)}]
+
+        agg_renames = [(a.split(":", 1)[0], a) for a in fields_kwarg if ":" in a]
+        allowed_keys = _READ_GROUP_META_KEYS | set(groupby) | set(fields_kwarg)
+
+        normalized: List[Dict[str, Any]] = []
+        for bucket in groups:
+            if "__domain" in bucket:
+                bucket["__extra_domain"] = bucket.pop("__domain")
+            elif not groupby:
+                bucket["__extra_domain"] = []
+            for bare, full in agg_renames:
+                if bare in bucket and full != bare:
+                    bucket[full] = bucket.pop(bare)
+            normalized.append({k: v for k, v in bucket.items() if k in allowed_keys})
+        return normalized
+
+    @staticmethod
+    def _aggregate_error_message(model: str, user_id: Optional[int], message: str) -> str:
+        """Turn an Odoo refusal on the aggregate path into an actionable message."""
+        if "not permitted via MCP impersonation" in message:
+            return (
+                f"Cannot aggregate {model} as user {user_id}: the Odoo proxy module "
+                "(foxlogik_mcp_proxy) does not allow this grouping method for "
+                "impersonated calls. Upgrade foxlogik_mcp_proxy on the server."
+            )
+        lowered = message.lower()
+        if "not allowed to access" in lowered or "accesserror" in lowered:
+            who = f"user {user_id}" if user_id is not None else "the service account"
+            return (
+                f"Access denied: {who} cannot read {model}, so it cannot be aggregated. "
+                f"{message} Retrying with the same arguments will fail identically — "
+                "request the missing group, or aggregate a model you have access to."
+            )
+        return message
+
+    async def _handle_aggregate_records_tool(
+        self,
+        model: str,
+        groupby: Optional[Any],
+        aggregates: Optional[Any],
+        domain: Optional[Any],
+        order: Optional[str],
+        limit: Optional[int],
+        offset: int,
+        ctx=None,
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Handle aggregate_records tool request."""
+        try:
+            with perf_logger.track_operation("tool_aggregate_records", model=model):
+                # Same gate as search_records: model must be MCP-readable.
+                self.access_controller.validate_model_access(model, "read")
+                await self._ctx_info(ctx, f"Aggregating {model}...")
+
+                if not self.connection.is_authenticated:
+                    raise ValidationError("Not authenticated with Odoo")
+
+                groupby_list = self._parse_string_list(groupby, "groupby")
+                aggregate_list = self._parse_string_list(aggregates, "aggregates")
+                # Default to ['__count'] so each group carries a count.
+                effective_aggregates = aggregate_list or ["__count"]
+
+                parsed_domain = self._guard_domain(model, self._parse_domain_input(domain))
+                self._guard_fields(
+                    model,
+                    [g.split(":", 1)[0] for g in groupby_list],
+                    user_id=user_id,
+                    context="groupby fields",
+                    extra=[a.split(":", 1)[0] for a in effective_aggregates if a != "__count"]
+                    + domain_field_names(parsed_domain),
+                )
+                self._check_aggregate_types(model, effective_aggregates, user_id=user_id)
+
+                if limit is not None and limit < 0:
+                    raise ValidationError(f"limit must be 0 or more, got {limit}")
+                if not limit:
+                    limit = self.config.default_limit
+                elif limit > self.config.max_limit:
+                    limit = self.config.max_limit
+                if offset is None or offset < 0:
+                    raise ValidationError(f"offset must be 0 or more, got {offset}")
+
+                # Peek one group past the page to detect truncation.
+                peek_limit = limit + 1
+
+                # Version dispatch: formatted_read_group is Odoo 19+ only.
+                # Unknown version (None) → assume newer and let a fault surface.
+                major = self.connection.get_major_version()
+                if major is not None and major < 19:
+                    if major < 17:
+                        id_aggregates = sorted(
+                            {
+                                a
+                                for a in effective_aggregates
+                                if a != "__count" and a.split(":", 1)[0] == "id"
+                            }
+                        )
+                        if id_aggregates:
+                            raise ValidationError(
+                                f"Cannot aggregate {', '.join(id_aggregates)} on Odoo "
+                                f"{major}: read_group drops the 'id' key before returning. "
+                                "Use '__count' for a row count."
+                            )
+                    groups = self._call_read_group_normalized(
+                        model,
+                        parsed_domain,
+                        groupby_list,
+                        effective_aggregates,
+                        order,
+                        peek_limit,
+                        offset,
+                        user_id=user_id,
+                    )
+                else:
+                    kwargs: Dict[str, Any] = {
+                        "groupby": groupby_list,
+                        "aggregates": effective_aggregates,
+                        "limit": peek_limit,
+                        "offset": offset,
+                    }
+                    if order is not None:
+                        kwargs["order"] = order
+                    groups = self._execute_for(
+                        user_id, model, "formatted_read_group", [parsed_domain], kwargs
+                    )
+                groups = list(groups or [])
+
+                has_more = len(groups) > limit
+                if has_more:
+                    groups = groups[:limit]
+                next_hint = (
+                    f"aggregate_records with offset={offset + limit}, limit={limit}"
+                    if has_more
+                    else None
+                )
+                await self._ctx_info(ctx, f"Returning {len(groups)} groups")
+
+                return {
+                    "groups": groups,
+                    "model": model,
+                    "groupby": groupby_list,
+                    "aggregates": effective_aggregates,
+                    "has_more": has_more,
+                    "next_hint": next_hint,
+                    "user_scoped": user_id is not None,
+                }
+
+        except ValidationError:
+            raise
+        except AccessControlError as e:
+            raise ValidationError(f"Access denied: {e}") from e
+        except OdooConnectionError as e:
+            raise ValidationError(
+                self._aggregate_error_message(model, user_id, f"Connection error: {e}")
+            ) from e
+        except Exception as e:
+            logger.error(f"Error in aggregate_records tool: {e}")
+            sanitized_msg = ErrorSanitizer.sanitize_message(str(e))
+            raise ValidationError(
+                self._aggregate_error_message(
+                    model, user_id, f"Aggregation failed: {sanitized_msg}"
+                )
+            ) from e
 
 
 def register_tools(

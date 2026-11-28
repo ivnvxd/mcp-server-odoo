@@ -545,6 +545,22 @@ Retrieve a specific record by ID.
 - Specify field list: Returns only those specific fields
 - Use `["__all__"]`: Returns all fields without metadata
 
+### `aggregate_records`
+Counts and totals computed by Odoo (`read_group` on Odoo 17/18, `formatted_read_group` on 19+), instead of listing rows.
+
+```json
+{
+  "model": "sale.order",
+  "groupby": ["date_order:month"],
+  "aggregates": ["__count", "amount_total:sum"],
+  "domain": [["state", "in", ["sale", "done"]]],
+  "order": "amount_total:sum desc",
+  "limit": 12
+}
+```
+
+Omit `groupby` for one overall row; omit `aggregates` for counts only. Each group carries `__extra_domain` for drilldown (AND it with your `domain` in `search_records`). Before Odoo 19 only one aggregate per field, and not over a groupby field. Like the other tools it runs as the pinned user (`ODOO_ACT_AS_UID`) or `user_id`, so totals only cover records that user can read, and a model the user cannot read is refused.
+
 ### `list_models`
 List all models enabled for MCP access.
 

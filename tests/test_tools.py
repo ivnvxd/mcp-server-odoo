@@ -88,6 +88,7 @@ class TestOdooToolHandler:
             "get_fields",
             "get_defaults",
             "check_access",
+            "aggregate_records",
         }
         assert set(mock_app._tools.keys()) == expected_tools
 

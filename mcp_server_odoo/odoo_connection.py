@@ -1151,6 +1151,10 @@ class OdooConnection:
             logger.error(f"Failed to get server version: {e}")
             return None
 
+    def get_major_version(self) -> Optional[int]:
+        """Public accessor for the Odoo major version (e.g. 17), or None if unknown."""
+        return self._get_major_version()
+
     def _get_major_version(self) -> Optional[int]:
         """Extract the major version number from the server version string.
 

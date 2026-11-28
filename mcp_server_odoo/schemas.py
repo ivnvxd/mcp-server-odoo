@@ -228,3 +228,37 @@ class CallMethodResult(BaseModel):
     method: str = Field(description="Method name that was called")
     result: Any = Field(default=None, description="Raw return value from the Odoo method")
     message: str = Field(description="Human-readable confirmation message")
+
+
+# --- Aggregate Records ---
+
+
+class AggregateResult(BaseModel):
+    """Result of a server-side aggregation via Odoo's grouping methods."""
+
+    groups: List[Dict[str, Any]] = Field(
+        description=(
+            "Aggregated buckets. Each entry contains the groupby keys, '__count', "
+            "any requested aggregate values, and '__extra_domain' for drilldown. "
+            "AND '__extra_domain' with the 'domain' you passed to reproduce the "
+            "group's records, e.g. search_records(domain=[*your_domain, "
+            "*group['__extra_domain']]). On Odoo 19 it is only the group's own "
+            "condition; on older servers it is already the full domain (your "
+            "filter included) — re-ANDing is idempotent either way."
+        )
+    )
+    model: str = Field(description="Odoo model name that was aggregated")
+    groupby: List[str] = Field(description="Group-by expressions that were applied")
+    aggregates: List[str] = Field(description="Aggregate expressions that were applied")
+    has_more: bool = Field(
+        default=False,
+        description="True when more groups exist beyond this page (detected via a limit+1 peek)",
+    )
+    next_hint: Optional[str] = Field(
+        default=None,
+        description="Suggested follow-up call for the next page (set only when has_more)",
+    )
+    user_scoped: bool = Field(
+        default=False,
+        description="True when the aggregation ran as a specific (pinned or given) user",
+    )
